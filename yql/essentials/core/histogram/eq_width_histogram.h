@@ -6,8 +6,9 @@
 #include <util/system/types.h>
 
 namespace NKikimr {
+namespace OptStatistics {
 
-class KHistogram {
+class KEqWidthHistogram {
 public:
   struct KBucket {
     ui64 count{0};
@@ -18,9 +19,9 @@ public:
     ui8 end[8];
   };
 
-  KHistogram(ui32 numBuckets = 200, ui8 type = 0);
-  KHistogram(const char *str, ui64 size);
-  ~KHistogram() { delete[] buckets; }
+  KEqWidthHistogram(ui32 numBuckets = 200, ui8 type = 0);
+  KEqWidthHistogram(const char *str, ui64 size);
+  ~KEqWidthHistogram() { delete[] buckets; }
 
   template <typename T> void Initialize(const KBucketRange &range);
   template <typename T> ui32 FindBucketIndex(T val);
@@ -39,9 +40,9 @@ private:
   KBucket *buckets;
 };
 
-class KHistogramEvaluator {
+class KEqWidthHistogramEvaluator {
 public:
-  KHistogramEvaluator(std::shared_ptr<KHistogram> histogram);
+  KEqWidthHistogramEvaluator(std::shared_ptr<KEqWidthHistogram> histogram);
 
   template <typename T> ui64 EvaluateLessOrEqual(T val);
   template <typename T> ui64 EvaluateGreaterOrEqual(T val);
@@ -51,9 +52,10 @@ public:
 private:
   void CreatePrefixSum();
   void CreateSuffixSum();
-  std::shared_ptr<KHistogram> histogram;
+  std::shared_ptr<KEqWidthHistogram> histogram;
   TVector<ui64> prefixSum;
   TVector<ui64> suffixSum;
   ui32 numBuckets;
 };
+}
 } // namespace NKikimr

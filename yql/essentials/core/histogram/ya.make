@@ -1,8 +1,8 @@
 LIBRARY()
 
 SRCS(
-    histogram.h
-    histogram.cpp
+    eq_width_histogram.h
+    eq_width_histogram.cpp
 )
 
 END()
