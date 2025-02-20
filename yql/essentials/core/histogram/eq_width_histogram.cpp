@@ -6,8 +6,9 @@
 namespace NKikimr {
 namespace NOptimizerHistograms {
 
-TEqWidthHistogram::TEqWidthHistogram(ui32 numBuckets, EHistogramType type)
-    : numBuckets(numBuckets), type(type), buckets(numBuckets) {
+TEqWidthHistogram::TEqWidthHistogram(ui32 numBuckets, EHistogramValueType valueType)
+    : numBuckets(numBuckets), valueType(valueType), buckets(numBuckets) {
+  // Exptected at least one bucket for histogram.
   Y_ASSERT(numBuckets >= 1);
 }
 
@@ -15,9 +16,10 @@ TEqWidthHistogram::TEqWidthHistogram(const char *str, ui64 size) {
   Y_ASSERT(str && size);
   numBuckets = *reinterpret_cast<const ui32 *>(str);
   Y_ABORT_UNLESS(GetStaticSize(numBuckets) == size);
-  type = *reinterpret_cast<const EHistogramType *>(str + sizeof(numBuckets));
+  valueType =
+      *reinterpret_cast<const EHistogramValueType *>(str + sizeof(numBuckets));
   buckets = TVector<TBucket>(numBuckets);
-  ui32 offset = sizeof(numBuckets) + sizeof(type);
+  ui32 offset = sizeof(numBuckets) + sizeof(valueType);
   for (ui32 i = 0; i < numBuckets; ++i) {
     std::memcpy(&buckets[i], reinterpret_cast<const char *>(str + offset),
                 sizeof(TBucket));
@@ -37,21 +39,28 @@ void TEqWidthHistogram::InitializeBuckets(
 }
 
 ui64 TEqWidthHistogram::GetStaticSize(ui64 nBuckets) const {
-  return sizeof(numBuckets) + sizeof(type) + sizeof(TBucket) * nBuckets;
+  return sizeof(numBuckets) + sizeof(valueType) + sizeof(TBucket) * nBuckets;
 }
 
+// Binary layout:
+// [1 byte: histogram type][1 byte: value type][8 byte: number of buckets]
+// [sizeof(Bucket)[0]...sizeof(Bucket)[n]]
 std::unique_ptr<char> TEqWidthHistogram::Serialize() const {
-  std::unique_ptr<char> data(new char[GetStaticSize(numBuckets)]);
+  const auto binarySize = sizeof(EHistogramType) + GetStaticSize(numBuckets);
+  std::unique_ptr<char> binaryData(new char[binarySize]);
   ui32 offset = 0;
-  std::memcpy(data.get(), &numBuckets, sizeof(numBuckets));
+  EHistogramType hType = EHistogramType::EqualWidth;
+  std::memcpy(binaryData.get(), &hType, sizeof(hType));
+  offset += sizeof(hType);
+  std::memcpy(binaryData.get() + offset, &numBuckets, sizeof(numBuckets));
   offset += sizeof(numBuckets);
-  std::memcpy(data.get() + offset, &type, sizeof(type));
-  offset += sizeof(type);
+  std::memcpy(binaryData.get() + offset, &valueType, sizeof(valueType));
+  offset += sizeof(valueType);
   for (ui32 i = 0; i < numBuckets; ++i) {
-    std::memcpy(data.get() + offset, &buckets[i], sizeof(TBucket));
+    std::memcpy(binaryData.get() + offset, &buckets[i], sizeof(TBucket));
     offset += sizeof(TBucket);
   }
-  return data;
+  return binaryData;
 }
 
 template <typename T> ui32 TEqWidthHistogram::FindBucketIndex(T val) const {
@@ -110,7 +119,7 @@ void TEqWidthHistogramEvaluator::CreatePrefixSum() {
 
 void TEqWidthHistogramEvaluator::CreateSuffixSum() {
   suffixSum[numBuckets - 1] = histogram->GetNumElementsInBucket(numBuckets - 1);
-  for (i32 i = numBuckets - 2; i >= 0; --i) {
+  for (i32 i = static_cast<i32>(numBuckets) - 2; i >= 0; --i) {
     suffixSum[i] = suffixSum[i + 1] + histogram->GetNumElementsInBucket(i);
   }
 }

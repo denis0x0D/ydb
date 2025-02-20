@@ -7,7 +7,19 @@
 
 namespace NKikimr {
 namespace NOptimizerHistograms {
-enum class EHistogramType : ui8 { Int32, Int64, Uint32, Uint64, NotSupported };
+
+// Represents value types supported by histogram.
+enum class EHistogramValueType : ui8 {
+  Int32,
+  Int64,
+  Uint32,
+  Uint64,
+  NotSupported
+};
+
+// Represents histogram types.
+enum class EHistogramType : ui8 { EqualWidth, Unknown };
+
 // This class represents an `equal width` histogram.
 class TEqWidthHistogram {
 public:
@@ -24,7 +36,8 @@ public:
   };
 
   TEqWidthHistogram(ui32 numBuckets = 1,
-                    EHistogramType type = EHistogramType::Int32);
+                    EHistogramValueType type = EHistogramValueType::Int32);
+  // From serialized data.
   TEqWidthHistogram(const char *str, ui64 size);
 
   // Adds the given `val` to a histogram.
@@ -34,7 +47,7 @@ public:
   // Returns a number of buckets in a histogram.
   ui64 GetNumBuckets() const { return numBuckets; }
   // Returns histogram type.
-  EHistogramType GetType() const { return type; }
+  EHistogramValueType GetType() const { return valueType; }
   // Returns a number of elements in a bucket by the given `index`.
   ui64 GetNumElementsInBucket(ui32 index) const;
   // Initializes buckets with a given `range`.
@@ -49,7 +62,7 @@ private:
   template <typename T> static inline void StoreTo(uint8_t storage[8], T value);
 
   ui32 numBuckets;
-  EHistogramType type;
+  EHistogramValueType valueType;
   TVector<TBucket> buckets;
 };
 
