@@ -1,6 +1,6 @@
 #pragma once
 
-#include <memory>
+//#include <memory>
 #include <util/generic/strbuf.h>
 #include <util/generic/vector.h>
 #include <util/stream/output.h>
@@ -9,6 +9,7 @@
 namespace NKikimr {
 namespace NOptimizerHistograms {
 
+// Helpers methods.
 template <typename T> T LoadFrom(const ui8 *storage) {
   T val;
   std::memcpy(&val, storage, sizeof(T));
@@ -31,7 +32,10 @@ enum class EHistogramValueType : ui8 {
 // Represents histogram types.
 enum class EHistogramType : ui8 { EqualWidth, Unknown };
 
-// This class represents an `equal width` histogram.
+// This class represents an `Equal-width` histogram.
+// Each bucket represents a range of contiguous values of equal width, and the
+// aggregate summary stored in the bucket is the number of rows whose value lies
+// within that range.
 class TEqWidthHistogram {
 public:
   struct TBucket {
@@ -54,7 +58,7 @@ public:
   // Adds the given `val` to a histogram.
   template <typename T> void AddElement(T val) {
     const auto index = FindBucketIndex(val);
-    // Comment here
+    // The given `index` in range [0, numBuckets - 1].
     if (!index || (LoadFrom<T>(buckets[index].start) <= val)) {
       buckets[index].count++;
     } else {

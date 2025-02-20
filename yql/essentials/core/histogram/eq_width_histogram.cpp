@@ -3,8 +3,7 @@
 namespace NKikimr {
 namespace NOptimizerHistograms {
 
-TEqWidthHistogram::TEqWidthHistogram(ui32 numBuckets,
-                                     EHistogramValueType valueType)
+TEqWidthHistogram::TEqWidthHistogram(ui32 numBuckets, EHistogramValueType valueType)
     : numBuckets(numBuckets), valueType(valueType), buckets(numBuckets) {
   // Exptected at least one bucket for histogram.
   Y_ASSERT(numBuckets >= 1);
@@ -14,13 +13,11 @@ TEqWidthHistogram::TEqWidthHistogram(const char *str, ui64 size) {
   Y_ASSERT(str && size);
   numBuckets = *reinterpret_cast<const ui32 *>(str);
   Y_ABORT_UNLESS(GetStaticSize(numBuckets) == size);
-  valueType =
-      *reinterpret_cast<const EHistogramValueType *>(str + sizeof(numBuckets));
+  valueType = *reinterpret_cast<const EHistogramValueType *>(str + sizeof(numBuckets));
   buckets = TVector<TBucket>(numBuckets);
   ui32 offset = sizeof(numBuckets) + sizeof(valueType);
   for (ui32 i = 0; i < numBuckets; ++i) {
-    std::memcpy(&buckets[i], reinterpret_cast<const char *>(str + offset),
-                sizeof(TBucket));
+    std::memcpy(&buckets[i], reinterpret_cast<const char *>(str + offset), sizeof(TBucket));
     offset += sizeof(TBucket);
   }
 }
@@ -50,8 +47,7 @@ std::unique_ptr<char> TEqWidthHistogram::Serialize() const {
   return binaryData;
 }
 
-TEqWidthHistogramEvaluator::TEqWidthHistogramEvaluator(
-    std::shared_ptr<TEqWidthHistogram> histogram)
+TEqWidthHistogramEvaluator::TEqWidthHistogramEvaluator(std::shared_ptr<TEqWidthHistogram> histogram)
     : histogram(histogram), numBuckets(histogram->GetNumBuckets()) {
   prefixSum = TVector<ui64>(numBuckets);
   suffixSum = TVector<ui64>(numBuckets);
@@ -72,5 +68,5 @@ void TEqWidthHistogramEvaluator::CreateSuffixSum() {
     suffixSum[i] = suffixSum[i + 1] + histogram->GetNumElementsInBucket(i);
   }
 }
-} // namespace NOptimizerHistograms
-} // namespace NKikimr
+}  // namespace NOptimizerHistograms
+}  // namespace NKikimr

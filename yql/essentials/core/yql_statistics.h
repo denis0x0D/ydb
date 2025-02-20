@@ -1,6 +1,7 @@
 #pragma once
 
 #include <yql/essentials/core/minsketch/count_min_sketch.h>
+#include <yql/essentials/core/histogram/eq_width_histogram.h>
 
 #include <library/cpp/json/json_reader.h>
 
@@ -35,6 +36,7 @@ struct TColumnStatistics {
     std::optional<double> NumUniqueVals;
     std::optional<double> HyperLogLog;
     std::shared_ptr<NKikimr::TCountMinSketch> CountMinSketch;
+    std::shared_ptr<NKikimr::NOptimizerHistograms::TEqWidthHistogramEvaluator> EqWidthHistogramEvaluator;
     TString Type;
 
     TColumnStatistics() {}

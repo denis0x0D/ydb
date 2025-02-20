@@ -174,6 +174,22 @@ std::shared_ptr<TOptimizerStatistics> NYql::OverrideStatistics(const NYql::TOpti
                 Base64StrictDecode(countMinBase64, countMinRaw);
                 cStat.CountMinSketch.reset(NKikimr::TCountMinSketch::FromString(countMinRaw.data(), countMinRaw.size()));
             }
+            if (auto eqWidthHistogram = colMap.find("eq-width-histogram"); eqWidthHistogram != colMap.end()) {
+              TString histogramBase64 = eqWidthHistogram->second.GetStringSafe();
+
+              TString histogramBinary{};
+              Base64StrictDecode(histogramBase64, histogramBinary);
+              // Only `Eq-width` is supported.
+              Y_ASSERT(histogramBinary.size() >= sizeof(NKikimr::NOptimizerHistograms::EHistogramType) &&
+                       *reinterpret_cast<const NKikimr::NOptimizerHistograms::EHistogramType*>(histogramBinary.data()) ==
+                           NKikimr::NOptimizerHistograms::EHistogramType::EqualWidth);
+
+              const auto histogramSize = histogramBinary.size() - sizeof(NKikimr::NOptimizerHistograms::EHistogramType);
+              auto histogram = std::make_shared<NKikimr::NOptimizerHistograms::TEqWidthHistogram>(
+                  histogramBinary.data() + sizeof(NKikimr::NOptimizerHistograms::EHistogramType), histogramSize);
+              cStat.EqWidthHistogramEvaluator =
+                  std::make_shared<NKikimr::NOptimizerHistograms::TEqWidthHistogramEvaluator>(histogram);
+            }
 
             res->ColumnStatistics->Data[columnName] = cStat;
         }
