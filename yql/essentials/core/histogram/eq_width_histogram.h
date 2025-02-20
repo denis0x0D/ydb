@@ -3,10 +3,21 @@
 #include <memory>
 #include <util/generic/strbuf.h>
 #include <util/generic/vector.h>
+#include <util/stream/output.h>
 #include <util/system/types.h>
 
 namespace NKikimr {
 namespace NOptimizerHistograms {
+
+template <typename T> T LoadFrom(const ui8 *storage) {
+  T val;
+  std::memcpy(&val, storage, sizeof(T));
+  return val;
+}
+
+template <typename T> void StoreTo(ui8 *storage, T value) {
+  std::memcpy(storage, &value, sizeof(T));
+}
 
 // Represents value types supported by histogram.
 enum class EHistogramValueType : ui8 {
@@ -41,26 +52,67 @@ public:
   TEqWidthHistogram(const char *str, ui64 size);
 
   // Adds the given `val` to a histogram.
-  template <typename T> void AddElement(T val);
+  template <typename T> void AddElement(T val) {
+    const auto index = FindBucketIndex(val);
+    // Comment here
+    if (!index || (LoadFrom<T>(buckets[index].start) <= val)) {
+      buckets[index].count++;
+    } else {
+      buckets[index - 1].count++;
+    }
+  }
+
   // Returns an index of the bucket which stores the given `val`.
-  template <typename T> ui32 FindBucketIndex(T val) const;
+  // Returned index in range [0, numBuckets - 1].
+  template <typename T> ui32 FindBucketIndex(T val) const {
+    ui32 start = 0;
+    ui32 end = numBuckets - 1;
+    while (start < end) {
+      auto it = start + (end - start) / 2;
+      if (LoadFrom<T>(buckets[it].start) < val) {
+        start = it + 1;
+      } else {
+        end = it;
+      }
+    }
+    return start;
+  }
+
+  // FIXME: Remove before publish
+  template <typename T> void PrintBuckets() {
+    for (uint32_t i = 0; i < numBuckets; ++i) {
+      T start = LoadFrom<T>(buckets[i].start);
+      uint64_t count = buckets[i].count;
+      Cout << "[" << count << " , " << start << "]\n ";
+    }
+  }
+
   // Returns a number of buckets in a histogram.
   ui64 GetNumBuckets() const { return numBuckets; }
   // Returns histogram type.
   EHistogramValueType GetType() const { return valueType; }
   // Returns a number of elements in a bucket by the given `index`.
-  ui64 GetNumElementsInBucket(ui32 index) const;
+  ui64 GetNumElementsInBucket(ui32 index) const { return buckets[index].count; }
+
   // Initializes buckets with a given `range`.
-  template <typename T> void InitializeBuckets(const TBucketRange &range);
+  template <typename T> void InitializeBuckets(const TBucketRange &range) {
+    // TODO: Proper diff calculation for types like `string`, `datetime`, etc.
+    T rangeLen = LoadFrom<T>(range.end) - LoadFrom<T>(range.start);
+    std::memcpy(buckets[0].start, range.start, sizeof(range.start));
+    for (ui32 i = 1; i < numBuckets; ++i) {
+      auto prevStart = LoadFrom<T>(buckets[i - 1].start);
+      StoreTo<T>(buckets[i].start, prevStart + rangeLen);
+    }
+  }
+
   // Seriailizes to a binary representation.
   std::unique_ptr<char> Serialize() const;
-
-private:
   // Helper methods.
   ui64 GetStaticSize(ui64 size) const;
-  template <typename T> static inline T LoadFrom(uint8_t storage[8]);
-  template <typename T> static inline void StoreTo(uint8_t storage[8], T value);
+  // Returns buckets.
+  TVector<TBucket> &GetBuckets() { return buckets; }
 
+private:
   ui32 numBuckets;
   EHistogramValueType valueType;
   TVector<TBucket> buckets;
@@ -70,10 +122,19 @@ class TEqWidthHistogramEvaluator {
 public:
   TEqWidthHistogramEvaluator(std::shared_ptr<TEqWidthHistogram> histogram);
 
-  template <typename T> ui64 EvaluateLessOrEqual(T val);
-  template <typename T> ui64 EvaluateGreaterOrEqual(T val);
-  template <typename T> ui64 EvaluateLessThan(T val);
-  template <typename T> ui64 EvaluateGreaterThan(T val);
+  template <typename T> ui64 EvaluateLessOrEqual(T val) {
+    const auto index = histogram->FindBucketIndex(val);
+    if (!index || (LoadFrom<T>(histogram->GetBuckets()[index].start) <= val))
+      return prefixSum[index];
+    return prefixSum[index - 1];
+  }
+
+  template <typename T> ui64 EvaluateGreaterOrEqual(T val) {
+    const auto index = histogram->FindBucketIndex(val);
+    if (!index || (LoadFrom<T>(histogram->GetBuckets()[index].start) <= val))
+      return suffixSum[index];
+    return suffixSum[index - 1];
+  }
 
 private:
   void CreatePrefixSum();
