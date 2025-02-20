@@ -1,8 +1,5 @@
 #include "eq_width_histogram.h"
 
-#include <stdlib.h>
-#include <util/system/compiler.h>
-
 namespace NKikimr {
 namespace NOptimizerHistograms {
 
@@ -43,7 +40,7 @@ ui64 TEqWidthHistogram::GetStaticSize(ui64 nBuckets) const {
 }
 
 // Binary layout:
-// [1 byte: histogram type][1 byte: value type][8 byte: number of buckets]
+// [1 byte: histogram type][8 byte: number of buckets][1 byte: value type]
 // [sizeof(Bucket)[0]...sizeof(Bucket)[n]]
 std::unique_ptr<char> TEqWidthHistogram::Serialize() const {
   const auto binarySize = sizeof(EHistogramType) + GetStaticSize(numBuckets);
