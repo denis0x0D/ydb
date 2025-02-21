@@ -1,6 +1,6 @@
-#include "eq_width_histogram.h"
-
 #include <library/cpp/testing/unittest/registar.h>
+
+#include "eq_width_histogram.h"
 
 namespace NKikimr {
 namespace NOptimizerHistograms {
@@ -14,8 +14,7 @@ Y_UNIT_TEST_SUITE(EqWidthHistogram) {
     histogram->InitializeBuckets<ui32>(bucketRange);
     UNIT_ASSERT_VALUES_EQUAL(histogram->GetNumBuckets(), 10);
     // From range [0, 9] 10 elements.
-    for (ui32 i = 0; i < 10; ++i)
-        histogram->AddElement<ui32>(i);
+    for (ui32 i = 0; i < 10; ++i) histogram->AddElement<ui32>(i);
     histogram->PrintBuckets<ui32>();
     TEqWidthHistogramEvaluator evaluator(histogram);
     UNIT_ASSERT_VALUES_EQUAL(evaluator.EvaluateLessOrEqual<ui32>(9), 10);
@@ -26,5 +25,5 @@ Y_UNIT_TEST_SUITE(EqWidthHistogram) {
     // TODO Add test.
   }
 }
-} // namespace NOptimizerHistograms
-} // namespace NKikimr
+}  // namespace NOptimizerHistograms
+}  // namespace NKikimr
