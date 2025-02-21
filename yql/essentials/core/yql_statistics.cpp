@@ -179,14 +179,8 @@ std::shared_ptr<TOptimizerStatistics> NYql::OverrideStatistics(const NYql::TOpti
 
               TString histogramBinary{};
               Base64StrictDecode(histogramBase64, histogramBinary);
-              // Only `Eq-width` is supported.
-              Y_ASSERT(histogramBinary.size() >= sizeof(NKikimr::NOptimizerHistograms::EHistogramType) &&
-                       *reinterpret_cast<const NKikimr::NOptimizerHistograms::EHistogramType*>(histogramBinary.data()) ==
-                           NKikimr::NOptimizerHistograms::EHistogramType::EqualWidth);
-
-              const auto histogramSize = histogramBinary.size() - sizeof(NKikimr::NOptimizerHistograms::EHistogramType);
               auto histogram = std::make_shared<NKikimr::NOptimizerHistograms::TEqWidthHistogram>(
-                  histogramBinary.data() + sizeof(NKikimr::NOptimizerHistograms::EHistogramType), histogramSize);
+                  histogramBinary.data(), histogramBinary.size());
               cStat.EqWidthHistogramEvaluator =
                   std::make_shared<NKikimr::NOptimizerHistograms::TEqWidthHistogramEvaluator>(histogram);
             }

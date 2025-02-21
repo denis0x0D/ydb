@@ -29,9 +29,6 @@ enum class EHistogramValueType : ui8 {
   NotSupported
 };
 
-// Represents histogram types.
-enum class EHistogramType : ui8 { EqualWidth, Unknown };
-
 // This class represents an `Equal-width` histogram.
 // Each bucket represents a range of contiguous values of equal width, and the
 // aggregate summary stored in the bucket is the number of rows whose value lies
@@ -112,7 +109,7 @@ public:
   // Seriailizes to a binary representation.
   std::unique_ptr<char> Serialize() const;
   // Helper methods.
-  ui64 GetStaticSize(ui64 size) const;
+  ui64 GetStaticSize(ui32 nBuckets) const;
   // Returns buckets.
   TVector<TBucket> &GetBuckets() { return buckets; }
 

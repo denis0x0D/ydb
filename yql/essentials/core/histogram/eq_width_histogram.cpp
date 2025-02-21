@@ -22,21 +22,18 @@ TEqWidthHistogram::TEqWidthHistogram(const char *str, ui64 size) {
   }
 }
 
-ui64 TEqWidthHistogram::GetStaticSize(ui64 nBuckets) const {
+ui64 TEqWidthHistogram::GetStaticSize(ui32 nBuckets) const {
   return sizeof(numBuckets) + sizeof(valueType) + sizeof(TBucket) * nBuckets;
 }
 
 // Binary layout:
-// [1 byte: histogram type][8 byte: number of buckets][1 byte: value type]
+// [4 byte: number of buckets][1 byte: value type]
 // [sizeof(Bucket)[0]... sizeof(Bucket)[n]]
 std::unique_ptr<char> TEqWidthHistogram::Serialize() const {
-  const auto binarySize = sizeof(EHistogramType) + GetStaticSize(numBuckets);
+  const auto binarySize = GetStaticSize(numBuckets);
   std::unique_ptr<char> binaryData(new char[binarySize]);
   ui32 offset = 0;
-  EHistogramType hType = EHistogramType::EqualWidth;
-  std::memcpy(binaryData.get(), &hType, sizeof(hType));
-  offset += sizeof(hType);
-  std::memcpy(binaryData.get() + offset, &numBuckets, sizeof(numBuckets));
+  std::memcpy(binaryData.get(), &numBuckets, sizeof(numBuckets));
   offset += sizeof(numBuckets);
   std::memcpy(binaryData.get() + offset, &valueType, sizeof(valueType));
   offset += sizeof(valueType);
