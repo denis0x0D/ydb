@@ -116,12 +116,13 @@ class TEqWidthHistogram {
   TVector<TBucket> buckets;
 };
 
+// This class represents a machinery to estimate a values in a histogram.
 class TEqWidthHistogramEstimator {
  public:
   TEqWidthHistogramEstimator(std::shared_ptr<TEqWidthHistogram> histogram);
 
   template <typename T>
-  ui64 EstimateLessOrEqual(T val) {
+  ui64 EstimateLessOrEqual(T val) const {
     const auto index = histogram->FindBucketIndex(val);
     if (!index || (LoadFrom<T>(histogram->GetBuckets()[index].start) <= val)) {
       return prefixSum[index];
@@ -130,7 +131,7 @@ class TEqWidthHistogramEstimator {
   }
 
   template <typename T>
-  ui64 EstimateGreaterOrEqual(T val) {
+  ui64 EstimateGreaterOrEqual(T val) const {
     const auto index = histogram->FindBucketIndex(val);
     if (!index || (LoadFrom<T>(histogram->GetBuckets()[index].start) <= val)) {
       return suffixSum[index];
