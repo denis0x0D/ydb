@@ -30,8 +30,8 @@ ui64 TEqWidthHistogram::GetBinarySize(ui32 nBuckets) const {
 // Binary layout:
 // [4 byte: number of buckets][1 byte: value type]
 // [sizeof(Bucket)[0]... sizeof(Bucket)[n]].
-std::unique_ptr<char> TEqWidthHistogram::Serialize() const {
-  const auto binarySize = GetBinarySize(GetNumBuckets());
+std::unique_ptr<char> TEqWidthHistogram::Serialize(ui64 &binarySize) const {
+  binarySize = GetBinarySize(GetNumBuckets());
   std::unique_ptr<char> binaryData(new char[binarySize]);
   ui32 offset = 0;
   const ui32 numBuckets = GetNumBuckets();

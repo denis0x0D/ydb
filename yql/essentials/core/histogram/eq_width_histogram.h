@@ -22,7 +22,7 @@ void StoreTo(ui8 *storage, T value) {
 }
 
 // Represents value types supported by histogram.
-enum class EHistogramValueType : ui8 { Int32, Int64, Uint32, Uint64, NotSupported };
+enum class EHistogramValueType : ui8 { Int32, Int64, Uint32, Uint64, Double, NotSupported };
 
 // This class represents an `Equal-width` histogram.
 // Each bucket represents a range of contiguous values of equal width, and the
@@ -104,14 +104,14 @@ class TEqWidthHistogram {
     }
   }
 
-  // Seriailizes to a binary representation.
-  std::unique_ptr<char> Serialize() const;
-  // Returns binary size of the histogram.
-  ui64 GetBinarySize(ui32 nBuckets) const;
+  // Seriailizes to a binary representation
+  std::unique_ptr<char> Serialize(ui64 &binSize) const;
   // Returns buckets.
   TVector<TBucket> &GetBuckets() { return buckets; }
 
  private:
+  // Returns binary size of the histogram.
+  ui64 GetBinarySize(ui32 nBuckets) const;
   EHistogramValueType valueType;
   TVector<TBucket> buckets;
 };
