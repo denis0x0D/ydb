@@ -49,7 +49,7 @@ std::unique_ptr<char> TEqWidthHistogram::Serialize() const {
   return binaryData;
 }
 
-TEqWidthHistogramEvaluator::TEqWidthHistogramEvaluator(std::shared_ptr<TEqWidthHistogram> histogram)
+TEqWidthHistogramEstimator::TEqWidthHistogramEstimator(std::shared_ptr<TEqWidthHistogram> histogram)
     : histogram(histogram) {
   const auto numBuckets = histogram->GetNumBuckets();
   prefixSum = TVector<ui64>(numBuckets);
@@ -58,14 +58,14 @@ TEqWidthHistogramEvaluator::TEqWidthHistogramEvaluator(std::shared_ptr<TEqWidthH
   CreateSuffixSum(numBuckets);
 }
 
-void TEqWidthHistogramEvaluator::CreatePrefixSum(ui32 numBuckets) {
+void TEqWidthHistogramEstimator::CreatePrefixSum(ui32 numBuckets) {
   prefixSum[0] = histogram->GetNumElementsInBucket(0);
   for (ui32 i = 1; i < numBuckets; ++i) {
     prefixSum[i] = prefixSum[i - 1] + histogram->GetNumElementsInBucket(i);
   }
 }
 
-void TEqWidthHistogramEvaluator::CreateSuffixSum(ui32 numBuckets) {
+void TEqWidthHistogramEstimator::CreateSuffixSum(ui32 numBuckets) {
   suffixSum[numBuckets - 1] = histogram->GetNumElementsInBucket(numBuckets - 1);
   for (i32 i = static_cast<i32>(numBuckets) - 2; i >= 0; --i) {
     suffixSum[i] = suffixSum[i + 1] + histogram->GetNumElementsInBucket(i);

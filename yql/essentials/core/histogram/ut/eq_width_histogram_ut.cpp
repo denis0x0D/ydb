@@ -16,9 +16,9 @@ Y_UNIT_TEST_SUITE(EqWidthHistogram) {
     // From range [0, 9] 10 elements.
     for (ui32 i = 0; i < 10; ++i) histogram->AddElement<ui32>(i);
     histogram->PrintBuckets<ui32>();
-    TEqWidthHistogramEvaluator evaluator(histogram);
-    UNIT_ASSERT_VALUES_EQUAL(evaluator.EvaluateLessOrEqual<ui32>(9), 10);
-    UNIT_ASSERT_VALUES_EQUAL(evaluator.EvaluateGreaterOrEqual<ui32>(10), 0);
+    TEqWidthHistogramEstimator estimator(histogram);
+    UNIT_ASSERT_VALUES_EQUAL(estimator.EstimateLessOrEqual<ui32>(9), 10);
+    UNIT_ASSERT_VALUES_EQUAL(estimator.EstimateGreaterOrEqual<ui32>(10), 0);
   }
 
   Y_UNIT_TEST(Serialization) {
