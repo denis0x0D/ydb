@@ -116,7 +116,7 @@ class TEqWidthHistogram {
   TVector<TBucket> buckets;
 };
 
-// This class represents a machinery to estimate a values in a histogram.
+// This class represents a machinery to estimate a value in a histogram.
 class TEqWidthHistogramEstimator {
  public:
   TEqWidthHistogramEstimator(std::shared_ptr<TEqWidthHistogram> histogram);
