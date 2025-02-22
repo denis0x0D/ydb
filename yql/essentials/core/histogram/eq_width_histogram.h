@@ -145,6 +145,10 @@ class TEqWidthHistogramEstimator {
     return EstimateOrEqual<T>(val, suffixSum);
   }
 
+  ui64 GetNumElements() const {
+    return prefixSum.back();
+  }
+
  private:
   template <typename T>
   ui64 EstimateOrEqual(T val, const TVector<ui64> &sumArray) const {
