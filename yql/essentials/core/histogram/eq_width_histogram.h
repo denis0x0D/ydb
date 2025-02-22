@@ -5,20 +5,32 @@
 #include <util/stream/output.h>
 #include <util/system/types.h>
 
+#include <cmath>
+
 namespace NKikimr {
 namespace NOptimizerHistograms {
-
-// Helpers methods.
+// Helper functions to work with histogram values.
 template <typename T>
 T LoadFrom(const ui8 *storage) {
   T val;
   std::memcpy(&val, storage, sizeof(T));
   return val;
 }
-
 template <typename T>
 void StoreTo(ui8 *storage, T value) {
   std::memcpy(storage, &value, sizeof(T));
+}
+template <typename T>
+static bool CmpEqual(T a, T b) {
+  return a == b;
+}
+template <>
+[[maybe_unused]] bool CmpEqual(double a, double b) {
+  return std::fabs(a - b) < std::numeric_limits<double>::epsilon();
+}
+template <typename T>
+bool CmpLessThan(T a, T b) {
+  return a < b;
 }
 
 // Represents value types supported by histogram.
@@ -42,6 +54,7 @@ class TEqWidthHistogram {
     ui8 end[8];
   };
 
+  // Have to specify the number of buckets and type of the values.
   TEqWidthHistogram(ui32 numBuckets = 1, EHistogramValueType type = EHistogramValueType::Int32);
   // From serialized data.
   TEqWidthHistogram(const char *str, ui64 size);
@@ -51,7 +64,8 @@ class TEqWidthHistogram {
   void AddElement(T val) {
     const auto index = FindBucketIndex(val);
     // The given `index` in range [0, numBuckets - 1].
-    if (!index || (LoadFrom<T>(buckets[index].start) <= val)) {
+    const T bucketValue = LoadFrom<T>(buckets[index].start);
+    if (!index || ((CmpEqual<T>(bucketValue, val) || CmpLessThan<T>(bucketValue, val)))) {
       buckets[index].count++;
     } else {
       buckets[index - 1].count++;
@@ -66,7 +80,7 @@ class TEqWidthHistogram {
     ui32 end = GetNumBuckets() - 1;
     while (start < end) {
       auto it = start + (end - start) / 2;
-      if (LoadFrom<T>(buckets[it].start) < val) {
+      if (CmpLessThan<T>(LoadFrom<T>(buckets[it].start), val)) {
         start = it + 1;
       } else {
         end = it;
@@ -99,7 +113,7 @@ class TEqWidthHistogram {
     T rangeLen = LoadFrom<T>(range.end) - LoadFrom<T>(range.start);
     std::memcpy(buckets[0].start, range.start, sizeof(range.start));
     for (ui32 i = 1; i < GetNumBuckets(); ++i) {
-      auto prevStart = LoadFrom<T>(buckets[i - 1].start);
+      const T prevStart = LoadFrom<T>(buckets[i - 1].start);
       StoreTo<T>(buckets[i].start, prevStart + rangeLen);
     }
   }
@@ -123,23 +137,26 @@ class TEqWidthHistogramEstimator {
 
   template <typename T>
   ui64 EstimateLessOrEqual(T val) const {
-    const auto index = histogram->FindBucketIndex(val);
-    if (!index || (LoadFrom<T>(histogram->GetBuckets()[index].start) <= val)) {
-      return prefixSum[index];
-    }
-    return prefixSum[index - 1];
+    return EstimateOrEqual<T>(val, prefixSum);
   }
 
   template <typename T>
   ui64 EstimateGreaterOrEqual(T val) const {
-    const auto index = histogram->FindBucketIndex(val);
-    if (!index || (LoadFrom<T>(histogram->GetBuckets()[index].start) <= val)) {
-      return suffixSum[index];
-    }
-    return suffixSum[index - 1];
+    return EstimateOrEqual<T>(val, suffixSum);
   }
 
  private:
+  template <typename T>
+  ui64 EstimateOrEqual(T val, const TVector<ui64> &sumArray) const {
+    const auto index = histogram->FindBucketIndex(val);
+    // Check that given `val` is in the range of the bucket with given `index`.
+    const T bucketVal = LoadFrom<T>(histogram->GetBuckets()[index].start);
+    if (!index || (CmpEqual<T>(bucketVal, val) || CmpLessThan<T>(bucketVal, val))) {
+      return sumArray[index];
+    }
+    return sumArray[index - 1];
+  }
+
   void CreatePrefixSum(ui32 numBuckets);
   void CreateSuffixSum(ui32 numBuckets);
   std::shared_ptr<TEqWidthHistogram> histogram;
