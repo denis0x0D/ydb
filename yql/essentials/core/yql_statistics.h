@@ -36,7 +36,7 @@ struct TColumnStatistics {
     std::optional<double> NumUniqueVals;
     std::optional<double> HyperLogLog;
     std::shared_ptr<NKikimr::TCountMinSketch> CountMinSketch;
-    std::shared_ptr<NKikimr::NOptimizerHistograms::TEqWidthHistogramEvaluator> EqWidthHistogramEvaluator;
+    std::shared_ptr<NKikimr::NOptimizerHistograms::TEqWidthHistogramEstimator> EqWidthHistogramEstimator;
     TString Type;
 
     TColumnStatistics() {}

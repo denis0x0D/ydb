@@ -153,6 +153,7 @@ std::shared_ptr<TOptimizerStatistics> NYql::OverrideStatistics(const NYql::TOpti
         if (!res->ColumnStatistics) {
             res->ColumnStatistics = TIntrusivePtr<TOptimizerStatistics::TColumnStatMap>(new TOptimizerStatistics::TColumnStatMap());
         }
+        Cout << "READ STATS " << Endl;
 
         for (auto col : columns->second.GetArraySafe()) {
             auto colMap = col.GetMapSafe();
@@ -174,15 +175,17 @@ std::shared_ptr<TOptimizerStatistics> NYql::OverrideStatistics(const NYql::TOpti
                 Base64StrictDecode(countMinBase64, countMinRaw);
                 cStat.CountMinSketch.reset(NKikimr::TCountMinSketch::FromString(countMinRaw.data(), countMinRaw.size()));
             }
-            if (auto eqWidthHistogram = colMap.find("eq-width-histogram"); eqWidthHistogram != colMap.end()) {
+            if (auto eqWidthHistogram = colMap.find("histogram"); eqWidthHistogram != colMap.end()) {
               TString histogramBase64 = eqWidthHistogram->second.GetStringSafe();
 
               TString histogramBinary{};
               Base64StrictDecode(histogramBase64, histogramBinary);
               auto histogram = std::make_shared<NKikimr::NOptimizerHistograms::TEqWidthHistogram>(
                   histogramBinary.data(), histogramBinary.size());
-              cStat.EqWidthHistogramEvaluator =
-                  std::make_shared<NKikimr::NOptimizerHistograms::TEqWidthHistogramEvaluator>(histogram);
+            //histogram->PrintBuckets<double>();
+              cStat.EqWidthHistogramEstimator =
+                  std::make_shared<NKikimr::NOptimizerHistograms::TEqWidthHistogramEstimator>(histogram);
+              //Cout << cStat.EqWidthHistogramEstimator->GetNumElements() << Endl;
             }
 
             res->ColumnStatistics->Data[columnName] = cStat;
