@@ -148,12 +148,12 @@ class TEqWidthHistogramEstimator {
 
   template <typename T>
   ui64 EstimateLessThan(T val) const {
-    return EstimateNotEqaul<T>(val, prefixSum);
+    return EstimateNotEqual<T>(val, prefixSum);
   }
 
   template <typename T>
   ui64 EstimateGreaterThan(T val) const {
-    return EstimateOrEqual<T>(val, suffixSum);
+    return EstimateNotEqual<T>(val, suffixSum);
   }
 
   ui64 GetNumElements() const { return prefixSum.back(); }
@@ -168,7 +168,6 @@ class TEqWidthHistogramEstimator {
   template <typename T>
   ui64 EstimateNotEqual(T val, const TVector<ui64> &sumArray) const {
     const auto index = histogram->FindBucketIndex(val);
-    const T bucketVal = LoadFrom<T>(histogram->GetBuckets()[index].start);
     // Take the previous backet if it's not the first one.
     if (!index) {
       return sumArray[index];

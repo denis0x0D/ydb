@@ -153,7 +153,6 @@ std::shared_ptr<TOptimizerStatistics> NYql::OverrideStatistics(const NYql::TOpti
         if (!res->ColumnStatistics) {
             res->ColumnStatistics = TIntrusivePtr<TOptimizerStatistics::TColumnStatMap>(new TOptimizerStatistics::TColumnStatMap());
         }
-        Cout << "READ STATS " << Endl;
 
         for (auto col : columns->second.GetArraySafe()) {
             auto colMap = col.GetMapSafe();
@@ -182,7 +181,7 @@ std::shared_ptr<TOptimizerStatistics> NYql::OverrideStatistics(const NYql::TOpti
               Base64StrictDecode(histogramBase64, histogramBinary);
               auto histogram = std::make_shared<NKikimr::NOptimizerHistograms::TEqWidthHistogram>(
                   histogramBinary.data(), histogramBinary.size());
-            //histogram->PrintBuckets<double>();
+              //histogram->PrintBuckets<double>();
               cStat.EqWidthHistogramEstimator =
                   std::make_shared<NKikimr::NOptimizerHistograms::TEqWidthHistogramEstimator>(histogram);
               //Cout << cStat.EqWidthHistogramEstimator->GetNumElements() << Endl;

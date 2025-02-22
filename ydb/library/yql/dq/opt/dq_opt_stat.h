@@ -64,6 +64,7 @@ public:
 
 protected:
     double ComputeEqualitySelectivity(const NYql::NNodes::TExprBase& left, const NYql::NNodes::TExprBase& right);
+    double ComputeLessThan(const NYql::NNodes::TExprBase& left, const NYql::NNodes::TExprBase& right);
 
     double ComputeComparisonSelectivity(const NYql::NNodes::TExprBase& left, const NYql::NNodes::TExprBase& right);
 
