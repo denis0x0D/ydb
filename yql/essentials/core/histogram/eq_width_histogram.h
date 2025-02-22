@@ -135,6 +135,7 @@ class TEqWidthHistogramEstimator {
  public:
   TEqWidthHistogramEstimator(std::shared_ptr<TEqWidthHistogram> histogram);
 
+  // Methods to estimate values.
   template <typename T>
   ui64 EstimateLessOrEqual(T val) const {
     return EstimateOrEqual<T>(val, prefixSum);
@@ -145,17 +146,31 @@ class TEqWidthHistogramEstimator {
     return EstimateOrEqual<T>(val, suffixSum);
   }
 
-  ui64 GetNumElements() const {
-    return prefixSum.back();
+  template <typename T>
+  ui64 EstimateLessThan(T val) const {
+    return EstimateNotEqaul<T>(val, prefixSum);
   }
+
+  template <typename T>
+  ui64 EstimateGreaterThan(T val) const {
+    return EstimateOrEqual<T>(val, suffixSum);
+  }
+
+  ui64 GetNumElements() const { return prefixSum.back(); }
 
  private:
   template <typename T>
   ui64 EstimateOrEqual(T val, const TVector<ui64> &sumArray) const {
     const auto index = histogram->FindBucketIndex(val);
-    // Check that given `val` is in the range of the bucket with given `index`.
+    return sumArray[index];
+  }
+
+  template <typename T>
+  ui64 EstimateNotEqual(T val, const TVector<ui64> &sumArray) const {
+    const auto index = histogram->FindBucketIndex(val);
     const T bucketVal = LoadFrom<T>(histogram->GetBuckets()[index].start);
-    if (!index || (CmpEqual<T>(bucketVal, val) || CmpLessThan<T>(bucketVal, val))) {
+    // Take the previous backet if it's not the first one.
+    if (!index) {
       return sumArray[index];
     }
     return sumArray[index - 1];
