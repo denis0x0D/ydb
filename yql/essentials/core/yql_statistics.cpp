@@ -181,10 +181,8 @@ std::shared_ptr<TOptimizerStatistics> NYql::OverrideStatistics(const NYql::TOpti
               Base64StrictDecode(histogramBase64, histogramBinary);
               auto histogram = std::make_shared<NKikimr::NOptimizerHistograms::TEqWidthHistogram>(
                   histogramBinary.data(), histogramBinary.size());
-              //histogram->PrintBuckets<double>();
               cStat.EqWidthHistogramEstimator =
                   std::make_shared<NKikimr::NOptimizerHistograms::TEqWidthHistogramEstimator>(histogram);
-              //Cout << cStat.EqWidthHistogramEstimator->GetNumElements() << Endl;
             }
 
             res->ColumnStatistics->Data[columnName] = cStat;

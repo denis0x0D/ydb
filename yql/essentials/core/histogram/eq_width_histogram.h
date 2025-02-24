@@ -74,6 +74,7 @@ class TEqWidthHistogram {
 
   // Returns an index of the bucket which stores the given `val`.
   // Returned index in range [0, numBuckets - 1].
+  // Not using `std::lower_bound()` here because need an index to map to `suffix` and `prefix` sum.
   template <typename T>
   ui32 FindBucketIndex(T val) const {
     ui32 start = 0;
