@@ -79,6 +79,19 @@ namespace {
       return std::nullopt;
     }
 
+    EInequalityPredicateType GetOppositePredicateType(EInequalityPredicateType predicate) {
+      switch (predicate) {
+        case EInequalityPredicateType::Less:
+          return EInequalityPredicateType::Greater;
+        case EInequalityPredicateType::Greater:
+          return EInequalityPredicateType::Less;
+        case EInequalityPredicateType::LessOrEqual:
+          return EInequalityPredicateType::GreaterOrEqual;
+        case EInequalityPredicateType::GreaterOrEqual:
+          return EInequalityPredicateType::LessOrEqual;
+      }
+    }
+
     std::optional<ui64> EstimateInequalityPredicateByHistogram(
         NYql::NNodes::TExprBase maybeLiteral, const TString& columnType,
         const std::shared_ptr<NKikimr::NOptimizerHistograms::TEqWidthHistogramEstimator>& estimator,
@@ -199,18 +212,17 @@ double NYql::NDq::TPredicateSelectivityComputer::ComputeInequalitySelectivity(co
                                                                               const TExprBase& right,
                                                                               EInequalityPredicateType predicate) {
   if (IsAttribute(right) && IsConstantExprWithParams(left.Ptr())) {
-    // Compute greater.
-    return 1.0;
+    return ComputeInequalitySelectivity(right, left, GetOppositePredicateType(predicate));
   }
 
   if (auto maybeMember = IsAttribute(left)) {
-    // In case both arguments refer to an attribute, return 0.2
+    // It seems like this is not possible in current version.
     if (IsAttribute(right)) {
-      return 0.3;
+      return 1.0;
     }
 
     else if (IsConstantExprWithParams(right.Ptr())) {
-      TString attributeName = maybeMember.Get()->Name().StringValue();
+      const TString attributeName = maybeMember.Get()->Name().StringValue();
       if (!IsConstantExpr(right.Ptr())) {
         return DefaultSelectivity(Stats, attributeName);
       }
@@ -220,13 +232,14 @@ double NYql::NDq::TPredicateSelectivityComputer::ComputeInequalitySelectivity(co
       }
 
       if (auto histogramEstimator = Stats->ColumnStatistics->Data[attributeName].EqWidthHistogramEstimator) {
-        auto columnType = Stats->ColumnStatistics->Data[attributeName].Type;
+        const auto columnType = Stats->ColumnStatistics->Data[attributeName].Type;
         std::optional<ui64> estimation =
             EstimateInequalityPredicateByHistogram(right, columnType, histogramEstimator, predicate);
         if (!estimation.has_value()) {
           return DefaultSelectivity(Stats, attributeName);
         }
         // Should we compare the number of rows in histogram against `Nrows` and adjust `value` based on that.
+        Y_ASSERT(Stats->Nrows);
         return estimation.value() / Stats->Nrows;
       }
 
