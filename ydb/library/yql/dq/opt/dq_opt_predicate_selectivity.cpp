@@ -381,7 +381,7 @@ double TPredicateSelectivityComputer::Compute(
 
         resSelectivity = ComputeEqualitySelectivity(left, right);
     }
-   
+
     else if (auto less = input.Maybe<TCoCmpLess>()) {
         auto left = less.Cast().Left();
         auto right = less.Cast().Right();
