@@ -13,7 +13,11 @@ namespace {
     THashSet<TString> PgInequalityPreds = {
         "<", "<=", ">", ">="};
 
-    enum class EPredicateType : ui8 { LessThan, LessOrEqual, GreaterThan, GreaterOrEqual };
+    THashMap<TString, EInequalityPredicateType> StringToInequalityPredicateMap{
+        {"<", EInequalityPredicateType::Less},
+        {"<=", EInequalityPredicateType::LessOrEqual},
+        {">", EInequalityPredicateType::Greater},
+        {">=", EInequalityPredicateType::GreaterOrEqual}};
 
     /**
      * Check if a callable is an attribute of some table
@@ -59,26 +63,26 @@ namespace {
     }
 
     template <typename T>
-    std::optional<ui64> EstimateInequalityPredicate(
-        std::shared_ptr<NKikimr::NOptimizerHistograms::TEqWidthHistogramEstimator>& estimator, T val,
-        EPredicateType predicate) {
+    std::optional<ui64> EstimateInequalityPredicateByType(
+        const std::shared_ptr<NKikimr::NOptimizerHistograms::TEqWidthHistogramEstimator>& estimator, T val,
+        EInequalityPredicateType predicate) {
       switch (predicate) {
-        case EPredicateType::LessThan:
-          return estimator->EstimateLessThan<T>(val);
-        case EPredicateType::LessOrEqual:
+        case EInequalityPredicateType::Less:
+          return estimator->EstimateLess<T>(val);
+        case EInequalityPredicateType::LessOrEqual:
           return estimator->EstimateLessOrEqual<T>(val);
-        case EPredicateType::GreaterThan:
-          return estimator->EstimateGreaterThan<T>(val);
-        case EPredicateType::GreaterOrEqual:
+        case EInequalityPredicateType::Greater:
+          return estimator->EstimateGreater<T>(val);
+        case EInequalityPredicateType::GreaterOrEqual:
           return estimator->EstimateGreaterOrEqual<T>(val);
       }
       return std::nullopt;
     }
 
-    std::optional<ui32> EstimateInequalityPredicateByHistogram(
-        NYql::NNodes::TExprBase maybeLiteral, TString columnType,
-        std::shared_ptr<NKikimr::NOptimizerHistograms::TEqWidthHistogramEstimator>& estimator,
-        EPredicateType predicate) {
+    std::optional<ui64> EstimateInequalityPredicateByHistogram(
+        NYql::NNodes::TExprBase maybeLiteral, const TString& columnType,
+        const std::shared_ptr<NKikimr::NOptimizerHistograms::TEqWidthHistogramEstimator>& estimator,
+        EInequalityPredicateType predicate) {
       if (auto maybeJust = maybeLiteral.Maybe<NYql::NNodes::TCoJust>()) {
         maybeLiteral = maybeJust.Cast().Input();
       }
@@ -88,20 +92,21 @@ namespace {
         auto value = literal.Literal().Value();
         if (columnType == "Uint32") {
           ui32 val = FromString<ui32>(value);
-          return EstimateInequalityPredicate<ui32>(estimator, val, predicate);
+          return EstimateInequalityPredicateByType<ui32>(estimator, val, predicate);
         } else if (columnType == "Int32") {
           i32 val = FromString<i32>(value);
-          return EstimateInequalityPredicate<ui32>(estimator, val, predicate);
+          return EstimateInequalityPredicateByType<ui32>(estimator, val, predicate);
         } else if (columnType == "Uint64") {
           ui64 val = FromString<ui64>(value);
-          return EstimateInequalityPredicate<ui64>(estimator, val, predicate);
+          return EstimateInequalityPredicateByType<ui64>(estimator, val, predicate);
         } else if (columnType == "Int64") {
           i64 val = FromString<i64>(value);
-          return EstimateInequalityPredicate<i64>(estimator, val, predicate);
+          return EstimateInequalityPredicateByType<i64>(estimator, val, predicate);
         } else if (columnType == "Double") {
           double val = FromString<double>(value);
-          return EstimateInequalityPredicate<double>(estimator, val, predicate);
+          return EstimateInequalityPredicateByType<double>(estimator, val, predicate);
         }
+        // TODO: Add support for other types.
         return std::nullopt;
       }
 
@@ -190,7 +195,9 @@ TExprNode::TPtr FindNode(const TExprBase& input) {
     return nullptr;
 }
 
-double NYql::NDq::TPredicateSelectivityComputer::ComputeLessThan(const TExprBase& left, const TExprBase& right) {
+double NYql::NDq::TPredicateSelectivityComputer::ComputeInequalitySelectivity(const TExprBase& left,
+                                                                              const TExprBase& right,
+                                                                              EInequalityPredicateType predicate) {
   if (IsAttribute(right) && IsConstantExprWithParams(left.Ptr())) {
     // Compute greater.
     return 1.0;
@@ -214,11 +221,12 @@ double NYql::NDq::TPredicateSelectivityComputer::ComputeLessThan(const TExprBase
 
       if (auto histogramEstimator = Stats->ColumnStatistics->Data[attributeName].EqWidthHistogramEstimator) {
         auto columnType = Stats->ColumnStatistics->Data[attributeName].Type;
-        std::optional<ui32> estimation =
-            EstimateInequalityPredicateByHistogram(right, columnType, histogramEstimator, EPredicateType::LessThan);
+        std::optional<ui64> estimation =
+            EstimateInequalityPredicateByHistogram(right, columnType, histogramEstimator, predicate);
         if (!estimation.has_value()) {
           return DefaultSelectivity(Stats, attributeName);
         }
+        // Should we compare the number of rows in histogram against `Nrows` and adjust `value` based on that.
         return estimation.value() / Stats->Nrows;
       }
 
@@ -365,7 +373,28 @@ double TPredicateSelectivityComputer::Compute(
         auto left = less.Cast().Left();
         auto right = less.Cast().Right();
 
-        resSelectivity = ComputeLessThan(left, right);
+        resSelectivity = ComputeInequalitySelectivity(left, right, EInequalityPredicateType::Less);
+    }
+
+    else if (auto less = input.Maybe<TCoCmpGreater>()) {
+        auto left = less.Cast().Left();
+        auto right = less.Cast().Right();
+
+        resSelectivity = ComputeInequalitySelectivity(left, right, EInequalityPredicateType::Greater);
+    }
+
+    else if (auto less = input.Maybe<TCoCmpLessOrEqual>()) {
+        auto left = less.Cast().Left();
+        auto right = less.Cast().Right();
+
+        resSelectivity = ComputeInequalitySelectivity(left, right, EInequalityPredicateType::LessOrEqual);
+    }
+
+    else if (auto less = input.Maybe<TCoCmpGreaterOrEqual>()) {
+        auto left = less.Cast().Left();
+        auto right = less.Cast().Right();
+
+        resSelectivity = ComputeInequalitySelectivity(left, right, EInequalityPredicateType::GreaterOrEqual);
     }
 
     else if (input.Ptr()->IsCallable("PgResolvedOp") && input.Ptr()->ChildPtr(0)->Content()=="=") {
@@ -403,49 +432,50 @@ double TPredicateSelectivityComputer::Compute(
     else if (input.Ptr()->IsCallable("PgResolvedOp") && PgInequalityPreds.contains(input.Ptr()->ChildPtr(0)->Content())){
         auto left = TExprBase(input.Ptr()->ChildPtr(2));
         auto right = TExprBase(input.Ptr()->ChildPtr(3));
-        // FIXME;
-        resSelectivity = ComputeLessThan(left, right);
+        resSelectivity =
+            ComputeInequalitySelectivity(left, right, StringToInequalityPredicateMap[input.Ptr()->ChildPtr(0)->Content()]);
     }
 
     // Process SqlIn
-    else if(input.Ptr()->IsCallable("SqlIn")) {
-        auto list = input.Ptr()->ChildPtr(0);
+    else if (input.Ptr()->IsCallable("SqlIn")) {
+      auto list = input.Ptr()->ChildPtr(0);
 
-        double tmpSelectivity = 0.0;
-        auto lhs = TExprBase(input.Ptr()->ChildPtr(1));
-        for (const auto& child: list->Children()) {
-            TExprBase rhs = TExprBase(child);
-            tmpSelectivity += ComputeEqualitySelectivity(lhs, rhs);
-        }
-        resSelectivity = tmpSelectivity;
+      double tmpSelectivity = 0.0;
+      auto lhs = TExprBase(input.Ptr()->ChildPtr(1));
+      for (const auto& child : list->Children()) {
+        TExprBase rhs = TExprBase(child);
+        tmpSelectivity += ComputeEqualitySelectivity(lhs, rhs);
+      }
+      resSelectivity = tmpSelectivity;
     }
 
     else if (input.Maybe<TCoAtom>()) {
-        auto atom = input.Cast<TCoAtom>();
-        // regexp
-        if (atom.StringValue().StartsWith("Re2")) {
-            resSelectivity = 0.5;
-        }
+      auto atom = input.Cast<TCoAtom>();
+      // regexp
+      if (atom.StringValue().StartsWith("Re2")) {
+        resSelectivity = 0.5;
+      }
     }
 
     else if (auto maybeIfExpr = input.Maybe<TCoIf>()) {
-        auto ifExpr = maybeIfExpr.Cast();
-        
-        // attr in ('a', 'b', 'c' ...)
-        if (ifExpr.Predicate().Maybe<TCoExists>() && ifExpr.ThenValue().Maybe<TCoJust>() && ifExpr.ElseValue().Maybe<TCoNothing>()) {
-            auto list = FindNode<TExprList>(ifExpr.ThenValue());
+      auto ifExpr = maybeIfExpr.Cast();
 
-            if (list != nullptr) {
-                double tmpSelectivity = 0.0;
-                TExprBase lhs = ifExpr.Predicate();
-                for (const auto& child: list->Children()) {
-                    TExprBase rhs = TExprBase(child);
-                    tmpSelectivity += ComputeEqualitySelectivity(lhs, rhs);
-                }
+      // attr in ('a', 'b', 'c' ...)
+      if (ifExpr.Predicate().Maybe<TCoExists>() && ifExpr.ThenValue().Maybe<TCoJust>() &&
+          ifExpr.ElseValue().Maybe<TCoNothing>()) {
+        auto list = FindNode<TExprList>(ifExpr.ThenValue());
 
-                resSelectivity = tmpSelectivity;
-            }
+        if (list != nullptr) {
+          double tmpSelectivity = 0.0;
+          TExprBase lhs = ifExpr.Predicate();
+          for (const auto& child : list->Children()) {
+            TExprBase rhs = TExprBase(child);
+            tmpSelectivity += ComputeEqualitySelectivity(lhs, rhs);
+          }
+
+          resSelectivity = tmpSelectivity;
         }
+      }
     }
 
     if (!resSelectivity.has_value()) {

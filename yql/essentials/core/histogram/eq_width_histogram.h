@@ -29,7 +29,7 @@ template <>
   return std::fabs(a - b) < std::numeric_limits<double>::epsilon();
 }
 template <typename T>
-bool CmpLessThan(T a, T b) {
+bool CmpLess(T a, T b) {
   return a < b;
 }
 
@@ -65,7 +65,7 @@ class TEqWidthHistogram {
     const auto index = FindBucketIndex(val);
     // The given `index` in range [0, numBuckets - 1].
     const T bucketValue = LoadFrom<T>(buckets[index].start);
-    if (!index || ((CmpEqual<T>(bucketValue, val) || CmpLessThan<T>(bucketValue, val)))) {
+    if (!index || ((CmpEqual<T>(bucketValue, val) || CmpLess<T>(bucketValue, val)))) {
       buckets[index].count++;
     } else {
       buckets[index - 1].count++;
@@ -80,7 +80,7 @@ class TEqWidthHistogram {
     ui32 end = GetNumBuckets() - 1;
     while (start < end) {
       auto it = start + (end - start) / 2;
-      if (CmpLessThan<T>(LoadFrom<T>(buckets[it].start), val)) {
+      if (CmpLess<T>(LoadFrom<T>(buckets[it].start), val)) {
         start = it + 1;
       } else {
         end = it;
@@ -110,6 +110,7 @@ class TEqWidthHistogram {
   template <typename T>
   void InitializeBuckets(const TBucketRange &range) {
     // TODO: Proper diff calculation for types like `string`, `datetime`, etc.
+    Y_ASSERT(CmpLess<T>(LoadFrom<T>(range.start), LoadFrom<T>(range.end)));
     T rangeLen = LoadFrom<T>(range.end) - LoadFrom<T>(range.start);
     std::memcpy(buckets[0].start, range.start, sizeof(range.start));
     for (ui32 i = 1; i < GetNumBuckets(); ++i) {
@@ -147,12 +148,12 @@ class TEqWidthHistogramEstimator {
   }
 
   template <typename T>
-  ui64 EstimateLessThan(T val) const {
+  ui64 EstimateLess(T val) const {
     return EstimateNotEqual<T>(val, prefixSum);
   }
 
   template <typename T>
-  ui64 EstimateGreaterThan(T val) const {
+  ui64 EstimateGreater(T val) const {
     return EstimateNotEqual<T>(val, suffixSum);
   }
 
