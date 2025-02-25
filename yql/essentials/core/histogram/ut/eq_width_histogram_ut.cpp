@@ -74,6 +74,22 @@ void TestHistogramSerialization(ui32 numBuckets, std::pair<ui32, ui32> range, st
   UNIT_ASSERT(EqualHistograms<T>(histogram, histogramFromString));
 }
 
+template <typename T>
+void TestHistogramAggregate(ui32 numBuckets, std::pair<ui32, ui32> range, std::pair<T, T> bucketRange,
+                            EHistogramValueType valueType, ui32 numCombine, const TVector<ui64> &resultCount) {
+  auto histogram = CreateHistogram<T>(numBuckets, bucketRange.first, bucketRange.second, valueType);
+  UNIT_ASSERT(histogram);
+  PopulateHistogram<T>(histogram, range);
+  auto histogramToAdd = CreateHistogram<T>(numBuckets, bucketRange.first, bucketRange.second, valueType);
+  PopulateHistogram<T>(histogramToAdd, range);
+  UNIT_ASSERT(histogram);
+  for (ui32 i = 0; i < numCombine; ++i)
+    histogram->template Aggregate<T>(*histogramToAdd);
+  for (ui32 i = 0; i < histogram->GetNumBuckets(); ++i) {
+    UNIT_ASSERT(histogram->GetBuckets()[i].count == resultCount[i]);
+  }
+}
+
 Y_UNIT_TEST_SUITE(EqWidthHistogram) {
   Y_UNIT_TEST(Basic) {
     TestHistogramBasic<ui32>(10, /*values range=*/{0, 10}, /*bucket range=*/{0, 2}, EHistogramValueType::Uint32,
@@ -103,6 +119,10 @@ Y_UNIT_TEST_SUITE(EqWidthHistogram) {
     TestHistogramSerialization<i64>(10, /*values range=*/{0, 10}, /*bucket range=*/{0, 2}, EHistogramValueType::Int64);
     TestHistogramSerialization<double>(10, /*values range=*/{0.0, 10.0}, /*bucket range=*/{0.0, 2.0},
                                        EHistogramValueType::Double);
+  }
+  Y_UNIT_TEST(AggregateHistogram) {
+    TVector<ui64> resultCount{20, 20, 20, 20, 20, 0, 0, 0, 0, 0};
+    TestHistogramAggregate<ui32>(10, /*values range=*/{0, 10}, /*bucket range=*/{0, 2}, EHistogramValueType::Uint32, 9, resultCount);
   }
 }
 }  // namespace NOptimizerHistograms

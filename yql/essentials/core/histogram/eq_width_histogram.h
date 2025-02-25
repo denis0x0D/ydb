@@ -110,12 +110,45 @@ class TEqWidthHistogram {
     }
   }
 
+  template <typename T>
+  void PrintBuckets() {
+    for (ui32 i = 0; i < buckets.size(); ++i) {
+      Cout << "[" << buckets[i].count << ", " << LoadFrom<T>(buckets[i].start) << "]" << Endl;
+    }
+  }
+
   // Seriailizes to a binary representation
   std::unique_ptr<char> Serialize(ui64 &binSize) const;
   // Returns buckets.
-  TVector<TBucket> &GetBuckets() { return buckets; }
+  const TVector<TBucket> &GetBuckets() const { return buckets; }
+
+  template <typename T>
+  void Aggregate(const TEqWidthHistogram &other) {
+    if ((this->valueType != other.GetType()) || (!BucketsEqual<T>(other))) {
+      // Should we fail?
+      return;
+    }
+    Cout << "COMBINE " << Endl;
+    for (ui32 i = 0; i < buckets.size(); ++i) {
+      Cout << "ADD COUNT " << other.GetBuckets()[i].count << Endl;
+      buckets[i].count += other.GetBuckets()[i].count;
+    }
+  }
 
  private:
+  template <typename T>
+  bool BucketsEqual(const TEqWidthHistogram &other) {
+    if (buckets.size() != other.GetNumBuckets()) {
+      return false;
+    }
+    for (ui32 i = 0; i < buckets.size(); ++i) {
+      if (!CmpEqual<T>(LoadFrom<T>(buckets[i].start), LoadFrom<T>(GetBuckets()[i].start))) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   // Returns binary size of the histogram.
   ui64 GetBinarySize(ui32 nBuckets) const;
   EHistogramValueType valueType;
