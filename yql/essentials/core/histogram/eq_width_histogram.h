@@ -8,35 +8,72 @@
 
 // Storage size of the bucket in bytes.
 #define BUCKET_STORAGE_SIZE 8
+// Storage size of string prefix in bytes.
+#define PREFIX_STORAGE_SIZE 2
 
 namespace NKikimr {
 namespace NOptimizerHistograms {
+
+#pragma pack(push, 1)
+struct TStringPrefix {
+  TStringPrefix(const char *str, ui64 size) {
+    if (!size) {
+      std::memset(prefix, 0, PREFIX_STORAGE_SIZE);
+    } else if (size == 1) {
+      prefix[0] = std::toupper(str[0]);
+      prefix[1] = 'A';
+    } else {
+      prefix[0] = std::toupper(str[0]);
+      prefix[1] = std::toupper(str[1]);
+    }
+  }
+  TStringPrefix() {
+    std::memset(prefix, 0, PREFIX_STORAGE_SIZE);
+  }
+
+  char &operator[](ui32 index) {
+    Y_ASSERT(index >= 0 && index < PREFIX_STORAGE_SIZE);
+    return prefix[index];
+  }
+private:
+  char prefix[PREFIX_STORAGE_SIZE];
+};
+#pragma pack(pop)
+
 // Helper functions to work with histogram values.
 template <typename T>
-T LoadFrom(const ui8 *storage) {
+inline T LoadFrom(const ui8 *storage) {
   T val;
   std::memcpy(&val, storage, sizeof(T));
   return val;
 }
 template <typename T>
-void StoreTo(ui8 *storage, T value) {
+inline void StoreTo(ui8 *storage, T value) {
   std::memcpy(storage, &value, sizeof(T));
 }
 template <typename T>
-static bool CmpEqual(T a, T b) {
-  return a == b;
+inline bool CmpEqual(T left, T right) {
+  return left == right;
 }
 template <>
-[[maybe_unused]] bool CmpEqual(double a, double b) {
-  return std::fabs(a - b) < std::numeric_limits<double>::epsilon();
+inline bool CmpEqual(double left, double right) {
+  return std::fabs(left - right) < std::numeric_limits<double>::epsilon();
+}
+template <>
+inline bool CmpEqual(TStringPrefix left, TStringPrefix right) {
+  return (std::memcmp(&left, &right, sizeof(TStringPrefix)) == 0);
 }
 template <typename T>
-bool CmpLess(T a, T b) {
-  return a < b;
+inline bool CmpLess(T left, T right) {
+  return left < right;
+}
+template <>
+inline bool CmpLess(TStringPrefix left, TStringPrefix right) {
+  return (std::memcmp(&left, &right, sizeof(TStringPrefix)) < 0);
 }
 
 // Represents value types supported by histogram.
-enum class EHistogramValueType : ui8 { Int16, Int32, Int64, Uint16, Uint32, Uint64, Double, NotSupported };
+enum class EHistogramValueType : ui8 { Int16, Int32, Int64, Uint16, Uint32, Uint64, Double, StringPrefix, NotSupported };
 
 // This class represents an `Equal-width` histogram.
 // Each bucket represents a range of contiguous values of equal width, and the
@@ -44,6 +81,7 @@ enum class EHistogramValueType : ui8 { Int16, Int32, Int64, Uint16, Uint32, Uint
 // within that range.
 class TEqWidthHistogram {
  public:
+#pragma pack(push, 1)
   struct TBucket {
     // The number of values in a bucket.
     ui64 count{0};
@@ -55,6 +93,7 @@ class TEqWidthHistogram {
     ui8 start[BUCKET_STORAGE_SIZE];
     ui8 end[BUCKET_STORAGE_SIZE];
   };
+#pragma pack(pop)
 
   // Have to specify the number of buckets and type of the values.
   TEqWidthHistogram(ui32 numBuckets = 1, EHistogramValueType type = EHistogramValueType::Int32);
@@ -71,6 +110,13 @@ class TEqWidthHistogram {
       buckets[index].count++;
     } else {
       buckets[index - 1].count++;
+    }
+  }
+
+  void PrintPrefixes() {
+    for (ui32 i = 0; i < GetNumBuckets(); ++i) {
+      auto stringPrefix = LoadFrom<TStringPrefix>(buckets[i].start);
+      Cout << "[" << buckets[i].count << " " << stringPrefix[0] << " " << stringPrefix[1] << "]" << Endl;
     }
   }
 
@@ -109,6 +155,18 @@ class TEqWidthHistogram {
     for (ui32 i = 1; i < GetNumBuckets(); ++i) {
       const T prevStart = LoadFrom<T>(buckets[i - 1].start);
       StoreTo<T>(buckets[i].start, prevStart + rangeLen);
+    }
+  }
+
+  void InitializeBucketsStringPrefix(ui32 outerRangeSize, ui32 innerRangeSize, char startAt) {
+    TStringPrefix startPrefix;
+    Y_ASSERT(GetNumBuckets() == outerRangeSize * innerRangeSize);
+    for (ui32 i = 0; i < outerRangeSize; ++i) {
+      startPrefix[0] = startAt + i;
+      for (ui32 j = 0; j < innerRangeSize; ++j) {
+        startPrefix[1] = startAt + j;
+        StoreTo<TStringPrefix>(buckets[i * outerRangeSize + j].start, startPrefix);
+      }
     }
   }
 
