@@ -77,6 +77,9 @@ TString GetPrettyJSON(const NJson::TJsonValue& json) {
  * key attribute and construct various full clique join queries
  */
 static void CreateSampleTable(NYdb::NQuery::TSession session, bool useColumnStore) {
+    CreateTables(session, "schema/create_avtodor.sql", useColumnStore);
+
+    /*
     CreateTables(session, "schema/rstuv.sql", useColumnStore);
 
     CreateTables(session, "schema/tpch.sql", useColumnStore);
@@ -90,7 +93,7 @@ static void CreateSampleTable(NYdb::NQuery::TSession session, bool useColumnStor
     CreateTables(session, "schema/general_priorities_bug.sql", useColumnStore);
 
     {
-        CreateTables(session, "schema/different_join_predicate_key_types.sql", false /* olap params are already set in schema */);
+        CreateTables(session, "schema/different_join_predicate_key_types.sql", false /* olap params are already set in schema );
         const TString upsert =
         R"(
             UPSERT INTO t1 (id1) VALUES (1);
@@ -109,6 +112,7 @@ static void CreateSampleTable(NYdb::NQuery::TSession session, bool useColumnStor
     }
 
     CreateView(session, "view/tpch_random_join_view.sql");
+    */
 }
 
 static TKikimrRunner GetKikimrWithJoinSettings(bool useStreamLookupJoin = false, TString stats = "", bool useCBO = true, bool useColumnStore = true){
@@ -468,8 +472,12 @@ Y_UNIT_TEST_SUITE(OlapEstimationRowsCorrectness) {
         TestOlapEstimationRowsCorrectness("queries/tpch2.sql", "stats/tpch1000s.json");
     }
 
-    Y_UNIT_TEST(TPCH3) {
-        TestOlapEstimationRowsCorrectness("queries/tpch3.sql", "stats/tpch1000s.json");
+    Y_UNIT_TEST(AVTODOR) {
+        TestOlapEstimationRowsCorrectness("queries/avtodorq5.sql", "");
+    }
+
+    Y_UNIT_TEST(TPCH333) {
+        TestOlapEstimationRowsCorrectness("queries/tpcds48.sql", "stats/tpcds_100_histogram.json");
     }
 
     Y_UNIT_TEST(TPCH5) {
