@@ -2,7 +2,7 @@
 #include <yql/essentials/ast/yql_expr.h>
 #include <yql/essentials/utils/yql_panic.h>
 #include <yql/essentials/public/issue/yql_issue_manager.h>
-
+#define TRACE_NODES
 namespace NYql {
 
 namespace {

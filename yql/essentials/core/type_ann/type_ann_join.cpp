@@ -246,6 +246,8 @@ namespace NTypeAnnImpl {
         const size_t numLists = input->ChildrenSize() - 2;
 
         auto optionsNode = input->Child(input->ChildrenSize() - 1);
+        auto joinTree = input->Child(numLists);
+        Cerr << "JOIN " << joinTree->Child(0)->Content() << " " << joinTree->Child(1)->Content() << " " << joinTree->Child(2)->Content() << Endl;
         TJoinOptions options;
         auto status = ValidateEquiJoinOptions(input->Pos(), *optionsNode, options, ctx.Expr);
         if (status != IGraphTransformer::TStatus::Ok) {
@@ -274,6 +276,7 @@ namespace NTypeAnnImpl {
                 return IGraphTransformer::TStatus::Error;
             }
 
+            Cerr << "label name " << listPair.Child(1)->Content() << Endl;
             auto structType = itemType->Cast<TStructExprType>();
             if (auto err = labels.Add(ctx.Expr, *listPair.Child(1), structType)) {
                 ctx.Expr.AddError(*err);

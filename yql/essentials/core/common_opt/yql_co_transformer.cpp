@@ -13,6 +13,7 @@
 
 #include <util/string/cast.h>
 #include <unordered_set>
+#include <util/stream/output.h>
 
 namespace NYql {
 namespace {

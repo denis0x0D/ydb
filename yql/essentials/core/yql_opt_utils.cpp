@@ -382,6 +382,7 @@ TExprNode::TPtr KeepColumnOrder(const TColumnOrder& order, const TExprNode::TPtr
 
 template<class TFieldsSet>
 bool HaveFieldsSubset(const TExprNode::TPtr& start, const TExprNode& arg, TFieldsSet& usedFields, const TParentsMap& parentsMap, bool allowDependsOn) {
+    Cerr << "HAVE FIELD SUBSETS " << Endl;
     const TTypeAnnotationNode* argType = RemoveOptionalType(arg.GetTypeAnn());
     if (argType->GetKind() != ETypeAnnotationKind::Struct) {
         return false;

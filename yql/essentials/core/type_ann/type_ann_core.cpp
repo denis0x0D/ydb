@@ -1097,6 +1097,7 @@ namespace NTypeAnnImpl {
     }
 
     IGraphTransformer::TStatus SqlColumnWrapper(const TExprNode::TPtr& input, TExprNode::TPtr& output, TContext& ctx) {
+        Cerr << "SQL COLUMN Wrapper " << Endl;
         const bool columnOrType = input->IsCallable({"SqlColumnOrType", "SqlPlainColumnOrType"});
         const bool isPlain = input->IsCallable({"SqlPlainColumn", "SqlPlainColumnOrType"});
         if (!EnsureMinArgsCount(*input, 2, ctx.Expr)) {

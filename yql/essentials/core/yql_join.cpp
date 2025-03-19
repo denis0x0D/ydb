@@ -142,7 +142,7 @@ namespace {
             return IGraphTransformer::TStatus::Ok;
         }
 
-        if (globalState.NestedJoins + 2 == labels.Inputs.size()) {
+        if ((globalState.NestedJoins + 2 == labels.Inputs.size())) {
             ctx.AddError(TIssue(ctx.GetPosition(side.Pos()),
                 TStringBuilder() << "Too many nested joins, expected exactly: " << (labels.Inputs.size() - 2)));
             return IGraphTransformer::TStatus::Error;
@@ -158,8 +158,12 @@ namespace {
         if (!EnsureTupleSize(joins, 6, ctx)) {
             return IGraphTransformer::TStatus::Error;
         }
+        Cerr << "JOIN LEVEL " << globalState.NestedJoins << Endl;
+        Cerr << "LABELS SIZE " << labels.Inputs.size() << Endl;
+
 
         const auto& joinType = joins.Head();
+        Cerr << "JOIN TYPE " << joinType.Content() << Endl;
         if (!EnsureAtom(joinType, ctx)) {
             return IGraphTransformer::TStatus::Error;
         }
@@ -186,16 +190,23 @@ namespace {
         TVector<std::pair<TStringBuf, TStringBuf>> leftKeys;
         TVector<const TTypeAnnotationNode*> leftKeyTypes;
         const bool cross = joinType.IsAtom("Cross");
+        Cerr << "PARSE JOIN LEFT KEYS" << Endl;
         if (const auto status = ParseJoinKeys(*joins.Child(3), leftKeys, leftKeyTypes, labels, ctx, cross); status.Level != IGraphTransformer::TStatus::Ok) {
             return status;
         }
 
         std::vector<std::string_view> lCheck;
         lCheck.reserve(leftKeys.size());
+        Cerr << "Left keys: " << Endl;
         for (const auto& x : leftKeys) {
+            Cerr << x.first << " " << x.second << Endl;
             for (const auto& name : (*labels.FindInput(x.first))->AllNames(x.second))
                 lCheck.emplace_back(ctx.AppendString(name));
             if (!myLeftScope.contains(x.first)) {
+                Cerr << "JOIN SCOPE " << Endl;
+                for (auto &name : myLeftScope) {
+                    Cerr << name << Endl;
+                }
                 ctx.AddError(TIssue(ctx.GetPosition(joins.Pos()),
                     TStringBuilder() << "Correlation name " << x.first << " is out of scope"));
                 return IGraphTransformer::TStatus::Error;
@@ -206,6 +217,7 @@ namespace {
 
         TVector<std::pair<TStringBuf, TStringBuf>> rightKeys;
         TVector<const TTypeAnnotationNode*> rightKeyTypes;
+        Cerr << "PARSE JOIN RIGHT KEYS " << Endl;
         if (const auto status = ParseJoinKeys(*joins.Child(4), rightKeys, rightKeyTypes, labels, ctx, cross); status.Level != IGraphTransformer::TStatus::Ok) {
             return status;
         }
@@ -213,6 +225,7 @@ namespace {
         std::vector<std::string_view> rCheck;
         rCheck.reserve(rightKeys.size());
         for (const auto& x : rightKeys) {
+            Cerr << x.first << " " << x.second << Endl;
             for (const auto& name : (*labels.FindInput(x.first))->AllNames(x.second))
                 rCheck.emplace_back(ctx.AppendString(name));
             if (!myRightScope.contains(x.first)) {
@@ -513,6 +526,10 @@ TMaybe<TIssue> TJoinLabel::Parse(TExprContext& ctx, TExprNode& node, const TStru
     InputType = structType;
     Unique = unique;
     Distinct = distinct;
+
+    Cerr << "PARSE LABEL Struct type: " << Endl;
+    Cerr << structType->ToString() << Endl;
+
     if (auto atom = TMaybeNode<TCoAtom>(&node)) {
         if (auto err = ValidateLabel(ctx, atom.Cast())) {
             return err;
@@ -698,6 +715,7 @@ TMaybe<ui32> TJoinLabels::FindInputIndex(const TStringBuf& table) const {
 TMaybe<const TTypeAnnotationNode*> TJoinLabels::FindColumn(const TStringBuf& table, const TStringBuf& column) const {
     auto tableIndex = InputByTable.FindPtr(table);
     if (!tableIndex) {
+        Cerr << "CANNOT FIND TABLE INDEX " << Endl;
         return TMaybe<const TTypeAnnotationNode*>();
     }
 
@@ -860,7 +878,7 @@ IGraphTransformer::TStatus EquiJoinAnnotation(
 
     if (globalState.NestedJoins + 2 != labels.Inputs.size()) {
         ctx.AddError(TIssue(position,
-            TStringBuilder() << "Too few nested joins, expected exactly: " << (labels.Inputs.size() - 2)));
+            TStringBuilder() << "Too few nested joins, expected exactly: " << (labels.Inputs.size() - 2) << "globalState.nested joints " << globalState.NestedJoins));
         return IGraphTransformer::TStatus::Error;
     }
 
@@ -876,9 +894,11 @@ IGraphTransformer::TStatus EquiJoinAnnotation(
     TVector<const TItemExprType*> resultFields;
     TMap<TString, TFlattenState> flattenFields; // column -> table
     THashSet<TString> processedRenames;
+    Cerr << "FLATTEN " << options.Flatten << Endl;
     for (auto it: labels.Inputs) {
         for (auto item: it.InputType->GetItems()) {
             TString fullName = it.FullName(item->GetName());
+            Cerr << "JOIN INPUT FULL NAME " << fullName << Endl;
             auto type = columnTypes.FindPtr(fullName);
             if (type) {
                 TVector<TStringBuf> fullNames;

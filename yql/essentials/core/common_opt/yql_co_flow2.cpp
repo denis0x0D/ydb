@@ -165,6 +165,7 @@ TExprNode::TPtr AggregateSubsetFieldsAnalyzer(const TCoAggregate& node, TExprCon
 }
 
 TExprNode::TPtr FlatMapSubsetFields(const TCoFlatMapBase& node, TExprContext& ctx, TOptimizeContext& optCtx) {
+    Cerr << "FLAT MAP SUBSET FIELDS " << Endl;
     if (!AllowSubsetFieldsForNode(node.Input().Ref(), optCtx)) {
         return node.Ptr();
     }
@@ -1011,6 +1012,7 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoin(const TExprNode::TPtr& node, TExprCont
     const auto joinTreeWithInputRenames = ApplyRenamesToJoinTree(joinTree, inputJoinKeyRenamesByLabel, ctx);
 
 
+    Cerr << "EQUI JOIN annotation " << Endl;
     {
         TJoinOptions options;
         auto status = ValidateEquiJoinOptions(node->Pos(), *settingsWithoutRenames, options, ctx);
@@ -1542,7 +1544,7 @@ TExprBase FilterOverAggregate(const TCoFlatMapBase& node, TExprContext& ctx, TOp
 
 void RegisterCoFlowCallables2(TCallableOptimizerMap& map) {
     using namespace std::placeholders;
-
+    Cerr << "Register co flow " << Endl;
     map["FromFlow"] = std::bind(&OptimizeFromFlow, _1, _2, _3);
     map["Collect"] = std::bind(&OptimizeCollect, _1, _2, _3);
 
@@ -1614,7 +1616,7 @@ void RegisterCoFlowCallables2(TCallableOptimizerMap& map) {
                                 .Done();
                         }
 
-                        YQL_CLOG(DEBUG, Core) << "Pull out " << extract->Content() << " from " << node->Content() << " to " << groupingCore.Ref().Content() << " handler";
+                        Cerr << "Pull out " << extract->Content() << " from " << node->Content() << " to " << groupingCore.Ref().Content() << " handler";
                         return Build<TCoFlatMapBase>(ctx, node->Pos())
                             .CallableName(node->Content())
                             .Input(flatMapInput)
@@ -1639,7 +1641,7 @@ void RegisterCoFlowCallables2(TCallableOptimizerMap& map) {
                                 [](std::pair<const std::string_view, TExprNode::TPtr>& item){ return std::move(item.second); });
                         }
 
-                        YQL_CLOG(DEBUG, Core) << "Pull out " << extract->Content() << " from " << node->Content() << " to " << groupingCore.Ref().Content() << " input";
+                        Cerr << "Pull out " << extract->Content() << " from " << node->Content() << " to " << groupingCore.Ref().Content() << " input";
                         return Build<TCoFlatMapBase>(ctx, node->Pos())
                             .CallableName(node->Content())
                             .Input<TCoGroupingCore>()
@@ -1665,7 +1667,7 @@ void RegisterCoFlowCallables2(TCallableOptimizerMap& map) {
                 auto body = self.Lambda().Body().Ptr();
                 TSet<TStringBuf> usedFields;
                 if (HaveFieldsSubset(body, arg, usedFields, *optCtx.ParentsMap)) {
-                    YQL_CLOG(DEBUG, Core) << "FieldsSubset in " << node->Content() << " over " << self.Input().Ref().Content();
+                    Cerr << "FieldsSubset in " << node->Content() << " over " << self.Input().Ref().Content();
 
                     TExprNode::TListType filteredInputs;
                     filteredInputs.reserve(self.Input().Ref().ChildrenSize());

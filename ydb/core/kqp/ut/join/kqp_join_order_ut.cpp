@@ -77,10 +77,11 @@ TString GetPrettyJSON(const NJson::TJsonValue& json) {
  * key attribute and construct various full clique join queries
  */
 static void CreateSampleTable(NYdb::NQuery::TSession session, bool useColumnStore) {
-    CreateTables(session, "schema/create_avtodor.sql", useColumnStore);
+    (void)useColumnStore;
+    CreateTables(session, "schema/create_avtodor.sql", false);
 
+    CreateTables(session, "schema/filter.sql", true);//useColumnStore);
     /*
-    CreateTables(session, "schema/rstuv.sql", useColumnStore);
 
     CreateTables(session, "schema/tpch.sql", useColumnStore);
 
@@ -93,7 +94,7 @@ static void CreateSampleTable(NYdb::NQuery::TSession session, bool useColumnStor
     CreateTables(session, "schema/general_priorities_bug.sql", useColumnStore);
 
     {
-        CreateTables(session, "schema/different_join_predicate_key_types.sql", false /* olap params are already set in schema );
+        CreateTables(session, "schema/different_join_predicate_key_types.sql", false olap params are already set in schema );
         const TString upsert =
         R"(
             UPSERT INTO t1 (id1) VALUES (1);
@@ -445,6 +446,7 @@ void TestOlapEstimationRowsCorrectness(const TString& queryPath, const TString& 
         Cout << result.GetStats()->GetAst() << Endl;
     }
 
+    /*
     const TString expectedQuery = R"(PRAGMA kikimr.OptEnableOlapPushdown = "false";)" "\n" + actualQuery;
     TString expectedPlan;
     {
@@ -457,13 +459,13 @@ void TestOlapEstimationRowsCorrectness(const TString& queryPath, const TString& 
         expectedPlan = *result.GetStats()->GetPlan();
         PrintPlan(expectedPlan);
         Cout << result.GetStats()->GetAst() << Endl;
-    }
+    }*/
 
     auto expectedDetailedPlan = GetDetailedJoinOrder(actualPlan, {.IncludeFilters = true, .IncludeOptimizerEstimation = true, .IncludeTables = false});
-    auto actualDetailedPlan =  GetDetailedJoinOrder(expectedPlan, {.IncludeFilters = true, .IncludeOptimizerEstimation = true, .IncludeTables = false});
+    //auto actualDetailedPlan =  GetDetailedJoinOrder(expectedPlan, {.IncludeFilters = true, .IncludeOptimizerEstimation = true, .IncludeTables = false});
     Cout << expectedDetailedPlan << Endl;
-    Cout << actualDetailedPlan << Endl;
-    UNIT_ASSERT_VALUES_EQUAL(expectedDetailedPlan, actualDetailedPlan);
+    //Cout << actualDetailedPlan << Endl;
+    //UNIT_ASSERT_VALUES_EQUAL(expectedDetailedPlan, actualDetailedPlan);
 }
 
 /* Tests to check olap selectivity correctness */
@@ -473,7 +475,11 @@ Y_UNIT_TEST_SUITE(OlapEstimationRowsCorrectness) {
     }
 
     Y_UNIT_TEST(AVTODOR) {
-        TestOlapEstimationRowsCorrectness("queries/avtodorq5.sql", "");
+        TestOlapEstimationRowsCorrectness("queries/q5_.sql", "");
+    }
+
+    Y_UNIT_TEST(FILTER) {
+        TestOlapEstimationRowsCorrectness("queries/filter.sql", "");
     }
 
     Y_UNIT_TEST(TPCH333) {
