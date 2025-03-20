@@ -327,6 +327,8 @@ std::pair<TExprNode::TPtr, TExprNode::TPtr> IsRightSideForLeftJoin(
     auto joinType = joinTree->Child(0)->Content();
     auto left = joinTree->ChildPtr(1);
     auto right = joinTree->ChildPtr(2);
+    parents[left] = joinTree;
+    parents[right] = joinTree;
     if (joinType == "Inner" || joinType == "Left" || joinType == "LeftOnly" || joinType == "LeftSemi" || joinType == "RightSemi" || joinType == "Cross") {
         if (!left->IsAtom()) {
             auto x = IsRightSideForLeftJoin(left, labels, inputIndex, parents, joinTree);
@@ -380,9 +382,58 @@ TExprNode::TPtr CreateJoinKeysForNewLabel(TExprNode::TPtr joinKeys, TExprNode::T
     return atLeastOneMatch ? ctx.NewList(joinKeys->Pos(), std::move(newKeys)) : joinKeys;
 }
 
+TExprNode::TPtr PropagateNewJoinLabel(ui32 pathIndex, TVector<std::pair<bool, TExprNode::TPtr>>& pathToRoot, TExprNode::TPtr newJoinLabel,
+                                      const THashSet<TString>& joinColumns, TExprContext& ctx) {
+    auto joinTree = pathToRoot[pathIndex].second;
+    if (!pathIndex) {
+        return joinTree;
+    }
+
+    bool isLeftChild = pathToRoot[pathIndex].first;
+    auto newChild = PropagateNewJoinLabel(pathIndex - 1, pathToRoot, newJoinLabel, joinColumns, ctx);
+    auto leftKeys = joinTree->ChildPtr(3);
+    auto rightKeys = joinTree->ChildPtr(4);
+
+    auto newJoinTree = ctx.Builder(joinTree->Pos())
+                           .List()
+                               .Add(0, joinTree->ChildPtr(0))
+                               .Add(1, isLeftChild ? newChild : joinTree->ChildPtr(1))
+                               .Add(2, !isLeftChild ? newChild : joinTree->ChildPtr(2))
+                               .Add(3, isLeftChild ? CreateJoinKeysForNewLabel(leftKeys, newJoinLabel, joinColumns, ctx) : leftKeys)
+                               .Add(4, !isLeftChild ? CreateJoinKeysForNewLabel(rightKeys, newJoinLabel, joinColumns, ctx) : rightKeys)
+                               .Add(5, joinTree->ChildPtr(5))
+                           .Seal()
+                           .Build();
+
+    return ctx.ReplaceNode(std::move(joinTree), *joinTree, newJoinTree);
+}
+
+TExprNode::TPtr PropagateNewJoinLabelIfNeeded(TExprNode::TPtr joinTree, TExprNode::TPtr newJoinLabel, TExprNode::TPtr leftJoinParent,
+                                              const THashSet<TString>& joinColumns, THashMap<TExprNode::TPtr, TExprNode::TPtr>& parentMap, TExprContext& ctx) {
+    if (joinTree == leftJoinParent) {
+        return joinTree;
+    }
+
+    TVector<std::pair<bool, TExprNode::TPtr>> pathToRoot;
+    auto parentIt = leftJoinParent;
+    while (auto nextParent = parentMap[parentIt]) {
+        bool isLeftChild = nextParent->Child(1) == parentIt ? true : false;
+        pathToRoot.push_back({isLeftChild, parentIt});
+        parentIt = nextParent;
+    }
+
+    if (!pathToRoot.size()) {
+        return joinTree;
+    }
+
+    bool isLeftChild = parentIt->Child(1) == pathToRoot.back().second ? true : false;
+    pathToRoot.push_back({isLeftChild, parentIt});
+    return PropagateNewJoinLabel(pathToRoot.size() - 1, pathToRoot, newJoinLabel, joinColumns, ctx);
+}
+
+/*
 TExprNode::TPtr PropagateNewJoinLabel(TExprNode::TPtr joinTree, TExprNode::TPtr newJoinLabel, TExprNode::TPtr leftJoinParent,
                                       const THashSet<TString>& joinColumns, TExprContext& ctx) {
-    
     if (joinTree == leftJoinParent) 
         return joinTree;
 
@@ -416,6 +467,7 @@ TExprNode::TPtr PropagateNewJoinLabel(TExprNode::TPtr joinTree, TExprNode::TPtr 
 
     return ctx.ReplaceNode(std::move(joinTree), *joinTree, newJoinTree);
 }
+*/
 
 TExprNode::TPtr FilterPushdownOverJoinOptionalSide(TExprNode::TPtr equiJoin, TExprNode::TPtr predicate,
     const TSet<TStringBuf>& usedFields, TExprNode::TPtr args, const TJoinLabels& labels,
@@ -508,6 +560,8 @@ TExprNode::TPtr FilterPushdownOverJoinOptionalSide(TExprNode::TPtr equiJoin, TEx
         predicate, /*filterInput=*/rightSideInput, args, labels, {}, {}, onlyKeys,
         inputIndex, inputIndex, ordered, /*substituteWithNulls=*/false, ctx
     );
+
+    TStack<TExprNode::TPtr> stack;
 
     // then create unionall of two joins.
     //firstly, join same labels with inner join:
@@ -661,8 +715,9 @@ TExprNode::TPtr FilterPushdownOverJoinOptionalSide(TExprNode::TPtr equiJoin, TEx
         .Seal()
         .Build();
 
-    auto lastJoinTree = ctx.ReplaceNode(std::move(joinTree), *parentJoinPtr, newParentJoin);
-    auto newJoinTree = PropagateNewJoinLabel(lastJoinTree, newJoinLabel, newParentJoin, joinColumns, ctx);
+    
+    auto newJoinTree = PropagateNewJoinLabelIfNeeded(joinTree, newJoinLabel, parentJoinPtr, joinColumns, parents, ctx);
+    newJoinTree = ctx.ReplaceNode(std::move(newJoinTree), *parentJoinPtr, newParentJoin);
 
     i = 0;
     auto newJoinSettings = ctx.Builder(pos)
