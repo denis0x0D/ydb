@@ -354,6 +354,69 @@ std::pair<TExprNode::TPtr, TExprNode::TPtr> IsRightSideForLeftJoin(
     return {nullptr, nullptr};
 }
 
+TExprNode::TPtr CreateJoinKeysForNewLabel(TExprNode::TPtr joinKeys, TExprNode::TPtr newJoinLabel, const THashSet<TString>& joinColumns, TExprContext &ctx) {
+    TExprNode::TListType newKeys;
+    newKeys.reserve(joinKeys->ChildrenSize());
+
+    bool atLeastOneMatch = false;
+    for (ui32 i = 0; i < joinKeys->ChildrenSize(); i += 2) {
+        auto table = joinKeys->ChildPtr(i);
+        auto column = joinKeys->ChildPtr(i + 1);
+
+        YQL_ENSURE(table->IsAtom());
+        YQL_ENSURE(column->IsAtom());
+
+        auto fcn = FullColumnName(table->Content(), column->Content());
+        if (joinColumns.contains(fcn)) {
+            newKeys.push_back(newJoinLabel);
+            newKeys.push_back(ctx.NewAtom(column->Pos(), fcn));
+            atLeastOneMatch = true;
+        } else {
+            newKeys.push_back(table);
+            newKeys.push_back(column);
+        }
+    }
+
+    return atLeastOneMatch ? ctx.NewList(joinKeys->Pos(), std::move(newKeys)) : joinKeys;
+}
+
+TExprNode::TPtr PropagateNewJoinLabel(TExprNode::TPtr joinTree, TExprNode::TPtr newJoinLabel, TExprNode::TPtr leftJoinParent,
+                                      const THashSet<TString>& joinColumns, TExprContext& ctx) {
+    
+    if (joinTree == leftJoinParent) 
+        return joinTree;
+
+    auto left = joinTree->ChildPtr(1);
+    auto right = joinTree->ChildPtr(2);
+
+    if (!left->IsAtom()) {
+        left = PropagateNewJoinLabel(left, newJoinLabel, leftJoinParent, joinColumns, ctx);
+    }
+
+    if (!right->IsAtom()) {
+        right = PropagateNewJoinLabel(right, newJoinLabel, leftJoinParent, joinColumns, ctx);
+    }
+
+    auto leftKeys = joinTree->ChildPtr(3);
+    auto rightKeys = joinTree->ChildPtr(4);
+
+    leftKeys = CreateJoinKeysForNewLabel(leftKeys, newJoinLabel, joinColumns, ctx);
+    rightKeys = CreateJoinKeysForNewLabel(rightKeys, newJoinLabel, joinColumns, ctx);
+
+    auto newJoinTree = ctx.Builder(joinTree->Pos())
+        .List()
+            .Add(0, joinTree->ChildPtr(0))
+            .Add(1, left)
+            .Add(2, right)
+            .Add(3, leftKeys)
+            .Add(4, rightKeys)
+            .Add(5, joinTree->ChildPtr(5))
+        .Seal()
+        .Build();
+
+    return ctx.ReplaceNode(std::move(joinTree), *joinTree, newJoinTree);
+}
+
 TExprNode::TPtr FilterPushdownOverJoinOptionalSide(TExprNode::TPtr equiJoin, TExprNode::TPtr predicate,
     const TSet<TStringBuf>& usedFields, TExprNode::TPtr args, const TJoinLabels& labels,
     ui32 inputIndex, const TMap<TStringBuf, TVector<TStringBuf>>& renameMap, bool ordered, bool skipNulls, TExprContext& ctx,
@@ -598,47 +661,8 @@ TExprNode::TPtr FilterPushdownOverJoinOptionalSide(TExprNode::TPtr equiJoin, TEx
         .Seal()
         .Build();
 
-    auto newJoinTree = ctx.ReplaceNode(std::move(joinTree), *parentJoinPtr, newParentJoin);
-    Cerr << "join columns size " << joinColumns.size() << Endl;
-
-    /*
-    remJoinKeys = lastJoinTree->ChildPtr(3);
-    for (ui32 i = 0; i < remJoinKeys->ChildrenSize(); i += 2) {
-        auto table = remJoinKeys->ChildPtr(i);
-        auto column = remJoinKeys->ChildPtr(i + 1);
-
-        YQL_ENSURE(table->IsAtom());
-        YQL_ENSURE(column->IsAtom());
-
-        auto fcn = FullColumnName(table->Content(), column->Content());
-        Cerr << "FULL COLUMN NAME " << fcn << Endl;
-
-        if (joinColumns.contains(fcn)) {
-            newKeys.push_back(newJoinLabel);
-            newKeys.push_back(ctx.NewAtom(column->Pos(), fcn));
-        } else {
-            newKeys.push_back(table);
-            newKeys.push_back(column);
-        }
-    }
-
-    newKeysList = ctx.NewList(remJoinKeys->Pos(), std::move(newKeys));
-    auto newParentParentJoin = ctx.Builder(lastJoinTree->Pos())
-        .List()
-            .Add(0, lastJoinTree->ChildPtr(0))
-            .Add(1, lastJoinTree->ChildPtr(1))
-            .Add(2, lastJoinTree->ChildPtr(2))
-            .Add(3, newKeysList)
-            .Add(4, lastJoinTree->ChildPtr(4))
-            .Add(5, lastJoinTree->ChildPtr(5))
-        .Seal()
-        .Build();
-
-    auto joinTreeToUpdate = lastJoinTree;
-    auto newJoinTree = ctx.ReplaceNode(std::move(lastJoinTree), *joinTreeToUpdate, newParentParentJoin);
-    */
- 
-    ///////////////////////////////////////////////////////////////////////////////////////
+    auto lastJoinTree = ctx.ReplaceNode(std::move(joinTree), *parentJoinPtr, newParentJoin);
+    auto newJoinTree = PropagateNewJoinLabel(lastJoinTree, newJoinLabel, newParentJoin, joinColumns, ctx);
 
     i = 0;
     auto newJoinSettings = ctx.Builder(pos)
@@ -673,7 +697,7 @@ TExprNode::TPtr FilterPushdownOverJoinOptionalSide(TExprNode::TPtr equiJoin, TEx
         .Callable("EquiJoin")
         .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
             for (const auto& label : joinLabelCounters) {
-                if (label.first == "d") {
+                if (label.second > 0) {
                     auto equiJoinInput = equiJoinLabels.at(TString(label.first));
                     const TTypeAnnotationNode* itemType = equiJoinInput->GetTypeAnn()->Cast<TListExprType>()->GetItemType();
                     auto structType = itemType->Cast<TStructExprType>();
