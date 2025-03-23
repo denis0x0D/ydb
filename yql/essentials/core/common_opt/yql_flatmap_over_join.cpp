@@ -699,6 +699,7 @@ TExprNode::TPtr FilterPushdownOverJoinOptionalSide(TExprNode::TPtr equiJoin, TEx
         remJoinKeys = parentJoinPtr->ChildPtr(4);
     }
 
+    /*
     TExprNode::TListType newKeys;
     newKeys.reserve(remJoinKeys->ChildrenSize());
     TExprNode::TPtr newKeysList = remJoinKeys;
@@ -722,10 +723,11 @@ TExprNode::TPtr FilterPushdownOverJoinOptionalSide(TExprNode::TPtr equiJoin, TEx
             newKeys.push_back(column);
         }
    }
-   /*
     
         newKeysList = ctx.NewList(remJoinKeys->Pos(), std::move(newKeys));
     }*/
+
+    auto newKeysList = CreateJoinKeysForNewLabel(remJoinKeys, newJoinLabel,joinColumns, ctx);
 
     auto newParentJoin = ctx.Builder(parentJoinPtr->Pos())
         .List()
