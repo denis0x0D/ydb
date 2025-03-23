@@ -165,7 +165,6 @@ TExprNode::TPtr AggregateSubsetFieldsAnalyzer(const TCoAggregate& node, TExprCon
 }
 
 TExprNode::TPtr FlatMapSubsetFields(const TCoFlatMapBase& node, TExprContext& ctx, TOptimizeContext& optCtx) {
-    Cerr << "FLAT MAP SUBSET FIELDS " << Endl;
     if (!AllowSubsetFieldsForNode(node.Input().Ref(), optCtx)) {
         return node.Ptr();
     }
@@ -1012,7 +1011,6 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoin(const TExprNode::TPtr& node, TExprCont
     const auto joinTreeWithInputRenames = ApplyRenamesToJoinTree(joinTree, inputJoinKeyRenamesByLabel, ctx);
 
 
-    Cerr << "EQUI JOIN annotation " << Endl;
     {
         TJoinOptions options;
         auto status = ValidateEquiJoinOptions(node->Pos(), *settingsWithoutRenames, options, ctx);
