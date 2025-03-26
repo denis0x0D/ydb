@@ -406,6 +406,17 @@ TExprNode::TPtr CreateLabelList(const THashSet<TString>& labels, TExprContext& c
     return ctx.NewList(position, std::move(newKeys));
 }
 
+TExprNode::TPtr RemoveJoinKeysFromElimnation(const TExprNode& settings, TExprContext& ctx) {
+    TExprNode::TListType updated;
+    for (auto setting : settings.Children()) {
+        if (setting->ChildrenSize() == 3 && setting->Child(0)->Content() == "rename" && setting->Child(2)->Content() == "") {
+            continue;
+        }
+        updated.push_back(setting);
+    }
+    return ctx.NewList(settings.Pos(), std::move(updated));
+}
+
 TExprNode::TPtr FilterPushdownOverJoinOptionalSide(TExprNode::TPtr equiJoin, TExprNode::TPtr predicate,
     const TSet<TStringBuf>& usedFields, TExprNode::TPtr args, const TJoinLabels& labels,
     ui32 inputIndex, const TMap<TStringBuf, TVector<TStringBuf>>& renameMap, bool ordered, bool skipNulls, TExprContext& ctx,
@@ -473,6 +484,8 @@ TExprNode::TPtr FilterPushdownOverJoinOptionalSide(TExprNode::TPtr equiJoin, TEx
     DecrementCountLabelsInputUsage(leftJoinTree, joinLabelCounters);
 
     auto leftJoinSettings = equiJoin->ChildPtr(equiJoin->ChildrenSize() - 1);
+    // FIXME: If we have renames to "", EquiJoin will eliminate those keys from result.
+    auto newLeftJoinSettings = RemoveJoinKeysFromElimnation(*leftJoinSettings, ctx);
 
     auto innerJoinTree = ctx.ChangeChild(*leftJoinTree, 0, ctx.NewAtom(leftJoinTree->Pos(), "Inner"));
     auto leftOnlyJoinTree = ctx.ChangeChild(*leftJoinTree, 0, ctx.NewAtom(leftJoinTree->Pos(), "LeftOnly"));
@@ -532,7 +545,7 @@ TExprNode::TPtr FilterPushdownOverJoinOptionalSide(TExprNode::TPtr equiJoin, TEx
                 .Atom(1, innerJoinTree->ChildRef(2)->Content())
             .Seal()
             .Add(i++, innerJoinTree)
-            .Add(i++, leftJoinSettings)
+            .Add(i++, newLeftJoinSettings)
         .Seal()
     .Build();
 
@@ -564,7 +577,7 @@ TExprNode::TPtr FilterPushdownOverJoinOptionalSide(TExprNode::TPtr equiJoin, TEx
                 .Atom(1, leftOnlyJoinTree->ChildRef(2)->Content())
             .Seal()
             .Add(i++, leftOnlyJoinTree)
-            .Add(i++, leftJoinSettings)
+            .Add(i++, newLeftJoinSettings)
         .Seal()
     .Build();
 
