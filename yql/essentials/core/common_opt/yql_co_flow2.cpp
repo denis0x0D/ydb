@@ -1037,6 +1037,7 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoinList(const TExprNode::TPtr& node, TExpr
         }
 
         if (IsInputSuitableForPullingOverEquiJoinList(input, joinKeysByLabel, inputJoinKeyRenamesByLabel[label], optCtx)) {
+            /*
             auto flatMap = input.List().Cast<TCoFlatMapBase>();
 
             auto flatMapInputItem = GetSequenceItemType(flatMap.Input(), false);
@@ -1045,20 +1046,21 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoinList(const TExprNode::TPtr& node, TExpr
             TString canaryName = TStringBuilder() << label << "." << canaryBaseName << i;
             structItems.push_back(ctx.MakeType<TItemExprType>(canaryName, ctx.MakeType<TDataExprType>(EDataSlot::Bool)));
             structType = ctx.MakeType<TStructExprType>(structItems);
+            */
 
             YQL_CLOG(DEBUG, Core) << "Will pull up EquiJoin input #" << i;
             toPull.push_back(i);
         }
 
-        err = canaryLabels.Add(ctx, *input.Scope().Ptr(), structType);
-        YQL_ENSURE(!err);
+        //err = canaryLabels.Add(ctx, *input.Scope().Ptr(), structType);
+        //YQL_ENSURE(!err);
     }
 
     if (toPull.empty()) {
         return node;
     }
 
-    const TStructExprType* canaryResultType = nullptr;
+    //const TStructExprType* canaryResultType = nullptr;
     const TStructExprType* noRenamesResultType = nullptr;
     const auto settingsWithoutRenames = RemoveSetting(*settings, "rename", ctx);
     const auto joinTreeWithInputRenames = ApplyRenamesToJoinTree(joinTree, inputJoinKeyRenamesByLabel, ctx);
@@ -1068,15 +1070,15 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoinList(const TExprNode::TPtr& node, TExpr
         auto status = ValidateEquiJoinOptions(node->Pos(), *settingsWithoutRenames, options, ctx);
         YQL_ENSURE(status == IGraphTransformer::TStatus::Ok);
 
+        /*
         status = EquiJoinAnnotation(node->Pos(), canaryResultType, canaryLabels,
                                          *joinTreeWithInputRenames, options, ctx);
         YQL_ENSURE(status == IGraphTransformer::TStatus::Ok);
-
+        */
         status = EquiJoinAnnotation(node->Pos(), noRenamesResultType, actualLabels,
                                     *joinTree, options, ctx);
         YQL_ENSURE(status == IGraphTransformer::TStatus::Ok);
     }
-
 
     TExprNode::TListType newEquiJoinArgs;
     newEquiJoinArgs.reserve(node->ChildrenSize());
