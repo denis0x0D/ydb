@@ -347,7 +347,162 @@ TExprNode::TPtr FuseJoinTree(TExprNode::TPtr downstreamJoinTree, TExprNode::TPtr
     return ret;
 }
 
+TExprNode::TPtr FuseJoinTreeNoRename(TExprNode::TPtr downstreamJoinTree, TExprNode::TPtr upstreamJoinTree, const THashSet<TStringBuf>& upstreamLabelIndex,
+    const THashMap<TString, TString>& upstreamTablesRename, const THashMap<TString, TString>& upstreamColumnsBackRename,
+    TExprContext& ctx)
+{
+    TExprNode::TPtr left;
+    if (downstreamJoinTree->Child(1)->IsAtom()) {
+        if (!upstreamLabelIndex.contains(downstreamJoinTree->Child(1)->Content())) {
+            left = downstreamJoinTree->Child(1);
+        }
+        else {
+            left = upstreamJoinTree; //RenameJoinTree(upstreamJoinTree, upstreamTablesRename, ctx);
+        }
+    }
+    else {
+        left = FuseJoinTreeNoRename(downstreamJoinTree->Child(1), upstreamJoinTree, upstreamLabelIndex, upstreamTablesRename,
+            upstreamColumnsBackRename, ctx);
+        if (!left) {
+            return nullptr;
+        }
+    }
+
+    TExprNode::TPtr right;
+    if (downstreamJoinTree->Child(2)->IsAtom()) {
+        if (!upstreamLabelIndex.contains(downstreamJoinTree->Child(2)->Content())) {
+            right = downstreamJoinTree->Child(2);
+        }
+        else {
+            right = upstreamJoinTree; //RenameJoinTree(upstreamJoinTree, upstreamTablesRename, ctx);
+        }
+    } else {
+        right = FuseJoinTreeNoRename(downstreamJoinTree->Child(2), upstreamJoinTree, upstreamLabelIndex, upstreamTablesRename,
+            upstreamColumnsBackRename, ctx);
+        if (!right) {
+            return nullptr;
+        }
+    }
+
+    TExprNode::TListType newChildren(downstreamJoinTree->ChildrenList());
+    newChildren[1] = left;
+    newChildren[2] = right;
+    newChildren[3] = downstreamJoinTree->Child(3);
+    newChildren[4] = downstreamJoinTree->Child(4);
+    if (!newChildren[3] || !newChildren[4]) {
+        return nullptr;
+    }
+
+    auto ret = ctx.ChangeChildren(*downstreamJoinTree, std::move(newChildren));
+    return ret;
+}
+
+bool isSuitableForFuseWithoutRename(const TExprNode::TPtr& node) {
+    ui32 downstreamInputs = node->ChildrenSize() - 2;
+    for (ui32 i = 0; i < downstreamInputs; ++i) {
+        auto label = node->Child(i)->Child(1);
+        if (auto tuple = TMaybeNode<TCoAtomList>(label)) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+TExprNode::TPtr FuseWithoutRename(const TExprNode::TPtr& node, ui32 upstreamIndex, TExprContext& ctx) {
+    Cerr << "FUSE WITHOUT RENAME " << Endl;
+    ui32 downstreamInputs = node->ChildrenSize() - 2;
+    auto upstreamList = node->Child(upstreamIndex)->Child(0);
+    THashSet<TStringBuf> downstreamLabels;
+    THashSet<TStringBuf> upstreamLabelsIndex;
+
+    for (ui32 i = 0; i < downstreamInputs; ++i) {
+        auto label = node->Child(i)->Child(1);
+        if (auto tuple = TMaybeNode<TCoAtomList>(label)) {
+            for (auto label : tuple.Cast()) {
+                auto value = label.Value();
+                downstreamLabels.insert(value);
+                upstreamLabelsIndex.insert(value);
+            }
+        } else {
+           downstreamLabels.insert(label->Content());
+        }
+    }
+
+    THashMap<TString, TString> upstreamTablesRename; // rename of conflicted upstream tables
+    THashMap<TString, TString> upstreamColumnsBackRename; // renamed of columns under upstreamLabel to full name inside upstream
+    TMap<TString, TVector<TString>> upstreamColumnsRename;
+    ui32 upstreamInputs = upstreamList->ChildrenSize() - 2;
+    THashSet<TStringBuf> upstreamLabels;
+    for (ui32 i = 0; i < upstreamInputs; ++i) {
+        auto label = upstreamList->Child(i)->Child(1);
+        if (!label->IsAtom()) {
+            Cerr << "UPSTREAM IS NOT ATOM " << Endl;
+            return node;
+        }
+
+        upstreamLabels.insert(label->Content());
+    }
+
+    for (ui32 i = 0; i < upstreamInputs; ++i) {
+        auto label = upstreamList->Child(i)->Child(1);
+        if (!label->IsAtom()) {
+            return node;
+        }
+    }
+
+    TExprNode::TListType equiJoinChildren;
+    for (ui32 i = 0; i < downstreamInputs; ++i) {
+        if (i != upstreamIndex) {
+            equiJoinChildren.push_back(node->Child(i));
+        } else {
+            // insert the whole upstream inputs
+            for (ui32 j = 0; j < upstreamInputs; ++j) {
+               equiJoinChildren.push_back(upstreamList->Child(j));
+            }
+        }
+    }
+
+    auto downstreamJoinTree = node->Child(downstreamInputs);
+    auto downstreamSettings = node->Children().back();
+    auto upstreamJoinTree = upstreamList->Child(upstreamInputs);
+    TExprNode::TListType newSettings;
+
+    for (auto& setting : upstreamList->Children().back()->Children()) {
+        newSettings.push_back(setting);
+        if (setting->Child(0)->Content() != "rename") {
+            return node;
+        }
+    }
+
+    for (auto& setting : downstreamSettings->Children()) {
+        newSettings.push_back(setting);
+        if (setting->Child(0)->Content() != "rename") {
+            return node;
+        }
+    }
+
+    auto joinTree = FuseJoinTreeNoRename(downstreamJoinTree, upstreamJoinTree, upstreamLabelsIndex,
+        upstreamTablesRename, upstreamColumnsBackRename, ctx);
+    if (!joinTree) {
+        Cerr << "CANNOT FUSE JOIN TREE " << Endl;
+        return node;
+    }
+
+    auto newSettingsNode = ctx.NewList(node->Pos(), std::move(newSettings));
+    equiJoinChildren.push_back(joinTree);
+    equiJoinChildren.push_back(newSettingsNode);
+    auto ret = ctx.NewCallable(node->Pos(), "EquiJoin", std::move(equiJoinChildren));
+    return ret;
+}
+
 TExprNode::TPtr FuseEquiJoins(const TExprNode::TPtr& node, ui32 upstreamIndex, TExprContext& ctx) {
+    if (isSuitableForFuseWithoutRename(node)) {
+        return FuseWithoutRename(node, upstreamIndex, ctx);
+    }
+
+    Cerr << "FUSE WITH RENAMES " << Endl;
+
     ui32 downstreamInputs = node->ChildrenSize() - 2;
     auto upstreamList = node->Child(upstreamIndex)->Child(0);
     auto upstreamLabel = node->Child(upstreamIndex)->Child(1);
@@ -531,6 +686,7 @@ bool IsRenamingOrPassthroughFlatMap(const TCoFlatMapBase& flatMap, THashMap<TStr
     TExprBase outItem(body.Ref().ChildPtr(0));
     if (outItem.Raw() == arg.Raw()) {
         isIdentity = true;
+        Cerr << "IS IDENTITY " << Endl;
         return true;
     }
 
@@ -545,7 +701,7 @@ bool IsRenamingOrPassthroughFlatMap(const TCoFlatMapBase& flatMap, THashMap<TStr
                 if (member.Struct().Raw() == arg.Raw()) {
                     TStringBuf oldName = member.Name().Value();
                     TStringBuf newName = tuple.Name().Value();
-
+                    Cerr << "RENAIMING " << Endl;
                     YQL_ENSURE(renames.insert({newName, oldName}).second);
                 }
             }
@@ -647,7 +803,7 @@ bool IsInputSuitableForPullingOverEquiJoin(const TCoEquiJoinInput& input,
     THashMap<TStringBuf, TStringBuf>& renames, TOptimizeContext& optCtx)
 {
     renames.clear();
-    YQL_ENSURE(input.Scope().Ref().IsAtom());
+    //YQL_ENSURE(input.Scope().Ref().IsAtom());
     if (!optCtx.IsSingleUsage(input)) {
         return false;
     }
@@ -657,7 +813,13 @@ bool IsInputSuitableForPullingOverEquiJoin(const TCoEquiJoinInput& input,
         return false;
     }
 
-    const TStringBuf label = input.Scope().Ref().Content();
+     TStringBuf label = input.Scope().Ref().Content();
+    if (input.Scope().Maybe<TCoAtomList>()) {
+           auto list = input.Scope().Cast<TCoAtomList>();
+           label = (*list.begin()).Value();
+     }
+
+
     return IsFlatmapSuitableForPullUpOverEqiuJoin(maybeFlatMap.Cast(), label, joinKeysByLabel, renames, optCtx);
 }
 
@@ -672,6 +834,8 @@ TExprNode::TPtr ApplyRenames(const TExprNode::TPtr& input, const TMap<TStringBuf
         TStringBuf columnName;
         SplitTableName(memberName, tableName, columnName);
 
+        //Cerr << "CANARY BASE NAME " << canaryBaseName << Endl;
+        //Cerr << "COLUMN NAME " << columnName << Endl;
         if (columnName.find(canaryBaseName, 0) == 0) {
             continue;
         }
@@ -683,12 +847,34 @@ TExprNode::TPtr ApplyRenames(const TExprNode::TPtr& input, const TMap<TStringBuf
             continue;
         }
 
-        auto member = ctx.Builder(input->Pos())
+        TExprNode::TPtr member;
+        /*
+        if (memberName.find("t2.Key") != TString::npos) {
+             member = ctx.Builder(input->Pos())
+                .Callable("Just")
+                    .Callable(0, "Member")
+                      .Add(0, input)
+                      .Atom(1, memberName)
+                    .Seal()
+                .Seal()
+            .Build();
+
+        } else {
+         member = ctx.Builder(input->Pos())
             .Callable("Member")
                 .Add(0, input)
                 .Atom(1, memberName)
             .Seal()
             .Build();
+        }
+            */
+         member = ctx.Builder(input->Pos())
+            .Callable("Member")
+                .Add(0, input)
+                .Atom(1, memberName)
+            .Seal()
+            .Build();
+
 
         for (auto& to : targets) {
             asStructArgs.push_back(
@@ -760,51 +946,81 @@ const TTypeAnnotationNode* GetCanaryOutputType(const TStructExprType& outputType
     if (!maybeIndex) {
         return nullptr;
     }
+    Cerr << "ITEM FOUND " << *maybeIndex << Endl;
     return outputType.GetItems()[*maybeIndex]->GetItemType();
 }
 
-TExprNode::TPtr BuildOutputFlattenMembersArg(const TCoEquiJoinInput& input, const TExprNode::TPtr& inputArg,
+TVector<TExprNode::TPtr> BuildOutputFlattenMembersArg(const TCoEquiJoinInput& input, const TExprNode::TPtr& inputArg,
     const TString& canaryName, const TStructExprType& canaryResultTypeWithoutRenames, TExprContext& ctx)
 {
-    YQL_ENSURE(input.Scope().Ref().IsAtom());
-    TStringBuf label = input.Scope().Ref().Content();
+    //YQL_ENSURE(input.Scope().Ref().IsAtom());
+    TVector<TStringBuf> labels;// = input.Scope().Ref().Content();
+    if (input.Scope().Maybe<TCoAtomList>()) {
+        auto list = input.Scope().Cast<TCoAtomList>();
+        for (auto label : list)
+            labels.push_back(label);
+    }
 
     auto flatMap = input.List().Cast<TCoFlatMapBase>();
     auto lambda = flatMap.Lambda();
     YQL_ENSURE(IsJustOrSingleAsList(lambda.Body().Ref()));
     auto strippedLambdaBody = lambda.Body().Ref().HeadPtr();
 
-    const TString labelPrefix = TString::Join(label, ".");
-    const TString fullCanaryName = FullColumnName(label, canaryName);
+    const TString labelPrefix = TString::Join(labels.front(), ".");
+    const TString fullCanaryName = FullColumnName(labels.front(), canaryName);
 
     const TTypeAnnotationNode* canaryOutType = GetCanaryOutputType(canaryResultTypeWithoutRenames, fullCanaryName);
     if (!canaryOutType) {
         // canary didn't survive join
         return {};
     }
-
+    //const TString labelPrefixT2 = "t2.";
     auto flatMapInputItem = GetSequenceItemType(flatMap.Input(), false);
 
+    TExprNode::TListType labelsList;
+    for (const auto& label : labels) {
+        labelsList.push_back(ctx.NewAtom(input.Pos(), label));
+    }
+
     auto myStruct = ctx.Builder(input.Pos())
-        .Callable("DivePrefixMembers")
+        .Callable("SelectMembers")
             .Add(0, inputArg)
-            .List(1)
-                .Atom(0, labelPrefix)
-            .Seal()
+            .Add(1, ctx.NewList(input.Pos(), std::move(labelsList)))
+                //.Atom(0, labelPrefix)
+                //.Atom(1, labelPrefixT2)
+            //.Seal()
         .Seal()
         .Build();
 
     if (canaryOutType->GetKind() == ETypeAnnotationKind::Data) {
         YQL_ENSURE(canaryOutType->Cast<TDataExprType>()->GetSlot() == EDataSlot::Bool);
         // our input passed as-is
-        return ctx.Builder(input.Pos())
-            .List()
-                .Atom(0, labelPrefix)
-                .ApplyPartial(1, lambda.Args().Ptr(), std::move(strippedLambdaBody))
+        auto temp =  ctx.Builder(input.Pos())
+            //.List()
+                //.Atom(0, labelPrefix)
+                .ApplyPartial(lambda.Args().Ptr(), std::move(strippedLambdaBody))
                     .With(0, std::move(myStruct))
                 .Seal()
-            .Seal()
+            //.Seal()
             .Build();
+    //    return temp;
+       TVector<TExprNode::TPtr> result;
+
+       for (ui32 i = 0; i < labels.size(); ++i) {
+           auto res =  ctx.Builder(input.Pos())
+                .List()
+                    .Atom(0, labels[i])
+                    .Callable(1, "DivePrefixMembers")
+                        .Add(0, temp)
+                        .List(1)
+                            .Atom(0, labels[i])
+                        .Seal()
+                    .Seal()
+                .Seal()
+                .Build();
+            result.push_back(res);
+       }
+       return result;
     }
 
     YQL_ENSURE(canaryOutType->GetKind() == ETypeAnnotationKind::Optional);
@@ -819,7 +1035,7 @@ TExprNode::TPtr BuildOutputFlattenMembersArg(const TCoEquiJoinInput& input, cons
         }
     }
 
-    return ctx.Builder(input.Pos())
+    auto temp = ctx.Builder(input.Pos())
         .List()
             .Atom(0, labelPrefix)
             .Callable(1, "FlattenMembers")
@@ -854,6 +1070,7 @@ TExprNode::TPtr BuildOutputFlattenMembersArg(const TCoEquiJoinInput& input, cons
             .Seal()
         .Seal()
         .Build();
+    return {temp};
 }
 
 TExprNode::TPtr PullUpExtendOverEquiJoin(const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& optCtx) {
@@ -938,6 +1155,7 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoin(const TExprNode::TPtr& node, TExprCont
     if (!optCtx.Types->PullUpFlatMapOverJoin) {
         return node;
     }
+    Cerr << "PULL FLAT MAP " << Endl;
 
     YQL_ENSURE(node->ChildrenSize() >= 4);
     auto inputsCount = ui32(node->ChildrenSize() - 2);
@@ -964,9 +1182,11 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoin(const TExprNode::TPtr& node, TExprCont
     for (ui32 i = 0; i < inputsCount; ++i) {
         TCoEquiJoinInput input(node->ChildPtr(i));
 
+        /*
         if (!input.Scope().Ref().IsAtom()) {
-            return node;
+           return node;
         }
+           */
 
         const TTypeAnnotationNode* itemType = input.List().Ref().GetTypeAnn()->Cast<TListExprType>()->GetItemType();
         auto structType = itemType->Cast<TStructExprType>();
@@ -980,8 +1200,12 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoin(const TExprNode::TPtr& node, TExprCont
         auto err = actualLabels.Add(ctx, *input.Scope().Ptr(), structType);
         YQL_ENSURE(!err);
 
-        auto label = input.Scope().Ref().Content();
 
+        TStringBuf label = input.Scope().Ref().Content();
+        if (input.Scope().Maybe<TCoAtomList>()) {
+           auto list = input.Scope().Cast<TCoAtomList>();
+           label = (*list.begin()).Value();
+        }
 
         if (IsInputSuitableForPullingOverEquiJoin(input, joinKeysByLabel, inputJoinKeyRenamesByLabel[label], optCtx)) {
             auto flatMap = input.List().Cast<TCoFlatMapBase>();
@@ -989,7 +1213,7 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoin(const TExprNode::TPtr& node, TExprCont
             auto flatMapInputItem = GetSequenceItemType(flatMap.Input(), false);
             auto structItems = flatMapInputItem->Cast<TStructExprType>()->GetItems();
 
-            TString canaryName = TStringBuilder() << canaryBaseName << i;
+            TString canaryName = TStringBuilder() << label << "." << canaryBaseName << i;
             structItems.push_back(ctx.MakeType<TItemExprType>(canaryName, ctx.MakeType<TDataExprType>(EDataSlot::Bool)));
             structType = ctx.MakeType<TStructExprType>(structItems);
 
@@ -1087,8 +1311,8 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoin(const TExprNode::TPtr& node, TExprCont
             }
 
             auto flattenMembersArg = BuildOutputFlattenMembersArg(input, afterJoinArg, canaryName, *canaryResultType, ctx);
-            if (flattenMembersArg) {
-                flattenMembersArgs.push_back(flattenMembersArg);
+            if (flattenMembersArg.size()) {
+                    flattenMembersArgs.insert(flattenMembersArgs.end(), flattenMembersArg.begin(), flattenMembersArg.end());
             }
         } else {
             flattenMembersArgs.push_back(ctx.Builder(input.Pos())
@@ -1116,7 +1340,7 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoin(const TExprNode::TPtr& node, TExprCont
 
     auto newLambdaBody = ctx.Builder(node->Pos())
         .Callable("Just")
-            .Add(0, ApplyRenames(flattenMembers, renames, *noRenamesResultType, canaryBaseName, ctx))
+                .Add(0, ApplyRenames(flattenMembers, renames, *noRenamesResultType, canaryBaseName, ctx))
         .Seal()
         .Build();
 
@@ -1124,6 +1348,7 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoin(const TExprNode::TPtr& node, TExprCont
 
     return ctx.NewCallable(node->Pos(), "OrderedFlatMap", { newEquiJoin, newLambda });
 }
+
 
 TExprNode::TPtr OptimizeFromFlow(const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& optCtx) {
     if (!optCtx.IsSingleUsage(node->Head())) {
@@ -1817,12 +2042,13 @@ void RegisterCoFlowCallables2(TCallableOptimizerMap& map) {
             if (node->Child(i)->Child(0)->IsCallable("EquiJoin") &&
                 optCtx.IsSingleUsage(*node->Child(i)) &&
                 optCtx.IsSingleUsage(*node->Child(i)->Child(0))) {
+                Cerr << "CALL FUSE " << Endl;
                 auto ret = FuseEquiJoins(node, i, ctx);
                 if (ret != node) {
                     YQL_CLOG(DEBUG, Core) << "FuseEquiJoins";
                     return ret;
                 }
-            }
+            } 
         }
 
         if (auto ret = PullUpExtendOverEquiJoin(node, ctx, optCtx); ret != node) {
