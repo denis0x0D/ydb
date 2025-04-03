@@ -409,6 +409,15 @@ bool isSuitableForFuseWithoutRename(const TExprNode::TPtr& node) {
     return false;
 }
 
+const TTypeAnnotationNode* GetCanaryOutputType(const TStructExprType& outputType, TStringBuf fullCanaryName) {
+    auto maybeIndex = outputType.FindItem(fullCanaryName);
+    if (!maybeIndex) {
+        return nullptr;
+    }
+    Cerr << "ITEM FOUND " << *maybeIndex << Endl;
+    return outputType.GetItems()[*maybeIndex]->GetItemType();
+}
+
 TExprNode::TPtr FuseWithoutRename(const TExprNode::TPtr& node, ui32 upstreamIndex, TExprContext& ctx) {
     Cerr << "FUSE WITHOUT RENAME " << Endl;
     ui32 downstreamInputs = node->ChildrenSize() - 2;
@@ -798,7 +807,7 @@ bool IsFlatmapSuitableForPullUpOverEqiuJoin(const TCoFlatMapBase& flatMap,
     return true;
 }
 
-bool IsInputSuitableForPullingOverEquiJoin(const TCoEquiJoinInput& input,
+bool IsInputSuitableForPullingOverEquiJoinList(const TCoEquiJoinInput& input,
     const THashMap<TStringBuf, THashSet<TStringBuf>>& joinKeysByLabel,
     THashMap<TStringBuf, TStringBuf>& renames, TOptimizeContext& optCtx)
 {
@@ -941,16 +950,7 @@ TExprNode::TPtr ApplyRenamesToJoinTree(const TExprNode::TPtr& joinTree,
         .Build();
 }
 
-const TTypeAnnotationNode* GetCanaryOutputType(const TStructExprType& outputType, TStringBuf fullCanaryName) {
-    auto maybeIndex = outputType.FindItem(fullCanaryName);
-    if (!maybeIndex) {
-        return nullptr;
-    }
-    Cerr << "ITEM FOUND " << *maybeIndex << Endl;
-    return outputType.GetItems()[*maybeIndex]->GetItemType();
-}
-
-TVector<TExprNode::TPtr> BuildOutputFlattenMembersArg(const TCoEquiJoinInput& input, const TExprNode::TPtr& inputArg,
+TVector<TExprNode::TPtr> BuildOutputFlattenMembersArgList(const TCoEquiJoinInput& input, const TExprNode::TPtr& inputArg,
     const TString& canaryName, const TStructExprType& canaryResultTypeWithoutRenames, TExprContext& ctx)
 {
     //YQL_ENSURE(input.Scope().Ref().IsAtom());
@@ -979,7 +979,8 @@ TVector<TExprNode::TPtr> BuildOutputFlattenMembersArg(const TCoEquiJoinInput& in
 
     TExprNode::TListType labelsList;
     for (const auto& label : labels) {
-        labelsList.push_back(ctx.NewAtom(input.Pos(), label));
+        TString prefix = TString::Join(label, ".");
+        labelsList.push_back(ctx.NewAtom(input.Pos(), prefix));
     }
 
     auto myStruct = ctx.Builder(input.Pos())
@@ -1007,13 +1008,14 @@ TVector<TExprNode::TPtr> BuildOutputFlattenMembersArg(const TCoEquiJoinInput& in
        TVector<TExprNode::TPtr> result;
 
        for (ui32 i = 0; i < labels.size(); ++i) {
+           TString prefix = TString::Join(labels[i], ".");
            auto res =  ctx.Builder(input.Pos())
                 .List()
-                    .Atom(0, labels[i])
+                    .Atom(0, prefix)
                     .Callable(1, "DivePrefixMembers")
                         .Add(0, temp)
                         .List(1)
-                            .Atom(0, labels[i])
+                            .Atom(0, prefix)
                         .Seal()
                     .Seal()
                 .Seal()
@@ -1073,85 +1075,9 @@ TVector<TExprNode::TPtr> BuildOutputFlattenMembersArg(const TCoEquiJoinInput& in
     return {temp};
 }
 
-TExprNode::TPtr PullUpExtendOverEquiJoin(const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& optCtx) {
-    if (!optCtx.Types->PullUpFlatMapOverJoin || !AllowPullUpExtendOverEquiJoin(optCtx)) {
-        return node;
-    }
 
-    YQL_ENSURE(node->ChildrenSize() >= 4);
-    auto inputsCount = ui32(node->ChildrenSize() - 2);
 
-    auto joinTree = node->ChildPtr(inputsCount);
-    if (HasOnlyOneJoinType(*joinTree, "Cross")) {
-        return node;
-    }
-
-    auto settings = node->ChildPtr(inputsCount + 1);
-    if (HasSetting(*settings, "flatten")) {
-        return node;
-    }
-
-    const THashMap<TStringBuf, bool> additiveInputLabels = CollectAdditiveInputLabels(TCoEquiJoinTuple(joinTree));
-    const THashMap<TStringBuf, THashSet<TStringBuf>> joinKeysByLabel = CollectEquiJoinKeyColumnsByLabel(*joinTree);
-    for (ui32 i = 0; i < inputsCount; ++i) {
-        TCoEquiJoinInput input(node->ChildPtr(i));
-        if (!input.Scope().Ref().IsAtom()) {
-            return node;
-        }
-        const TStringBuf label = input.Scope().Ref().Content();
-        auto addIt = additiveInputLabels.find(label);
-        YQL_ENSURE(addIt != additiveInputLabels.end());
-        if (!addIt->second) {
-            continue;
-        }
-
-        auto maybeExtend = input.List().Maybe<TCoExtendBase>();
-        if (!maybeExtend) {
-            continue;
-        }
-
-        const TExprNodeList items = maybeExtend.Cast().Ref().ChildrenList();
-        size_t pullableFlatmaps = 0;
-        size_t directReads = 0;
-        for (auto item : items) {
-            auto maybeFlatMap = TMaybeNode<TCoFlatMapBase>(item);
-            if (maybeFlatMap) {
-                THashMap<TStringBuf, TStringBuf> renames;
-                if (IsFlatmapSuitableForPullUpOverEqiuJoin(maybeFlatMap.Cast(), label, joinKeysByLabel, renames, optCtx)) {
-                    ++pullableFlatmaps;
-                }
-            } else if (IsDirectRead(*item, optCtx)) {
-                ++directReads;
-            }
-        }
-        if (pullableFlatmaps > 0 && pullableFlatmaps + directReads == items.size()) {
-            YQL_CLOG(DEBUG, Core) << "Will pull up " << maybeExtend.Cast().CallableName() << " over EquiJoin input #" << i;
-            TExprNodeList newItems;
-            TExprNodeList reads;
-            auto processReads = [&]() {
-                if (!reads.empty()) {
-                    auto newExtend = ctx.ChangeChildren(maybeExtend.Cast().Ref(), std::move(reads));
-                    auto newInput = ctx.ChangeChild(input.Ref(), TCoEquiJoinInput::idx_List, std::move(newExtend));
-                    newItems.push_back(ctx.ChangeChild(*node, i, std::move(newInput)));
-                }
-            };
-            for (auto item : items) {
-                if (IsDirectRead(*item, optCtx)) {
-                    reads.push_back(item);
-                    continue;
-                }
-                processReads();
-                auto newInput = ctx.ChangeChild(input.Ref(), TCoEquiJoinInput::idx_List, std::move(item));
-                newItems.push_back(ctx.ChangeChild(*node, i, std::move(newInput)));
-            }
-            processReads();
-            return ctx.ChangeChildren(maybeExtend.Cast().Ref(), std::move(newItems));
-        }
-    }
-    return node;
-}
-
-TExprNode::TPtr PullUpFlatMapOverEquiJoin(const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& optCtx) {
+TExprNode::TPtr PullUpFlatMapOverEquiJoinList(const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& optCtx) {
     if (!optCtx.Types->PullUpFlatMapOverJoin) {
         return node;
     }
@@ -1181,12 +1107,8 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoin(const TExprNode::TPtr& node, TExprCont
     THashMap<TStringBuf, THashMap<TStringBuf, TStringBuf>> inputJoinKeyRenamesByLabel;
     for (ui32 i = 0; i < inputsCount; ++i) {
         TCoEquiJoinInput input(node->ChildPtr(i));
-
-        /*
         if (!input.Scope().Ref().IsAtom()) {
-           return node;
         }
-           */
 
         const TTypeAnnotationNode* itemType = input.List().Ref().GetTypeAnn()->Cast<TListExprType>()->GetItemType();
         auto structType = itemType->Cast<TStructExprType>();
@@ -1207,7 +1129,7 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoin(const TExprNode::TPtr& node, TExprCont
            label = (*list.begin()).Value();
         }
 
-        if (IsInputSuitableForPullingOverEquiJoin(input, joinKeysByLabel, inputJoinKeyRenamesByLabel[label], optCtx)) {
+        if (IsInputSuitableForPullingOverEquiJoinList(input, joinKeysByLabel, inputJoinKeyRenamesByLabel[label], optCtx)) {
             auto flatMap = input.List().Cast<TCoFlatMapBase>();
 
             auto flatMapInputItem = GetSequenceItemType(flatMap.Input(), false);
@@ -1310,7 +1232,7 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoin(const TExprNode::TPtr& node, TExprCont
                 );
             }
 
-            auto flattenMembersArg = BuildOutputFlattenMembersArg(input, afterJoinArg, canaryName, *canaryResultType, ctx);
+            auto flattenMembersArg = BuildOutputFlattenMembersArgList(input, afterJoinArg, canaryName, *canaryResultType, ctx);
             if (flattenMembersArg.size()) {
                     flattenMembersArgs.insert(flattenMembersArgs.end(), flattenMembersArg.begin(), flattenMembersArg.end());
             }
@@ -1344,10 +1266,395 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoin(const TExprNode::TPtr& node, TExprCont
         .Seal()
         .Build();
 
+    Cerr << "FLATTEN MEMBERS " << Endl;
     auto newLambda = ctx.NewLambda(node->Pos(), ctx.NewArguments(node->Pos(), { afterJoinArg }), std::move(newLambdaBody));
 
     return ctx.NewCallable(node->Pos(), "OrderedFlatMap", { newEquiJoin, newLambda });
 }
+
+TExprNode::TPtr BuildOutputFlattenMembersArg(const TCoEquiJoinInput& input, const TExprNode::TPtr& inputArg,
+    const TString& canaryName, const TStructExprType& canaryResultTypeWithoutRenames, TExprContext& ctx)
+{
+    YQL_ENSURE(input.Scope().Ref().IsAtom());
+    TStringBuf label = input.Scope().Ref().Content();
+
+    auto flatMap = input.List().Cast<TCoFlatMapBase>();
+    auto lambda = flatMap.Lambda();
+    YQL_ENSURE(IsJustOrSingleAsList(lambda.Body().Ref()));
+    auto strippedLambdaBody = lambda.Body().Ref().HeadPtr();
+
+    const TString labelPrefix = TString::Join(label, ".");
+    const TString fullCanaryName = FullColumnName(label, canaryName);
+
+    const TTypeAnnotationNode* canaryOutType = GetCanaryOutputType(canaryResultTypeWithoutRenames, fullCanaryName);
+    if (!canaryOutType) {
+        // canary didn't survive join
+        return {};
+    }
+
+    auto flatMapInputItem = GetSequenceItemType(flatMap.Input(), false);
+
+    auto myStruct = ctx.Builder(input.Pos())
+        .Callable("DivePrefixMembers")
+            .Add(0, inputArg)
+            .List(1)
+                .Atom(0, labelPrefix)
+            .Seal()
+        .Seal()
+        .Build();
+
+    if (canaryOutType->GetKind() == ETypeAnnotationKind::Data) {
+        YQL_ENSURE(canaryOutType->Cast<TDataExprType>()->GetSlot() == EDataSlot::Bool);
+        // our input passed as-is
+        return ctx.Builder(input.Pos())
+            .List()
+                .Atom(0, labelPrefix)
+                .ApplyPartial(1, lambda.Args().Ptr(), std::move(strippedLambdaBody))
+                    .With(0, std::move(myStruct))
+                .Seal()
+            .Seal()
+            .Build();
+    }
+
+    YQL_ENSURE(canaryOutType->GetKind() == ETypeAnnotationKind::Optional);
+
+    TExprNode::TListType membersForCheck;
+    auto flatMapInputItems = flatMapInputItem->Cast<TStructExprType>()->GetItems();
+
+    flatMapInputItems.push_back(ctx.MakeType<TItemExprType>(canaryName, ctx.MakeType<TDataExprType>(EDataSlot::Bool)));
+    for (auto& item : flatMapInputItems) {
+        if (item->GetItemType()->GetKind() != ETypeAnnotationKind::Optional) {
+            membersForCheck.emplace_back(ctx.NewAtom(input.Pos(), item->GetName()));
+        }
+    }
+
+    return ctx.Builder(input.Pos())
+        .List()
+            .Atom(0, labelPrefix)
+            .Callable(1, "FlattenMembers")
+                .List(0)
+                    .Atom(0, "")
+                    .Callable(1, flatMap.CallableName())
+                        .Callable(0, "FilterNullMembers")
+                            .Callable(0, "AssumeAllMembersNullableAtOnce")
+                                .Callable(0, "Just")
+                                    .Add(0, std::move(myStruct))
+                                .Seal()
+                            .Seal()
+                            .List(1)
+                                .Add(std::move(membersForCheck))
+                            .Seal()
+                        .Seal()
+                        .Lambda(1)
+                            .Param("canaryInput")
+                            .Callable("Just")
+                                .ApplyPartial(0, lambda.Args().Ptr(), std::move(strippedLambdaBody))
+                                    .With(0)
+                                        .Callable("RemoveMember")
+                                            .Arg(0, "canaryInput")
+                                            .Atom(1, canaryName)
+                                        .Seal()
+                                    .Done()
+                                .Seal()
+                            .Seal()
+                        .Seal()
+                    .Seal()
+                .Seal()
+            .Seal()
+        .Seal()
+        .Build();
+}
+
+bool IsInputSuitableForPullingOverEquiJoin(const TCoEquiJoinInput& input,
+    const THashMap<TStringBuf, THashSet<TStringBuf>>& joinKeysByLabel,
+    THashMap<TStringBuf, TStringBuf>& renames, TOptimizeContext& optCtx)
+{
+    renames.clear();
+    YQL_ENSURE(input.Scope().Ref().IsAtom());
+    if (!optCtx.IsSingleUsage(input)) {
+        return false;
+    }
+
+    auto maybeFlatMap = TMaybeNode<TCoFlatMapBase>(input.List().Ptr());
+    if (!maybeFlatMap) {
+        return false;
+    }
+
+    const TStringBuf label = input.Scope().Ref().Content();
+    return IsFlatmapSuitableForPullUpOverEqiuJoin(maybeFlatMap.Cast(), label, joinKeysByLabel, renames, optCtx);
+}
+
+TExprNode::TPtr PullUpFlatMapOverEquiJoin(const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& optCtx) {
+    if (!optCtx.Types->PullUpFlatMapOverJoin) {
+        return node;
+    }
+
+    YQL_ENSURE(node->ChildrenSize() >= 4);
+    auto inputsCount = ui32(node->ChildrenSize() - 2);
+
+    auto joinTree = node->ChildPtr(inputsCount);
+    if (HasOnlyOneJoinType(*joinTree, "Cross")) {
+        return node;
+    }
+
+    auto settings = node->ChildPtr(inputsCount + 1);
+    if (HasSetting(*settings, "flatten")) {
+        return node;
+    }
+
+    static const TStringBuf canaryBaseName = "_yql_canary_";
+
+    THashMap<TStringBuf, THashSet<TStringBuf>> joinKeysByLabel = CollectEquiJoinKeyColumnsByLabel(*joinTree);
+    const auto renames = LoadJoinRenameMap(*settings);
+
+    TVector<ui32> toPull;
+    TJoinLabels canaryLabels;
+    TJoinLabels actualLabels;
+    THashMap<TStringBuf, THashMap<TStringBuf, TStringBuf>> inputJoinKeyRenamesByLabel;
+    for (ui32 i = 0; i < inputsCount; ++i) {
+        TCoEquiJoinInput input(node->ChildPtr(i));
+
+        if (!input.Scope().Ref().IsAtom()) {
+            return PullUpFlatMapOverEquiJoinList(node, ctx, optCtx);
+        }
+
+        const TTypeAnnotationNode* itemType = input.List().Ref().GetTypeAnn()->Cast<TListExprType>()->GetItemType();
+        auto structType = itemType->Cast<TStructExprType>();
+        for (auto& si : structType->GetItems()) {
+            if (si->GetName().find(canaryBaseName, 0) == 0) {
+                // EquiJoin already processed
+                return node;
+            }
+        }
+
+        auto err = actualLabels.Add(ctx, *input.Scope().Ptr(), structType);
+        YQL_ENSURE(!err);
+
+        auto label = input.Scope().Ref().Content();
+
+
+        if (IsInputSuitableForPullingOverEquiJoin(input, joinKeysByLabel, inputJoinKeyRenamesByLabel[label], optCtx)) {
+            auto flatMap = input.List().Cast<TCoFlatMapBase>();
+
+            auto flatMapInputItem = GetSequenceItemType(flatMap.Input(), false);
+            auto structItems = flatMapInputItem->Cast<TStructExprType>()->GetItems();
+
+            TString canaryName = TStringBuilder() << canaryBaseName << i;
+            structItems.push_back(ctx.MakeType<TItemExprType>(canaryName, ctx.MakeType<TDataExprType>(EDataSlot::Bool)));
+            structType = ctx.MakeType<TStructExprType>(structItems);
+
+            YQL_CLOG(DEBUG, Core) << "Will pull up EquiJoin input #" << i;
+            toPull.push_back(i);
+        }
+
+        err = canaryLabels.Add(ctx, *input.Scope().Ptr(), structType);
+        YQL_ENSURE(!err);
+    }
+
+    if (toPull.empty()) {
+        return node;
+    }
+
+    const TStructExprType* canaryResultType = nullptr;
+    const TStructExprType* noRenamesResultType = nullptr;
+    const auto settingsWithoutRenames = RemoveSetting(*settings, "rename", ctx);
+    const auto joinTreeWithInputRenames = ApplyRenamesToJoinTree(joinTree, inputJoinKeyRenamesByLabel, ctx);
+
+
+    {
+        TJoinOptions options;
+        auto status = ValidateEquiJoinOptions(node->Pos(), *settingsWithoutRenames, options, ctx);
+        YQL_ENSURE(status == IGraphTransformer::TStatus::Ok);
+
+        status = EquiJoinAnnotation(node->Pos(), canaryResultType, canaryLabels,
+                                         *joinTreeWithInputRenames, options, ctx);
+        YQL_ENSURE(status == IGraphTransformer::TStatus::Ok);
+
+        status = EquiJoinAnnotation(node->Pos(), noRenamesResultType, actualLabels,
+                                    *joinTree, options, ctx);
+        YQL_ENSURE(status == IGraphTransformer::TStatus::Ok);
+    }
+
+
+
+    TExprNode::TListType newEquiJoinArgs;
+    newEquiJoinArgs.reserve(node->ChildrenSize());
+
+    TExprNode::TListType flattenMembersArgs;
+
+    auto afterJoinArg = ctx.NewArgument(node->Pos(), "joinOut");
+
+    for (ui32 i = 0, j = 0; i < inputsCount; ++i) {
+        TCoEquiJoinInput input(node->ChildPtr(i));
+
+        TStringBuf label = input.Scope().Ref().Content();
+        TString labelPrefix = TString::Join(label, ".");
+
+        if (j < toPull.size() && i == toPull[j]) {
+            j++;
+
+
+            const TString canaryName = TStringBuilder() << canaryBaseName << i;
+            const TString fullCanaryName = FullColumnName(label, canaryName);
+
+            TCoFlatMapBase flatMap = input.List().Cast<TCoFlatMapBase>();
+
+            const TTypeAnnotationNode* canaryOutType = GetCanaryOutputType(*canaryResultType, fullCanaryName);
+            if (canaryOutType && canaryOutType->GetKind() == ETypeAnnotationKind::Optional) {
+                // remove leading flatmap from input and launch canary
+                newEquiJoinArgs.push_back(
+                    ctx.Builder(input.Pos())
+                        .List()
+                            .Callable(0, flatMap.CallableName())
+                                .Add(0, flatMap.Input().Ptr())
+                                .Lambda(1)
+                                    .Param("item")
+                                    .Callable("Just")
+                                        .Callable(0, "AddMember")
+                                            .Arg(0, "item")
+                                            .Atom(1, canaryName)
+                                            .Callable(2, "Bool")
+                                                .Atom(0, "true")
+                                            .Seal()
+                                        .Seal()
+                                    .Seal()
+                                .Seal()
+                            .Seal()
+                            .Add(1, input.Scope().Ptr())
+                        .Seal()
+                        .Build()
+                );
+            } else {
+                // just remove leading flatmap from input
+                newEquiJoinArgs.push_back(
+                    ctx.Builder(input.Pos())
+                        .List()
+                            .Add(0, flatMap.Input().Ptr())
+                            .Add(1, input.Scope().Ptr())
+                        .Seal()
+                        .Build()
+                );
+            }
+
+            auto flattenMembersArg = BuildOutputFlattenMembersArg(input, afterJoinArg, canaryName, *canaryResultType, ctx);
+            if (flattenMembersArg) {
+                flattenMembersArgs.push_back(flattenMembersArg);
+            }
+        } else {
+            flattenMembersArgs.push_back(ctx.Builder(input.Pos())
+                .List()
+                    .Atom(0, labelPrefix)
+                    .Callable(1, "DivePrefixMembers")
+                        .Add(0, afterJoinArg)
+                        .List(1)
+                            .Atom(0, labelPrefix)
+                        .Seal()
+                    .Seal()
+                .Seal()
+                .Build());
+            newEquiJoinArgs.push_back(input.Ptr());
+        }
+    }
+
+    newEquiJoinArgs.push_back(joinTreeWithInputRenames);
+    newEquiJoinArgs.push_back(settingsWithoutRenames);
+
+    auto newEquiJoin = ctx.NewCallable(node->Pos(), "EquiJoin", std::move(newEquiJoinArgs));
+    Cerr << "FLATTEN SINGLE ATOM " << Endl;
+
+    auto flattenMembers = flattenMembersArgs.empty() ? afterJoinArg :
+                          ctx.NewCallable(node->Pos(), "FlattenMembers", std::move(flattenMembersArgs));
+
+    auto newLambdaBody = ctx.Builder(node->Pos())
+        .Callable("Just")
+            .Add(0, ApplyRenames(flattenMembers, renames, *noRenamesResultType, canaryBaseName, ctx))
+        .Seal()
+        .Build();
+
+    auto newLambda = ctx.NewLambda(node->Pos(), ctx.NewArguments(node->Pos(), { afterJoinArg }), std::move(newLambdaBody));
+
+    return ctx.NewCallable(node->Pos(), "OrderedFlatMap", { newEquiJoin, newLambda });
+}
+
+
+TExprNode::TPtr PullUpExtendOverEquiJoin(const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& optCtx) {
+    if (!optCtx.Types->PullUpFlatMapOverJoin || !AllowPullUpExtendOverEquiJoin(optCtx)) {
+        return node;
+    }
+
+    YQL_ENSURE(node->ChildrenSize() >= 4);
+    auto inputsCount = ui32(node->ChildrenSize() - 2);
+
+    auto joinTree = node->ChildPtr(inputsCount);
+    if (HasOnlyOneJoinType(*joinTree, "Cross")) {
+        return node;
+    }
+
+    auto settings = node->ChildPtr(inputsCount + 1);
+    if (HasSetting(*settings, "flatten")) {
+        return node;
+    }
+
+    const THashMap<TStringBuf, bool> additiveInputLabels = CollectAdditiveInputLabels(TCoEquiJoinTuple(joinTree));
+    const THashMap<TStringBuf, THashSet<TStringBuf>> joinKeysByLabel = CollectEquiJoinKeyColumnsByLabel(*joinTree);
+    for (ui32 i = 0; i < inputsCount; ++i) {
+        TCoEquiJoinInput input(node->ChildPtr(i));
+        if (!input.Scope().Ref().IsAtom()) {
+            return node;
+        }
+        const TStringBuf label = input.Scope().Ref().Content();
+        auto addIt = additiveInputLabels.find(label);
+        YQL_ENSURE(addIt != additiveInputLabels.end());
+        if (!addIt->second) {
+            continue;
+        }
+
+        auto maybeExtend = input.List().Maybe<TCoExtendBase>();
+        if (!maybeExtend) {
+            continue;
+        }
+
+        const TExprNodeList items = maybeExtend.Cast().Ref().ChildrenList();
+        size_t pullableFlatmaps = 0;
+        size_t directReads = 0;
+        for (auto item : items) {
+            auto maybeFlatMap = TMaybeNode<TCoFlatMapBase>(item);
+            if (maybeFlatMap) {
+                THashMap<TStringBuf, TStringBuf> renames;
+                if (IsFlatmapSuitableForPullUpOverEqiuJoin(maybeFlatMap.Cast(), label, joinKeysByLabel, renames, optCtx)) {
+                    ++pullableFlatmaps;
+                }
+            } else if (IsDirectRead(*item, optCtx)) {
+                ++directReads;
+            }
+        }
+        if (pullableFlatmaps > 0 && pullableFlatmaps + directReads == items.size()) {
+            YQL_CLOG(DEBUG, Core) << "Will pull up " << maybeExtend.Cast().CallableName() << " over EquiJoin input #" << i;
+            TExprNodeList newItems;
+            TExprNodeList reads;
+            auto processReads = [&]() {
+                if (!reads.empty()) {
+                    auto newExtend = ctx.ChangeChildren(maybeExtend.Cast().Ref(), std::move(reads));
+                    auto newInput = ctx.ChangeChild(input.Ref(), TCoEquiJoinInput::idx_List, std::move(newExtend));
+                    newItems.push_back(ctx.ChangeChild(*node, i, std::move(newInput)));
+                }
+            };
+            for (auto item : items) {
+                if (IsDirectRead(*item, optCtx)) {
+                    reads.push_back(item);
+                    continue;
+                }
+                processReads();
+                auto newInput = ctx.ChangeChild(input.Ref(), TCoEquiJoinInput::idx_List, std::move(item));
+                newItems.push_back(ctx.ChangeChild(*node, i, std::move(newInput)));
+            }
+            processReads();
+            return ctx.ChangeChildren(maybeExtend.Cast().Ref(), std::move(newItems));
+        }
+    }
+    return node;
+}
+
 
 
 TExprNode::TPtr OptimizeFromFlow(const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& optCtx) {
