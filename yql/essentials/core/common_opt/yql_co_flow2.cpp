@@ -1264,97 +1264,140 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoinList(const TExprNode::TPtr& node, TExpr
 TVector<TExprNode::TPtr> BuildOutputFlattenMembersArg(const TCoEquiJoinInput& input, const TExprNode::TPtr& inputArg,
     const TString& canaryName, const TStructExprType& canaryResultTypeWithoutRenames, TExprContext& ctx)
 {
-    YQL_ENSURE(input.Scope().Ref().IsAtom());
-    TStringBuf label = input.Scope().Ref().Content();
-
     auto flatMap = input.List().Cast<TCoFlatMapBase>();
     auto lambda = flatMap.Lambda();
     YQL_ENSURE(IsJustOrSingleAsList(lambda.Body().Ref()));
     auto strippedLambdaBody = lambda.Body().Ref().HeadPtr();
 
-    const TString labelPrefix = TString::Join(label, ".");
-    const TString fullCanaryName = FullColumnName(label, canaryName);
+    if (input.Scope().Maybe<TCoAtomList>()) {
+        auto list = input.Scope().Cast<TCoAtomList>();
+        TExprNode::TListType labelsPrefixList;
+        TVector<TStringBuf> labels;
+        labels.reserve(list.Size());
 
-    const TTypeAnnotationNode* canaryOutType = GetCanaryOutputType(canaryResultTypeWithoutRenames, fullCanaryName);
-    if (!canaryOutType) {
-        // canary didn't survive join
-        return {};
-    }
+        for (auto labelAtom : list) {
+            auto label = labelAtom.Value();
+            labels.push_back(label);
+            TString prefix = TString::Join(label, ".");
+            labelsPrefixList.push_back(ctx.NewAtom(input.Pos(), prefix));
+        }
 
-    auto flatMapInputItem = GetSequenceItemType(flatMap.Input(), false);
-
-    auto myStruct = ctx.Builder(input.Pos())
-        .Callable("DivePrefixMembers")
-            .Add(0, inputArg)
-            .List(1)
-                .Atom(0, labelPrefix)
+        auto myStruct = ctx.Builder(input.Pos())
+            .Callable("SelectMembers")
+                .Add(0, inputArg)
+                .Add(1, ctx.NewList(input.Pos(), std::move(labelsPrefixList)))
             .Seal()
-        .Seal()
-        .Build();
+            .Build();
+        
+        auto lambdaResult = ctx.Builder(input.Pos())
+            .ApplyPartial(lambda.Args().Ptr(), std::move(strippedLambdaBody))
+                .With(0, std::move(myStruct))
+            .Seal()
+            .Build();
 
-    if (canaryOutType->GetKind() == ETypeAnnotationKind::Data) {
-        YQL_ENSURE(canaryOutType->Cast<TDataExprType>()->GetSlot() == EDataSlot::Bool);
-        // our input passed as-is
-        auto arg = ctx.Builder(input.Pos())
-            .List()
-                .Atom(0, labelPrefix)
-                .ApplyPartial(1, lambda.Args().Ptr(), std::move(strippedLambdaBody))
-                    .With(0, std::move(myStruct))
+        TVector<TExprNode::TPtr> args;
+        for (ui32 i = 0; i < labels.size(); ++i) {
+            TString prefix = TString::Join(labels[i], ".");
+            auto arg = ctx.Builder(input.Pos())
+                .List()
+                   .Atom(0, prefix)
+                   .Callable(1, "DivePrefixMembers")
+                     .Add(0, lambdaResult)
+                       .List(1)
+                         .Atom(0, prefix)
+                      .Seal()
+                    .Seal()
+                 .Seal()
+                 .Build();
+            args.push_back(arg);
+        }
+        return args;
+    } else {
+        TStringBuf label = input.Scope().Ref().Content();
+        const TString labelPrefix = TString::Join(label, ".");
+        const TString fullCanaryName = FullColumnName(label, canaryName);
+
+        const TTypeAnnotationNode* canaryOutType = GetCanaryOutputType(canaryResultTypeWithoutRenames, fullCanaryName);
+        if (!canaryOutType) {
+            // canary didn't survive join
+            return {};
+        }
+
+        auto flatMapInputItem = GetSequenceItemType(flatMap.Input(), false);
+
+        auto myStruct = ctx.Builder(input.Pos())
+            .Callable("DivePrefixMembers")
+                .Add(0, inputArg)
+                .List(1)
+                    .Atom(0, labelPrefix)
                 .Seal()
             .Seal()
             .Build();
 
-        return {arg};
-    }
+        if (canaryOutType->GetKind() == ETypeAnnotationKind::Data) {
+            YQL_ENSURE(canaryOutType->Cast<TDataExprType>()->GetSlot() == EDataSlot::Bool);
+            // our input passed as-is
+            auto arg = ctx.Builder(input.Pos())
+                .List()
+                    .Atom(0, labelPrefix)
+                    .ApplyPartial(1, lambda.Args().Ptr(), std::move(strippedLambdaBody))
+                        .With(0, std::move(myStruct))
+                    .Seal()
+                .Seal()
+                .Build();
 
-    YQL_ENSURE(canaryOutType->GetKind() == ETypeAnnotationKind::Optional);
-
-    TExprNode::TListType membersForCheck;
-    auto flatMapInputItems = flatMapInputItem->Cast<TStructExprType>()->GetItems();
-
-    flatMapInputItems.push_back(ctx.MakeType<TItemExprType>(canaryName, ctx.MakeType<TDataExprType>(EDataSlot::Bool)));
-    for (auto& item : flatMapInputItems) {
-        if (item->GetItemType()->GetKind() != ETypeAnnotationKind::Optional) {
-            membersForCheck.emplace_back(ctx.NewAtom(input.Pos(), item->GetName()));
+            return {arg};
         }
-    }
 
-    auto arg = ctx.Builder(input.Pos())
-        .List()
-            .Atom(0, labelPrefix)
-            .Callable(1, "FlattenMembers")
-                .List(0)
-                    .Atom(0, "")
-                    .Callable(1, flatMap.CallableName())
-                        .Callable(0, "FilterNullMembers")
-                            .Callable(0, "AssumeAllMembersNullableAtOnce")
-                                .Callable(0, "Just")
-                                    .Add(0, std::move(myStruct))
+        YQL_ENSURE(canaryOutType->GetKind() == ETypeAnnotationKind::Optional);
+
+        TExprNode::TListType membersForCheck;
+        auto flatMapInputItems = flatMapInputItem->Cast<TStructExprType>()->GetItems();
+
+        flatMapInputItems.push_back(ctx.MakeType<TItemExprType>(canaryName, ctx.MakeType<TDataExprType>(EDataSlot::Bool)));
+        for (auto& item : flatMapInputItems) {
+            if (item->GetItemType()->GetKind() != ETypeAnnotationKind::Optional) {
+                membersForCheck.emplace_back(ctx.NewAtom(input.Pos(), item->GetName()));
+            }
+        }
+
+        auto arg = ctx.Builder(input.Pos())
+            .List()
+                .Atom(0, labelPrefix)
+                .Callable(1, "FlattenMembers")
+                    .List(0)
+                        .Atom(0, "")
+                        .Callable(1, flatMap.CallableName())
+                            .Callable(0, "FilterNullMembers")
+                                .Callable(0, "AssumeAllMembersNullableAtOnce")
+                                    .Callable(0, "Just")
+                                        .Add(0, std::move(myStruct))
+                                    .Seal()
+                                .Seal()
+                                .List(1)
+                                    .Add(std::move(membersForCheck))
                                 .Seal()
                             .Seal()
-                            .List(1)
-                                .Add(std::move(membersForCheck))
-                            .Seal()
-                        .Seal()
-                        .Lambda(1)
-                            .Param("canaryInput")
-                            .Callable("Just")
-                                .ApplyPartial(0, lambda.Args().Ptr(), std::move(strippedLambdaBody))
-                                    .With(0)
-                                        .Callable("RemoveMember")
-                                            .Arg(0, "canaryInput")
-                                            .Atom(1, canaryName)
-                                        .Seal()
-                                    .Done()
+                            .Lambda(1)
+                                .Param("canaryInput")
+                                .Callable("Just")
+                                    .ApplyPartial(0, lambda.Args().Ptr(), std::move(strippedLambdaBody))
+                                        .With(0)
+                                            .Callable("RemoveMember")
+                                                .Arg(0, "canaryInput")
+                                                .Atom(1, canaryName)
+                                            .Seal()
+                                        .Done()
+                                    .Seal()
                                 .Seal()
                             .Seal()
                         .Seal()
                     .Seal()
                 .Seal()
             .Seal()
-        .Seal()
-        .Build();
-    return {arg};
+            .Build();
+        return {arg};
+    }
 }
 
 bool IsInputSuitableForPullingOverEquiJoin(const TCoEquiJoinInput& input,
@@ -1427,20 +1470,20 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoin(const TExprNode::TPtr& node, TExprCont
         auto err = actualLabels.Add(ctx, *input.Scope().Ptr(), structType);
         YQL_ENSURE(!err);
 
-        TStringBuf label = input.Scope().Ref().Content();
-        if (input.Scope().Maybe<TCoAtomList>()) {
-           auto list = input.Scope().Cast<TCoAtomList>();
-           YQL_ENSURE(list.Size());
-           label = (*list.begin()).Value();
-        }
-
         if (IsInputSuitableForPullingOverEquiJoin(input, joinKeysByLabel, inputJoinKeyRenamesByLabel, optCtx)) {
             auto flatMap = input.List().Cast<TCoFlatMapBase>();
 
             auto flatMapInputItem = GetSequenceItemType(flatMap.Input(), false);
             auto structItems = flatMapInputItem->Cast<TStructExprType>()->GetItems();
-
             TString canaryName = TStringBuilder() << canaryBaseName << i;
+
+            if (input.Scope().Maybe<TCoAtomList>()) {
+                auto list = input.Scope().Cast<TCoAtomList>();
+                // Dummy label.
+                auto label = (*list.begin()).Value();
+                canaryName = FullColumnName(label, canaryName);
+            }
+
             structItems.push_back(ctx.MakeType<TItemExprType>(canaryName, ctx.MakeType<TDataExprType>(EDataSlot::Bool)));
             structType = ctx.MakeType<TStructExprType>(structItems);
 
@@ -1502,6 +1545,11 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoin(const TExprNode::TPtr& node, TExprCont
 
             const TTypeAnnotationNode* canaryOutType = GetCanaryOutputType(*canaryResultType, fullCanaryName);
             if (canaryOutType && canaryOutType->GetKind() == ETypeAnnotationKind::Optional) {
+                // Not supported.
+                if (!input.Scope().Ref().IsAtom()) {
+                    return node;
+                }
+
                 // remove leading flatmap from input and launch canary
                 newEquiJoinArgs.push_back(
                     ctx.Builder(input.Pos())
