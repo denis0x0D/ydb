@@ -1261,7 +1261,7 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoinList(const TExprNode::TPtr& node, TExpr
     return ctx.NewCallable(node->Pos(), "OrderedFlatMap", { newEquiJoin, newLambda });
 }
 
-TExprNode::TPtr BuildOutputFlattenMembersArg(const TCoEquiJoinInput& input, const TExprNode::TPtr& inputArg,
+TVector<TExprNode::TPtr> BuildOutputFlattenMembersArg(const TCoEquiJoinInput& input, const TExprNode::TPtr& inputArg,
     const TString& canaryName, const TStructExprType& canaryResultTypeWithoutRenames, TExprContext& ctx)
 {
     YQL_ENSURE(input.Scope().Ref().IsAtom());
@@ -1295,7 +1295,7 @@ TExprNode::TPtr BuildOutputFlattenMembersArg(const TCoEquiJoinInput& input, cons
     if (canaryOutType->GetKind() == ETypeAnnotationKind::Data) {
         YQL_ENSURE(canaryOutType->Cast<TDataExprType>()->GetSlot() == EDataSlot::Bool);
         // our input passed as-is
-        return ctx.Builder(input.Pos())
+        auto arg = ctx.Builder(input.Pos())
             .List()
                 .Atom(0, labelPrefix)
                 .ApplyPartial(1, lambda.Args().Ptr(), std::move(strippedLambdaBody))
@@ -1303,6 +1303,8 @@ TExprNode::TPtr BuildOutputFlattenMembersArg(const TCoEquiJoinInput& input, cons
                 .Seal()
             .Seal()
             .Build();
+
+        return {arg};
     }
 
     YQL_ENSURE(canaryOutType->GetKind() == ETypeAnnotationKind::Optional);
@@ -1317,7 +1319,7 @@ TExprNode::TPtr BuildOutputFlattenMembersArg(const TCoEquiJoinInput& input, cons
         }
     }
 
-    return ctx.Builder(input.Pos())
+    auto arg = ctx.Builder(input.Pos())
         .List()
             .Atom(0, labelPrefix)
             .Callable(1, "FlattenMembers")
@@ -1352,6 +1354,7 @@ TExprNode::TPtr BuildOutputFlattenMembersArg(const TCoEquiJoinInput& input, cons
             .Seal()
         .Seal()
         .Build();
+    return {arg};
 }
 
 bool IsInputSuitableForPullingOverEquiJoin(const TCoEquiJoinInput& input,
@@ -1534,9 +1537,9 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoin(const TExprNode::TPtr& node, TExprCont
                 );
             }
 
-            auto flattenMembersArg = BuildOutputFlattenMembersArg(input, afterJoinArg, canaryName, *canaryResultType, ctx);
-            if (flattenMembersArg) {
-                flattenMembersArgs.push_back(flattenMembersArg);
+            auto flattenMembersArgsByInput = BuildOutputFlattenMembersArg(input, afterJoinArg, canaryName, *canaryResultType, ctx);
+            if (flattenMembersArgsByInput.size()) {
+                flattenMembersArgs.insert(flattenMembersArgs.end(), flattenMembersArgsByInput.begin(), flattenMembersArgsByInput.end());
             }
         } else {
             flattenMembersArgs.push_back(ctx.Builder(input.Pos())
@@ -1558,7 +1561,6 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoin(const TExprNode::TPtr& node, TExprCont
     newEquiJoinArgs.push_back(settingsWithoutRenames);
 
     auto newEquiJoin = ctx.NewCallable(node->Pos(), "EquiJoin", std::move(newEquiJoinArgs));
-    Cerr << "FLATTEN SINGLE ATOM " << Endl;
 
     auto flattenMembers = flattenMembersArgs.empty() ? afterJoinArg :
                           ctx.NewCallable(node->Pos(), "FlattenMembers", std::move(flattenMembersArgs));
