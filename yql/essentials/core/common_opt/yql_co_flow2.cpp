@@ -1093,7 +1093,7 @@ TVector<TExprNode::TPtr> BuildOutputFlattenMembersArgList(const TCoEquiJoinInput
     return result;
 }
 
-TExprNode::TPtr PullUpFlatMapOverEquiJoinList(const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& optCtx) {
+[[maybe_unused]] TExprNode::TPtr PullUpFlatMapOverEquiJoinList(const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& optCtx) {
     if (!optCtx.Types->PullUpFlatMapOverJoin) {
         return node;
     }
@@ -1270,6 +1270,7 @@ TVector<TExprNode::TPtr> BuildOutputFlattenMembersArg(const TCoEquiJoinInput& in
     auto strippedLambdaBody = lambda.Body().Ref().HeadPtr();
 
     if (input.Scope().Maybe<TCoAtomList>()) {
+        Cerr << "ATOM LIST " << Endl;
         auto list = input.Scope().Cast<TCoAtomList>();
         TExprNode::TListType labelsPrefixList;
         TVector<TStringBuf> labels;
@@ -1313,6 +1314,7 @@ TVector<TExprNode::TPtr> BuildOutputFlattenMembersArg(const TCoEquiJoinInput& in
         }
         return args;
     } else {
+        Cerr << "ATOM NOT LIST " << Endl;
         TStringBuf label = input.Scope().Ref().Content();
         const TString labelPrefix = TString::Join(label, ".");
         const TString fullCanaryName = FullColumnName(label, canaryName);
@@ -1413,11 +1415,16 @@ bool IsInputSuitableForPullingOverEquiJoin(const TCoEquiJoinInput& input,
         return false;
     }
 
-    /*
     if (input.Scope().Maybe<TCoAtomList>()) {
-       return IsFlatmapSuitableForPullUpOverEqiuJoin(maybeFlatMap.Cast(), renamesByLabel, optCtx);
+        TVector<TStringBuf> labels;
+        auto list = input.Scope().Cast<TCoAtomList>();
+        for (auto labelAtom : list) {
+            auto label = labelAtom.Value();
+            renamesByLabel[label].clear();
+            labels.push_back(label);
+        }
+        return IsFlatmapSuitableForPullUpOverEqiuJoinList(maybeFlatMap.Cast(), labels, renamesByLabel, optCtx);
     }
-       */
 
     const TStringBuf label = input.Scope().Ref().Content();
     renamesByLabel[label].clear();
@@ -1454,10 +1461,6 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoin(const TExprNode::TPtr& node, TExprCont
     for (ui32 i = 0; i < inputsCount; ++i) {
         TCoEquiJoinInput input(node->ChildPtr(i));
 
-        if (!input.Scope().Ref().IsAtom()) {
-            return PullUpFlatMapOverEquiJoinList(node, ctx, optCtx);
-        }
-
         const TTypeAnnotationNode* itemType = input.List().Ref().GetTypeAnn()->Cast<TListExprType>()->GetItemType();
         auto structType = itemType->Cast<TStructExprType>();
         for (auto& si : structType->GetItems()) {
@@ -1489,6 +1492,9 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoin(const TExprNode::TPtr& node, TExprCont
 
             YQL_CLOG(DEBUG, Core) << "Will pull up EquiJoin input #" << i;
             toPull.push_back(i);
+        } else {
+            if (!input.Scope().Ref().IsAtom())
+                return node;
         }
 
         err = canaryLabels.Add(ctx, *input.Scope().Ptr(), structType);
@@ -1520,7 +1526,6 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoin(const TExprNode::TPtr& node, TExprCont
     }
 
 
-
     TExprNode::TListType newEquiJoinArgs;
     newEquiJoinArgs.reserve(node->ChildrenSize());
 
@@ -1536,7 +1541,6 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoin(const TExprNode::TPtr& node, TExprCont
 
         if (j < toPull.size() && i == toPull[j]) {
             j++;
-
 
             const TString canaryName = TStringBuilder() << canaryBaseName << i;
             const TString fullCanaryName = FullColumnName(label, canaryName);
