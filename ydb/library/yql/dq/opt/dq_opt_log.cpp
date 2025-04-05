@@ -16,52 +16,6 @@ using namespace NYql::NNodes;
 
 namespace NYql::NDq {
 
-TExprBase DqEliminateFlatMapBetweenEquiJoins(TExprBase node, TExprContext& ctx) {
-    if (!node.Maybe<TCoEquiJoin>()) {
-        return node;
-    }
-
-    auto equiJoin = node.Cast<TCoEquiJoin>();
-    THashMap<ui32, TExprBase> inputsToUpdate;
-    const ui32 numInputs = equiJoin.ArgCount() - 2;
-
-    // Collect indices of inputs.
-    for (ui32 i = 0; i < numInputs; ++i) {
-        auto input = equiJoin.Arg(i).Cast<TCoEquiJoinInput>();
-        auto joinInput = input.List();
-        // Only EquiJoin input is atom list.
-        if (joinInput.Maybe<TCoFlatMapBase>() && input.Scope().Maybe<TCoAtomList>()) {
-            auto flatMap = joinInput.Cast<TCoFlatMapBase>();
-            if (flatMap.Input().Maybe<TCoEquiJoin>()) {
-                auto joinInput = Build<TCoEquiJoinInput>(ctx, equiJoin.Pos())
-                                    .List(flatMap.Input())
-                                    .Scope(input.Scope())
-                                .Done();
-                inputsToUpdate.emplace(i, std::move(joinInput));
-            }
-        }
-    }
-
-    if (!inputsToUpdate.size()) {
-        return node;
-    }
-
-    TVector<TExprBase> joinArgs;
-    joinArgs.reserve(numInputs + 2);
-    for (ui32 i = 0; i < numInputs + 2; ++i) {
-        if (inputsToUpdate.contains(i)) {
-            TExprBase input = inputsToUpdate.at(i);
-           joinArgs.push_back(input);
-        } else {
-            joinArgs.push_back(equiJoin.Arg(i));
-        }
-    }
-
-    return Build<TCoEquiJoin>(ctx, equiJoin.Pos())
-               .Add(joinArgs)
-           .Done();
-}
-
 TExprBase DqRewriteAggregate(TExprBase node, TExprContext& ctx, TTypeAnnotationContext& typesCtx, bool compactForDistinct,
     bool usePhases, const bool useFinalizeByKey, const bool allowSpilling)
 {
