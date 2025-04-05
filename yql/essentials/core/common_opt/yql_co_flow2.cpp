@@ -804,11 +804,128 @@ bool IsFlatmapSuitableForPullUpOverEqiuJoin(const TCoFlatMapBase& flatMap,
     return true;
 }
 
+bool IsRenamingOrPassthroughFlatMapList(const TCoFlatMapBase& flatMap, THashMap<TStringBuf, THashMap<TStringBuf, TStringBuf>>& renamesByLabel,
+                                        THashMap<TStringBuf, THashSet<TStringBuf>>& outputMembersByLabel, bool& isIdentity) {
+    isIdentity = false;
+
+    auto body = flatMap.Lambda().Body();
+    auto arg = flatMap.Lambda().Args().Arg(0);
+
+    if (!IsJustOrSingleAsList(body.Ref())) {
+        Cerr << "CHILDREN SIZE " << body.Ref().ChildrenSize() << Endl;
+        Cerr << "NOT SINGLE LIST " << Endl;
+        return false;
+    }
+
+    TExprBase outItem(body.Ref().ChildPtr(0));
+    if (outItem.Raw() == arg.Raw()) {
+        isIdentity = true;
+        return true;
+    }
+
+    if (auto maybeStruct = outItem.Maybe<TCoAsStruct>()) {
+        for (auto child : maybeStruct.Cast()) {
+            auto tuple = child.Cast<TCoNameValueTuple>();
+            auto value = tuple.Value();
+            auto outMemberName = tuple.Name().Value();
+            YQL_ENSURE(outMemberName.find(".") != TString::npos);
+            TStringBuf tableName;
+            TStringBuf columnName;
+            SplitTableName(outMemberName, tableName, columnName);
+            YQL_ENSURE(outputMembersByLabel[tableName].insert(columnName).second);
+
+            if (auto maybeMember = value.Maybe<TCoMember>()) {
+                auto member = maybeMember.Cast();
+                if (member.Struct().Raw() == arg.Raw()) {
+                    TStringBuf oldName = member.Name().Value();
+                    TStringBuf newName = tuple.Name().Value();
+                    YQL_ENSURE(oldName.find(".") != TString::npos && newName.find(".") != TString::npos);
+
+                    TStringBuf oldTableName;
+                    TStringBuf oldColumnName;
+                    SplitTableName(oldName, oldTableName, oldColumnName);
+
+                    TStringBuf newTableName;
+                    TStringBuf newColumnName;
+                    SplitTableName(newName, newTableName, newColumnName);
+
+                    YQL_ENSURE(oldTableName == newTableName);
+                    renamesByLabel[oldTableName].insert({oldColumnName, newColumnName});
+                }
+            }
+        }
+        return true;
+    }
+    
+    return false;
+}
+
+bool IsFlatmapSuitableForPullUpOverEqiuJoinList(const TCoFlatMapBase& flatMap, TVector<TStringBuf>& labels,
+                                               THashMap<TStringBuf, THashMap<TStringBuf, TStringBuf>>& renamesByLabel, TOptimizeContext& optCtx) {
+    if (flatMap.Lambda().Args().Arg(0).Ref().IsUsedInDependsOn()) {
+        return false;
+    }
+
+    if (!SilentGetSequenceItemType(flatMap.Input().Ref(), false)) {
+        return false;
+    }
+
+    if (!optCtx.IsSingleUsage(flatMap)) {
+        return false;
+    }
+
+    bool isIdentity = false;
+    THashMap<TStringBuf, THashSet<TStringBuf>> outputMembersByLabel;
+    if (!IsRenamingOrPassthroughFlatMapList(flatMap, renamesByLabel, outputMembersByLabel, isIdentity)) {
+        return false;
+    }
+
+    if (isIdentity) {
+        // all fields are passthrough
+        for (const auto &label : labels) {
+            YQL_ENSURE(renamesByLabel[label].empty());
+        }
+        // do not bother pulling identity FlatMap
+        return false;
+    }
+
+    if (IsTablePropsDependent(flatMap.Lambda().Body().Ref())) {
+        for (const auto &label : labels) {
+            renamesByLabel[label].clear();
+        }
+        return false;
+    }
+
+    bool renamesAreIdentical = true;
+    for (const auto& label : labels) {
+        if (!renamesByLabel.contains(label)) {
+            continue;
+        }
+        const auto& renames = renamesByLabel[label];
+        for (auto it = renames.begin(); it != renames.end(); ++it) {
+            if (it->first != it->second) {
+                renamesAreIdentical = false;
+                break;
+            }
+        }
+    }
+
+    // If all renames are identical we can proceed futher, column projection semantics.
+    if (renamesAreIdentical) {
+        for (const auto& label : labels) {
+            renamesByLabel[label].clear();
+        }
+        return true;
+    }
+
+    return false;
+}
+
 bool IsInputSuitableForPullingOverEquiJoinList(const TCoEquiJoinInput& input,
     const THashMap<TStringBuf, THashSet<TStringBuf>>& joinKeysByLabel,
-    THashMap<TStringBuf, TStringBuf>& renames, TOptimizeContext& optCtx)
+    THashMap<TStringBuf, THashMap<TStringBuf, TStringBuf>>& renamesByLabel, TOptimizeContext& optCtx)
 {
-    renames.clear();
+    (void)joinKeysByLabel;
     if (!optCtx.IsSingleUsage(input)) {
         return false;
     }
@@ -818,13 +935,15 @@ bool IsInputSuitableForPullingOverEquiJoinList(const TCoEquiJoinInput& input,
         return false;
     }
 
-    TStringBuf label = input.Scope().Ref().Content();
+    TVector<TStringBuf> labels;
     if (input.Scope().Maybe<TCoAtomList>()) {
          auto list = input.Scope().Cast<TCoAtomList>();
-         label = (*list.begin()).Value();
+         for (auto label : list) {
+            labels.push_back(label.Value());
+         }
     }
 
-    return IsFlatmapSuitableForPullUpOverEqiuJoin(maybeFlatMap.Cast(), label, joinKeysByLabel, renames, optCtx);
+    return IsFlatmapSuitableForPullUpOverEqiuJoinList(maybeFlatMap.Cast(), labels, renamesByLabel, optCtx);
 }
 
 TExprNode::TPtr ApplyRenames(const TExprNode::TPtr& input, const TMap<TStringBuf, TVector<TStringBuf>>& renames,
@@ -1036,7 +1155,7 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoinList(const TExprNode::TPtr& node, TExpr
            label = (*list.begin()).Value();
         }
 
-        if (IsInputSuitableForPullingOverEquiJoinList(input, joinKeysByLabel, inputJoinKeyRenamesByLabel[label], optCtx)) {
+        if (IsInputSuitableForPullingOverEquiJoinList(input, joinKeysByLabel, inputJoinKeyRenamesByLabel, optCtx)) {
             /*
             auto flatMap = input.List().Cast<TCoFlatMapBase>();
 
@@ -1257,10 +1376,8 @@ TExprNode::TPtr BuildOutputFlattenMembersArg(const TCoEquiJoinInput& input, cons
 
 bool IsInputSuitableForPullingOverEquiJoin(const TCoEquiJoinInput& input,
     const THashMap<TStringBuf, THashSet<TStringBuf>>& joinKeysByLabel,
-    THashMap<TStringBuf, TStringBuf>& renames, TOptimizeContext& optCtx)
+    THashMap<TStringBuf, THashMap<TStringBuf, TStringBuf>>& renamesByLabel, TOptimizeContext& optCtx)
 {
-    renames.clear();
-    YQL_ENSURE(input.Scope().Ref().IsAtom());
     if (!optCtx.IsSingleUsage(input)) {
         return false;
     }
@@ -1270,8 +1387,15 @@ bool IsInputSuitableForPullingOverEquiJoin(const TCoEquiJoinInput& input,
         return false;
     }
 
+    /*
+    if (input.Scope().Maybe<TCoAtomList>()) {
+       return IsFlatmapSuitableForPullUpOverEqiuJoin(maybeFlatMap.Cast(), renamesByLabel, optCtx);
+    }
+       */
+
     const TStringBuf label = input.Scope().Ref().Content();
-    return IsFlatmapSuitableForPullUpOverEqiuJoin(maybeFlatMap.Cast(), label, joinKeysByLabel, renames, optCtx);
+    renamesByLabel[label].clear();
+    return IsFlatmapSuitableForPullUpOverEqiuJoin(maybeFlatMap.Cast(), label, joinKeysByLabel, renamesByLabel[label], optCtx);
 }
 
 TExprNode::TPtr PullUpFlatMapOverEquiJoin(const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& optCtx) {
@@ -1320,10 +1444,14 @@ TExprNode::TPtr PullUpFlatMapOverEquiJoin(const TExprNode::TPtr& node, TExprCont
         auto err = actualLabels.Add(ctx, *input.Scope().Ptr(), structType);
         YQL_ENSURE(!err);
 
-        auto label = input.Scope().Ref().Content();
+        TStringBuf label = input.Scope().Ref().Content();
+        if (input.Scope().Maybe<TCoAtomList>()) {
+           auto list = input.Scope().Cast<TCoAtomList>();
+           YQL_ENSURE(list.Size());
+           label = (*list.begin()).Value();
+        }
 
-
-        if (IsInputSuitableForPullingOverEquiJoin(input, joinKeysByLabel, inputJoinKeyRenamesByLabel[label], optCtx)) {
+        if (IsInputSuitableForPullingOverEquiJoin(input, joinKeysByLabel, inputJoinKeyRenamesByLabel, optCtx)) {
             auto flatMap = input.List().Cast<TCoFlatMapBase>();
 
             auto flatMapInputItem = GetSequenceItemType(flatMap.Input(), false);
