@@ -347,22 +347,17 @@ TExprNode::TPtr FuseJoinTree(TExprNode::TPtr downstreamJoinTree, TExprNode::TPtr
     return ret;
 }
 
-TExprNode::TPtr FuseJoinTreeNoRename(TExprNode::TPtr downstreamJoinTree, TExprNode::TPtr upstreamJoinTree, const THashSet<TStringBuf>& upstreamLabelIndex,
-    const THashMap<TString, TString>& upstreamTablesRename, const THashMap<TString, TString>& upstreamColumnsBackRename,
-    TExprContext& ctx)
-{
+TExprNode::TPtr FuseJoinTreeNoRename(TExprNode::TPtr downstreamJoinTree, TExprNode::TPtr upstreamJoinTree, const THashSet<TStringBuf>& upstreamLabelsList,
+                                     TExprContext& ctx) {
     TExprNode::TPtr left;
     if (downstreamJoinTree->Child(1)->IsAtom()) {
-        if (!upstreamLabelIndex.contains(downstreamJoinTree->Child(1)->Content())) {
+        if (!upstreamLabelsList.contains(downstreamJoinTree->Child(1)->Content())) {
             left = downstreamJoinTree->Child(1);
+        } else {
+            left = upstreamJoinTree;
         }
-        else {
-            left = upstreamJoinTree; //RenameJoinTree(upstreamJoinTree, upstreamTablesRename, ctx);
-        }
-    }
-    else {
-        left = FuseJoinTreeNoRename(downstreamJoinTree->Child(1), upstreamJoinTree, upstreamLabelIndex, upstreamTablesRename,
-            upstreamColumnsBackRename, ctx);
+    } else {
+        left = FuseJoinTreeNoRename(downstreamJoinTree->Child(1), upstreamJoinTree, upstreamLabelsList, ctx);
         if (!left) {
             return nullptr;
         }
@@ -370,15 +365,13 @@ TExprNode::TPtr FuseJoinTreeNoRename(TExprNode::TPtr downstreamJoinTree, TExprNo
 
     TExprNode::TPtr right;
     if (downstreamJoinTree->Child(2)->IsAtom()) {
-        if (!upstreamLabelIndex.contains(downstreamJoinTree->Child(2)->Content())) {
+        if (!upstreamLabelsList.contains(downstreamJoinTree->Child(2)->Content())) {
             right = downstreamJoinTree->Child(2);
-        }
-        else {
-            right = upstreamJoinTree; //RenameJoinTree(upstreamJoinTree, upstreamTablesRename, ctx);
+        } else {
+            right = upstreamJoinTree;
         }
     } else {
-        right = FuseJoinTreeNoRename(downstreamJoinTree->Child(2), upstreamJoinTree, upstreamLabelIndex, upstreamTablesRename,
-            upstreamColumnsBackRename, ctx);
+        right = FuseJoinTreeNoRename(downstreamJoinTree->Child(2), upstreamJoinTree, upstreamLabelsList, ctx);
         if (!right) {
             return nullptr;
         }
@@ -389,9 +382,6 @@ TExprNode::TPtr FuseJoinTreeNoRename(TExprNode::TPtr downstreamJoinTree, TExprNo
     newChildren[2] = right;
     newChildren[3] = downstreamJoinTree->Child(3);
     newChildren[4] = downstreamJoinTree->Child(4);
-    if (!newChildren[3] || !newChildren[4]) {
-        return nullptr;
-    }
 
     auto ret = ctx.ChangeChildren(*downstreamJoinTree, std::move(newChildren));
     return ret;
@@ -419,43 +409,39 @@ const TTypeAnnotationNode* GetCanaryOutputType(const TStructExprType& outputType
 
 TExprNode::TPtr FuseWithoutRename(const TExprNode::TPtr& node, ui32 upstreamIndex, TExprContext& ctx) {
     Cerr << "FUSE WITHOUT RENAME " << Endl;
-    ui32 downstreamInputs = node->ChildrenSize() - 2;
-    auto upstreamList = node->Child(upstreamIndex)->Child(0);
+    const ui32 downstreamInputs = node->ChildrenSize() - 2;
+    auto upstreamEquiJoin = node->Child(upstreamIndex)->Child(0);
     THashSet<TStringBuf> downstreamLabels;
-    THashSet<TStringBuf> upstreamLabelsIndex;
-
-    for (ui32 i = 0; i < downstreamInputs; ++i) {
-        auto label = node->Child(i)->Child(1);
-        if (auto tuple = TMaybeNode<TCoAtomList>(label)) {
-            for (auto label : tuple.Cast()) {
-                auto value = label.Value();
-                downstreamLabels.insert(value);
-                upstreamLabelsIndex.insert(value);
-            }
-        } else {
-           downstreamLabels.insert(label->Content());
-        }
-    }
-
-    THashMap<TString, TString> upstreamTablesRename; // rename of conflicted upstream tables
-    THashMap<TString, TString> upstreamColumnsBackRename; // renamed of columns under upstreamLabel to full name inside upstream
-    TMap<TString, TVector<TString>> upstreamColumnsRename;
-    ui32 upstreamInputs = upstreamList->ChildrenSize() - 2;
+    THashSet<TStringBuf> upstreamLabelsAssociatedByIndex;
+    
+    const ui32 upstreamInputs = upstreamEquiJoin->ChildrenSize() - 2;
     THashSet<TStringBuf> upstreamLabels;
     for (ui32 i = 0; i < upstreamInputs; ++i) {
-        auto label = upstreamList->Child(i)->Child(1);
+        auto label = upstreamEquiJoin->Child(i)->Child(1);
         if (!label->IsAtom()) {
-            Cerr << "UPSTREAM IS NOT ATOM " << Endl;
             return node;
         }
-
         upstreamLabels.insert(label->Content());
     }
 
-    for (ui32 i = 0; i < upstreamInputs; ++i) {
-        auto label = upstreamList->Child(i)->Child(1);
-        if (!label->IsAtom()) {
-            return node;
+    for (ui32 i = 0; i < downstreamInputs; ++i) {
+        auto label = node->Child(i)->Child(1);
+        if (auto list = TMaybeNode<TCoAtomList>(label)) {
+            // Fusing more than one input with label list is not supported.
+            if (upstreamLabelsAssociatedByIndex.size()) {
+                return node;
+            }
+            for (auto labelAtom : list.Cast()) {
+                auto label = labelAtom.Value();
+                downstreamLabels.insert(label);
+                upstreamLabelsAssociatedByIndex.insert(label);
+            }
+        } else {
+            // Fusing two EquiJoins with the same labels, which are not related to upstreamIndex, is not supported.
+            if (upstreamLabels.contains(label->Content())) {
+                return node;
+            }
+            downstreamLabels.insert(label->Content());
         }
     }
 
@@ -464,40 +450,38 @@ TExprNode::TPtr FuseWithoutRename(const TExprNode::TPtr& node, ui32 upstreamInde
         if (i != upstreamIndex) {
             equiJoinChildren.push_back(node->Child(i));
         } else {
-            // insert the whole upstream inputs
             for (ui32 j = 0; j < upstreamInputs; ++j) {
-               equiJoinChildren.push_back(upstreamList->Child(j));
+               equiJoinChildren.push_back(upstreamEquiJoin->Child(j));
             }
         }
     }
 
     auto downstreamJoinTree = node->Child(downstreamInputs);
     auto downstreamSettings = node->Children().back();
-    auto upstreamJoinTree = upstreamList->Child(upstreamInputs);
-    TExprNode::TListType newSettings;
+    auto upstreamJoinTree = upstreamEquiJoin->Child(upstreamInputs);
+    auto upstreamJoinSettings = upstreamEquiJoin->Children().back();
 
-    for (auto& setting : upstreamList->Children().back()->Children()) {
-        newSettings.push_back(setting);
+    TExprNode::TListType combinedSettings;
+    for (auto& setting : upstreamJoinSettings->Children()) {
+        combinedSettings.push_back(setting);
         if (setting->Child(0)->Content() != "rename") {
             return node;
         }
     }
 
     for (auto& setting : downstreamSettings->Children()) {
-        newSettings.push_back(setting);
+        combinedSettings.push_back(setting);
         if (setting->Child(0)->Content() != "rename") {
             return node;
         }
     }
 
-    auto joinTree = FuseJoinTreeNoRename(downstreamJoinTree, upstreamJoinTree, upstreamLabelsIndex,
-        upstreamTablesRename, upstreamColumnsBackRename, ctx);
+    auto joinTree = FuseJoinTreeNoRename(downstreamJoinTree, upstreamJoinTree, upstreamLabelsAssociatedByIndex, ctx);
     if (!joinTree) {
-        Cerr << "CANNOT FUSE JOIN TREE " << Endl;
         return node;
     }
 
-    auto newSettingsNode = ctx.NewList(node->Pos(), std::move(newSettings));
+    auto newSettingsNode = ctx.NewList(node->Pos(), std::move(combinedSettings));
     equiJoinChildren.push_back(joinTree);
     equiJoinChildren.push_back(newSettingsNode);
     auto ret = ctx.NewCallable(node->Pos(), "EquiJoin", std::move(equiJoinChildren));
@@ -936,8 +920,6 @@ TExprNode::TPtr ApplyRenames(const TExprNode::TPtr& input, const TMap<TStringBuf
         TStringBuf columnName;
         SplitTableName(memberName, tableName, columnName);
 
-        //Cerr << "CANARY BASE NAME " << canaryBaseName << Endl;
-        //Cerr << "COLUMN NAME " << columnName << Endl;
         if (columnName.find(canaryBaseName, 0) == 0) {
             continue;
         }
@@ -1269,7 +1251,6 @@ TVector<TExprNode::TPtr> BuildOutputFlattenMembersArg(const TCoEquiJoinInput& in
     auto strippedLambdaBody = lambda.Body().Ref().HeadPtr();
 
     if (input.Scope().Maybe<TCoAtomList>()) {
-        Cerr << "ATOM LIST " << Endl;
         auto list = input.Scope().Cast<TCoAtomList>();
         TExprNode::TListType labelsPrefixList;
         TVector<TStringBuf> labels;
