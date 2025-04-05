@@ -807,7 +807,6 @@ bool IsFlatmapSuitableForPullUpOverEqiuJoin(const TCoFlatMapBase& flatMap,
 bool IsRenamingOrPassthroughFlatMapList(const TCoFlatMapBase& flatMap, THashMap<TStringBuf, THashMap<TStringBuf, TStringBuf>>& renamesByLabel,
                                         THashMap<TStringBuf, THashSet<TStringBuf>>& outputMembersByLabel, bool& isIdentity) {
     isIdentity = false;
-
     auto body = flatMap.Lambda().Body();
     auto arg = flatMap.Lambda().Args().Arg(0);
 
@@ -858,8 +857,8 @@ bool IsRenamingOrPassthroughFlatMapList(const TCoFlatMapBase& flatMap, THashMap<
     return false;
 }
 
-bool IsFlatmapSuitableForPullUpOverEqiuJoinList(const TCoFlatMapBase& flatMap, TVector<TStringBuf>& labels,
-                                                THashMap<TStringBuf, THashMap<TStringBuf, TStringBuf>>& renamesByLabel, TOptimizeContext& optCtx) {
+bool IsFlatmapSuitableForPullUpOverEqiuJoin(const TCoFlatMapBase& flatMap, TVector<TStringBuf>& labels,
+                                            THashMap<TStringBuf, THashMap<TStringBuf, TStringBuf>>& renamesByLabel, TOptimizeContext& optCtx) {
     if ((flatMap.Lambda().Args().Arg(0).Ref().IsUsedInDependsOn()) || (!SilentGetSequenceItemType(flatMap.Input().Ref(), false)) ||
         (!optCtx.IsSingleUsage(flatMap)) || (IsTablePropsDependent(flatMap.Lambda().Body().Ref()))) {
         return false;
@@ -923,7 +922,7 @@ bool IsInputSuitableForPullingOverEquiJoinList(const TCoEquiJoinInput& input,
          }
     }
 
-    return IsFlatmapSuitableForPullUpOverEqiuJoinList(maybeFlatMap.Cast(), labels, renamesByLabel, optCtx);
+    return IsFlatmapSuitableForPullUpOverEqiuJoin(maybeFlatMap.Cast(), labels, renamesByLabel, optCtx);
 }
 
 TExprNode::TPtr ApplyRenames(const TExprNode::TPtr& input, const TMap<TStringBuf, TVector<TStringBuf>>& renames,
@@ -1423,7 +1422,7 @@ bool IsInputSuitableForPullingOverEquiJoin(const TCoEquiJoinInput& input,
             renamesByLabel[label].clear();
             labels.push_back(label);
         }
-        return IsFlatmapSuitableForPullUpOverEqiuJoinList(maybeFlatMap.Cast(), labels, renamesByLabel, optCtx);
+        return IsFlatmapSuitableForPullUpOverEqiuJoin(maybeFlatMap.Cast(), labels, renamesByLabel, optCtx);
     }
 
     const TStringBuf label = input.Scope().Ref().Content();
