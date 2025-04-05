@@ -408,7 +408,6 @@ const TTypeAnnotationNode* GetCanaryOutputType(const TStructExprType& outputType
 }
 
 TExprNode::TPtr FuseWithoutRename(const TExprNode::TPtr& node, ui32 upstreamIndex, TExprContext& ctx) {
-    Cerr << "FUSE WITHOUT RENAME " << Endl;
     const ui32 downstreamInputs = node->ChildrenSize() - 2;
     auto upstreamEquiJoin = node->Child(upstreamIndex)->Child(0);
     THashSet<TStringBuf> downstreamLabels;
@@ -492,8 +491,6 @@ TExprNode::TPtr FuseEquiJoins(const TExprNode::TPtr& node, ui32 upstreamIndex, T
     if (isSuitableForFuseWithoutRename(node)) {
         return FuseWithoutRename(node, upstreamIndex, ctx);
     }
-
-    Cerr << "FUSE WITH RENAMES " << Endl;
 
     ui32 downstreamInputs = node->ChildrenSize() - 2;
     auto upstreamList = node->Child(upstreamIndex)->Child(0);
