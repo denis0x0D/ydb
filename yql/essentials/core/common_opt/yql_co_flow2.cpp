@@ -812,8 +812,6 @@ bool IsRenamingOrPassthroughFlatMapList(const TCoFlatMapBase& flatMap, THashMap<
     auto arg = flatMap.Lambda().Args().Arg(0);
 
     if (!IsJustOrSingleAsList(body.Ref())) {
-        Cerr << "CHILDREN SIZE " << body.Ref().ChildrenSize() << Endl;
-        Cerr << "NOT SINGLE LIST " << Endl;
         return false;
     }
 
@@ -856,21 +854,14 @@ bool IsRenamingOrPassthroughFlatMapList(const TCoFlatMapBase& flatMap, THashMap<
         }
         return true;
     }
-    
+
     return false;
 }
 
 bool IsFlatmapSuitableForPullUpOverEqiuJoinList(const TCoFlatMapBase& flatMap, TVector<TStringBuf>& labels,
-                                               THashMap<TStringBuf, THashMap<TStringBuf, TStringBuf>>& renamesByLabel, TOptimizeContext& optCtx) {
-    if (flatMap.Lambda().Args().Arg(0).Ref().IsUsedInDependsOn()) {
-        return false;
-    }
-
-    if (!SilentGetSequenceItemType(flatMap.Input().Ref(), false)) {
-        return false;
-    }
-
-    if (!optCtx.IsSingleUsage(flatMap)) {
+                                                THashMap<TStringBuf, THashMap<TStringBuf, TStringBuf>>& renamesByLabel, TOptimizeContext& optCtx) {
+    if ((flatMap.Lambda().Args().Arg(0).Ref().IsUsedInDependsOn()) || (!SilentGetSequenceItemType(flatMap.Input().Ref(), false)) ||
+        (!optCtx.IsSingleUsage(flatMap)) || (IsTablePropsDependent(flatMap.Lambda().Body().Ref()))) {
         return false;
     }
 
@@ -881,21 +872,10 @@ bool IsFlatmapSuitableForPullUpOverEqiuJoinList(const TCoFlatMapBase& flatMap, T
     }
 
     if (isIdentity) {
-        // all fields are passthrough
-        for (const auto &label : labels) {
-            YQL_ENSURE(renamesByLabel[label].empty());
-        }
-        // do not bother pulling identity FlatMap
         return false;
     }
 
-    if (IsTablePropsDependent(flatMap.Lambda().Body().Ref())) {
-        for (const auto &label : labels) {
-            renamesByLabel[label].clear();
-        }
-        return false;
-    }
-
+    // Check if all renames are identical.
     bool renamesAreIdentical = true;
     for (const auto& label : labels) {
         if (!renamesByLabel.contains(label)) {
