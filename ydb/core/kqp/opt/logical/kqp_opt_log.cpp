@@ -33,7 +33,7 @@ public:
         , Config(config)
     {
 #define HNDL(name) "KqpLogical-"#name, Hndl(&TKqpLogicalOptTransformer::name)
-        AddHandler(0, &TCoEquiJoin::Match, HNDL(FuseEquiJoin));
+        AddHandler(0, &TCoEquiJoin::Match, HNDL(FuseEquiJoins));
 
         AddHandler(1, &TCoFlatMapBase::Match, HNDL(PushExtractedPredicateToReadTable));
         AddHandler(1, &TCoAggregate::Match, HNDL(RewriteAggregate));
@@ -111,12 +111,11 @@ protected:
         return output;
     }
 
-    TMaybeNode<TExprBase> FuseEquiJoin(TExprBase node, TExprContext& ctx) {
-        TExprBase output = DqFuseEquiJoin(node, ctx);
+    TMaybeNode<TExprBase> FuseEquiJoins(TExprBase node, TExprContext& ctx) {
+        TExprBase output = DqFuseEquiJoins(node, ctx);
         DumpAppliedRule("DqFuseEquiJoin", node.Ptr(), output.Ptr(), ctx);
         return output;
     }
-
 
     TMaybeNode<TExprBase> PushdownOlapGroupByKeys(TExprBase node, TExprContext& ctx) {
         TExprBase output = KqpPushDownOlapGroupByKeys(node, ctx, KqpCtx);

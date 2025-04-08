@@ -31,7 +31,8 @@ TExprBase DqRewriteAggregate(TExprBase node, TExprContext& ctx, TTypeAnnotationC
     return TExprBase(result);
 }
 
-bool IsSuitableForFuseWithLabelsList(const TExprNode::TPtr& node, ui32 &inputIndex) {
+// Checks if the given EquiJoin is suitable to be fused.
+bool IsSuitableToFuseEquiJoins(const TExprNode::TPtr& node, ui32 &inputIndex) {
     ui32 inputsCount = node->ChildrenSize() - 2;
     bool found = false;
     for (ui32 i = 0; i < inputsCount; ++i) {
@@ -100,7 +101,7 @@ TExprNode::TPtr FuseJoinTree(TExprNode::TPtr downstreamJoinTree, TExprNode::TPtr
 // This function fuses upstream and downstream EquiJoins without renaming labels.
 // It checks that labels associated with input for upstream and downstream EquiJoin are not the same,
 // except the labels associated with `upstreamIndex`.
-TExprNode::TPtr FuseEquiJoinWithLabelsList(const TExprNode::TPtr& node, ui32 upstreamIndex, TExprContext& ctx) {
+TExprNode::TPtr FuseEquiJoins(const TExprNode::TPtr& node, ui32 upstreamIndex, TExprContext& ctx) {
     const ui32 downstreamInputs = node->ChildrenSize() - 2;
     auto upstreamEquiJoin = node->Child(upstreamIndex)->Child(0);
     THashSet<TStringBuf> downstreamLabels;
@@ -181,10 +182,10 @@ TExprNode::TPtr FuseEquiJoinWithLabelsList(const TExprNode::TPtr& node, ui32 ups
     return ret;
 }
 
-TExprBase DqFuseEquiJoin(TExprBase node, TExprContext& ctx) {
+TExprBase DqFuseEquiJoins(TExprBase node, TExprContext& ctx) {
     ui32 inputIndex = 0;
-    if (IsSuitableForFuseWithLabelsList(node.Ptr(), inputIndex)) {
-        auto result = FuseEquiJoinWithLabelsList(node.Ptr(), inputIndex, ctx);
+    if (IsSuitableToFuseEquiJoins(node.Ptr(), inputIndex)) {
+        auto result = FuseEquiJoins(node.Ptr(), inputIndex, ctx);
         return TExprBase(result);
     }
     return node;
