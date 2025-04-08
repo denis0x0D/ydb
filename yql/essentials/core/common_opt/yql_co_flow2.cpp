@@ -487,7 +487,7 @@ TExprNode::TPtr FuseEquiJoinWithLabelsList(const TExprNode::TPtr& node, ui32 ups
 }
 
 TExprNode::TPtr FuseEquiJoins(const TExprNode::TPtr& node, ui32 upstreamIndex, TExprContext& ctx) {
-    if (IsSuitableForFuseWithLabelsList(node)) {
+    if (false && IsSuitableForFuseWithLabelsList(node)) {
         return FuseEquiJoinWithLabelsList(node, upstreamIndex, ctx);
     }
 
