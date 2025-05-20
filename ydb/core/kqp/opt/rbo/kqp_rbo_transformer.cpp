@@ -8,6 +8,29 @@ using namespace NYql::NDq;
 
 namespace {
 
+[[maybe_unused]]
+TMaybe<TExprNode::TPtr> GetParentNodeForChildWithName(TExprNode::TPtr node, TStringBuf name) {
+    for (auto &child : node->Children()) {
+        if (child->IsAtom() && child->Content() == name) {
+            return node;
+        }
+
+        if (auto maybeNode = GetParentNodeForChildWithName(child, name)) {
+            return maybeNode;
+        }
+    }
+
+    return Nothing();
+}
+
+[[maybe_unused]]
+void PrintTree(TExprNode::TPtr node, int level, std::map<int, std::vector<std::string>> &map) {
+    map[level].push_back(std::string(node->Content()));
+    for (auto &child : node->Children()) {
+        PrintTree(child, level + 1, map);
+    }
+}
+
 TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr& node, TExprContext& ctx, const TTypeAnnotationContext& typeCtx) {
     Y_UNUSED(typeCtx);
     auto setItems = GetSetting(node->Head(), "set_items");
@@ -21,9 +44,33 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr& node, TExprContext& ctx, 
 
     auto setItem = setItems->Tail().ChildPtr(0);
 
+    /*
+    if (auto parentJoinOps = GetParentNodeForChildWithName(setItem, "join_ops")) {
+        Cerr << "parent join ops " << (*parentJoinOps.Get())->Content() << Endl;
+        Cerr << "Children size " << (*parentJoinOps.Get())->ChildrenSize() << Endl;
+        int childId = 0;
+        for (auto child : (*parentJoinOps.Get())->Children()) {
+            Cerr << childId << " " << child->Content() << " ";
+            ++childId;
+        }
+        Cerr << "0 join type: " << (*parentJoinOps.Get())->Child(1)->Child(1)->Content() << Endl;
+        Cerr << "is list " << (*parentJoinOps.Get())->Child(1)->Child(1)->IsList() << Endl;
+        //Cerr << "1 join type: " << (*parentJoinOps.Get())->Child(1)->Child(0)->Child(0)->Content() << Endl;
+
+        Cerr << Endl;
+    }
+        */
+
+    auto join = GetSetting(setItem->Tail(), "join_ops");
+    Cerr << "join ops: " << join->Child(1)->Child(0)->Content() << Endl;
+    Cerr << "join ops: " << join->Child(1)->Child(0)->Child(2)->Child(1)->Content() << Endl;
+    auto gpWhere = TMaybeNode<PGWhere>(join->Child(1)->Child(0)->Child(2)->Child(1));
+
+
     auto from = GetSetting(setItem->Tail(), "from");
 
     if (from) {
+        Cerr << "FROM CHILD 1 content " << from->Child(1)->Content() << Endl;
         for (auto fromItem : from->Child(1)->Children()) {
             auto readExpr = TKqlReadTableRanges(fromItem->Child(0));
             auto alias = fromItem->Child(1);
