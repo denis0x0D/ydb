@@ -213,7 +213,7 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot & root,  TExprContext& ctx) {
             auto [rightArg, rightInput] = graph.GenerateStageInput(stageInputCounter, root.Node, ctx, *join->GetRightInput()->Props.StageId);
             stageArgs[opStageId].push_back(rightArg);
 
-            if (join->JoinKind == "Cross") {
+            if (to_lower(join->JoinKind) == "cross") {
                 currentStageBody = Build<TDqPhyCrossJoin>(ctx, root.Node->Pos())
                     .LeftInput(leftInput)
                     .LeftLabel<TCoVoid>().Build()
@@ -225,7 +225,7 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot & root,  TExprContext& ctx) {
                     .RightJoinKeyNames<TCoAtomList>().Build()
                     .Done().Ptr();
             }
-            else if (join->JoinKind == "Inner") {
+            else if (to_lower(join->JoinKind) == "inner") {
                 TVector<TDqJoinKeyTuple> joinKeys;
                 TVector<TCoAtom> leftKeyColumnNames;
                 TVector<TCoAtom> rightKeyColumnNames;
@@ -255,10 +255,42 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot & root,  TExprContext& ctx) {
                     .LeftJoinKeyNames<TCoAtomList>().Add(leftKeyColumnNames).Build()
                     .RightJoinKeyNames<TCoAtomList>().Add(rightKeyColumnNames).Build()
                     .Done().Ptr();
-                }
-            else {
-                Y_ENSURE(false, "Unsupported join kind");
+            }
+            else if (to_lower(join->JoinKind) == "left") {
+                // TODO: Combine same code for left and inner in sep function.
+                TVector<TDqJoinKeyTuple> joinKeys;
+                TVector<TCoAtom> leftKeyColumnNames;
+                TVector<TCoAtom> rightKeyColumnNames;
 
+                for (auto p : join->JoinKeys) {
+                    TString leftFullName = "_alias_" + p.first.Alias + "." + p.first.ColumnName;
+                    TString rightFullName = "_alias_" + p.second.Alias + "." + p.second.ColumnName;
+
+                    joinKeys.push_back(Build<TDqJoinKeyTuple>(ctx, root.Node->Pos())
+                        .LeftLabel().Value("_alias_" + p.first.Alias).Build()
+                        .LeftColumn().Value(p.first.ColumnName).Build()
+                        .RightLabel().Value("_alias_" + p.second.Alias).Build()
+                        .RightColumn().Value(p.second.ColumnName).Build()
+                        .Done());
+
+                    leftKeyColumnNames.push_back(Build<TCoAtom>(ctx, root.Node->Pos()).Value(leftFullName).Done());
+                    rightKeyColumnNames.push_back(Build<TCoAtom>(ctx, root.Node->Pos()).Value(rightFullName).Done());
+                }
+
+                currentStageBody = Build<TDqPhyGraceJoin>(ctx, root.Node->Pos())
+                    .LeftInput(leftInput)
+                    .LeftLabel<TCoVoid>().Build()
+                    .RightInput(rightInput)
+                    .RightLabel<TCoVoid>().Build()
+                    .JoinType<TCoAtom>().Value("Left").Build()
+                    .JoinKeys<TDqJoinKeyTupleList>().Add(joinKeys).Build()
+                    .LeftJoinKeyNames<TCoAtomList>().Add(leftKeyColumnNames).Build()
+                    .RightJoinKeyNames<TCoAtomList>().Add(rightKeyColumnNames).Build()
+                    .Done().Ptr();
+            }  else {
+                TStringBuilder builder;
+                builder << "Unsupported join kind " << join->JoinKind;
+                Y_ENSURE(false, builder.c_str());
             }
 
             stages[opStageId] = currentStageBody;

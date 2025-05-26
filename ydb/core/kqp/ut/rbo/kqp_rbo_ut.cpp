@@ -188,11 +188,12 @@ Y_UNIT_TEST_SUITE(KqpRbo) {
 
         db = kikimr.GetTableClient();
         auto session2 = db.CreateSession().GetValueSync().GetSession();
+//            SELECT f.id as "id2" FROM foo AS f left join bar on f.id = bar.id left join t3 on f.id = t3.id where name = 'some_name';
 
         auto result = session2.ExecuteDataQuery(R"(
             --!syntax_pg
             SET TablePathPrefix = "/Root/";
-            SELECT f.id as "id2" FROM foo AS f left join bar on f.id = bar.id left join t3 on t3.id = f.id and t3.fk = f.fk where name = 'some_name';
+            SELECT f.id as "id2" FROM foo AS f left join bar on f.id = bar.id left join t3 on f.id = t3.id where name = 'some_name';
         )", TTxControl::BeginTx().CommitTx()).GetValueSync();
 
         UNIT_ASSERT_C(result.IsSuccess(), result.GetIssues().ToString());
