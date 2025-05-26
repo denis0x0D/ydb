@@ -24,7 +24,7 @@ void CollectJoinKeys(const TExprNode::TPtr &node, TVector<std::pair<TString, TSt
         auto memberName =  member.Name().StringValue();
         if (auto it = memberName.find("."); it != TString::npos) {
             auto tableName = memberName.substr(0, it);
-            tableName = tableName.substr(0, 7);
+            tableName = tableName.substr(7, tableName.size() - 7);
             auto columnName = memberName.substr(it + 1, memberName.size() - (it + 1));
             joinKeys.push_back({tableName, columnName});
         }
@@ -54,7 +54,6 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr& node, TExprContext& ctx, 
         for (auto fromItem : from->Child(1)->Children()) {
             auto readExpr = TKqlReadTableRanges(fromItem->Child(0));
             auto alias = fromItem->Child(1);
-            Cerr << "ALIAS " << alias->Content() << Endl;
 
             auto opRead = Build<TKqpOpRead>(ctx, node->Pos())
                 .Table(readExpr.Table())
@@ -93,9 +92,23 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr& node, TExprContext& ctx, 
                 continue;
             }
 
+            auto pgResolvedOps = FindNodes(join->Child(1)->Child(1)->TailPtr(), [] (const TExprNode::TPtr &node) {
+                if (node->IsCallable("PgResolvedOp")) {
+                    return true;
+                } else {
+                    return false;
+                }
+            });
+
             TVector<std::pair<TString, TString>> joinKeys;
-            // Lambda body
-            CollectJoinKeys(join->Child(1)->Child(1)->TailPtr(), joinKeys);
+            for (const auto &pgResolvedOp : pgResolvedOps) {
+               CollectJoinKeys(pgResolvedOp, joinKeys);
+            }
+
+            Cerr << "JOIN KEYS : " << Endl;
+            for (const auto &key : joinKeys) {
+                Cerr << key.first << " " << key.second << Endl;
+            }
             /*
             keys.push_back(Build<TDqJoinKeyTuple>(ctx, Node->Pos())
             .LeftLabel().Value(k.first.Alias).Build()
