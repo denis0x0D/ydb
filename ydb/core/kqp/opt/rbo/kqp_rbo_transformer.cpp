@@ -104,7 +104,9 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr& node, TExprContext& ctx, 
             TVector<TVector<std::pair<TString, TString>>> joinKeysPool;
             for (const auto &pgResolvedOp : pgResolvedOps) {
                 TVector<std::pair<TString, TString>> joinKeys;
+                TVector<TInfoUnit> units;
                 CollectJoinKeys(pgResolvedOp, joinKeys);
+                GetAllMembers(pgResolvedOp, units);
                 joinKeysPool.push_back(std::move(joinKeys));
             }
 

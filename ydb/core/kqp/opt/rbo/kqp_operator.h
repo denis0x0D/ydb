@@ -37,6 +37,8 @@ struct TInfoUnit {
     };
 };
 
+void GetAllMembers(TExprNode::TPtr node, TVector<TInfoUnit>& IUs);
+
 inline bool operator == (const TInfoUnit& lhs, const TInfoUnit& rhs);
 
 struct TFilterInfo {
