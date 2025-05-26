@@ -1,4 +1,5 @@
 #include "kqp_rbo_transformer.h"
+#include "kqp_operator.h"
 #include <yql/essentials/utils/log/log.h>
 
 using namespace NYql;
@@ -9,25 +10,28 @@ using namespace NYql::NDq;
 namespace {
 
 [[maybe_unused]]
-TMaybe<TExprNode::TPtr> GetParentNodeForChildWithName(TExprNode::TPtr node, TStringBuf name) {
-    for (auto &child : node->Children()) {
-        if (child->IsAtom() && child->Content() == name) {
-            return node;
-        }
-
-        if (auto maybeNode = GetParentNodeForChildWithName(child, name)) {
-            return maybeNode;
-        }
-    }
-
-    return Nothing();
-}
-
-[[maybe_unused]]
 void PrintTree(TExprNode::TPtr node, int level, std::map<int, std::vector<std::string>> &map) {
     map[level].push_back(std::string(node->Content()));
     for (auto &child : node->Children()) {
         PrintTree(child, level + 1, map);
+    }
+}
+
+[[maybe_unused]]
+void CollectJoinKeys(const TExprNode::TPtr &node, TVector<std::pair<TString, TString>> &joinKeys) {
+    if (node->IsCallable("Member")) {
+        auto member = TCoMember(node);
+        auto memberName =  member.Name().StringValue();
+        if (auto it = memberName.find("."); it != TString::npos) {
+            auto tableName = memberName.substr(0, it);
+            tableName = tableName.substr(0, 7);
+            auto columnName = memberName.substr(it + 1, memberName.size() - (it + 1));
+            joinKeys.push_back({tableName, columnName});
+        }
+    } else {
+        for (auto child : node->Children()) {
+            CollectJoinKeys(child, joinKeys);
+        }
     }
 }
 
@@ -41,45 +45,24 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr& node, TExprContext& ctx, 
     TExprNode::TPtr filterExpr;
     TExprNode::TPtr lastAlias;
 
-
     auto setItem = setItems->Tail().ChildPtr(0);
 
-    /*
-    if (auto parentJoinOps = GetParentNodeForChildWithName(setItem, "join_ops")) {
-        Cerr << "parent join ops " << (*parentJoinOps.Get())->Content() << Endl;
-        Cerr << "Children size " << (*parentJoinOps.Get())->ChildrenSize() << Endl;
-        int childId = 0;
-        for (auto child : (*parentJoinOps.Get())->Children()) {
-            Cerr << childId << " " << child->Content() << " ";
-            ++childId;
-        }
-        Cerr << "0 join type: " << (*parentJoinOps.Get())->Child(1)->Child(1)->Content() << Endl;
-        Cerr << "is list " << (*parentJoinOps.Get())->Child(1)->Child(1)->IsList() << Endl;
-        //Cerr << "1 join type: " << (*parentJoinOps.Get())->Child(1)->Child(0)->Child(0)->Content() << Endl;
-
-        Cerr << Endl;
-    }
-        */
-
-    auto join = GetSetting(setItem->Tail(), "join_ops");
-    Cerr << "join ops: " << join->Child(1)->Child(0)->Content() << Endl;
-    Cerr << "join ops: " << join->Child(1)->Child(0)->Child(2)->Child(1)->Content() << Endl;
-    auto gpWhere = TMaybeNode<PGWhere>(join->Child(1)->Child(0)->Child(2)->Child(1));
-
-
     auto from = GetSetting(setItem->Tail(), "from");
+    THashMap<TString, TExprNode::TPtr> map;
 
     if (from) {
-        Cerr << "FROM CHILD 1 content " << from->Child(1)->Content() << Endl;
         for (auto fromItem : from->Child(1)->Children()) {
             auto readExpr = TKqlReadTableRanges(fromItem->Child(0));
             auto alias = fromItem->Child(1);
+            Cerr << "ALIAS " << alias->Content() << Endl;
 
             auto opRead = Build<TKqpOpRead>(ctx, node->Pos())
                 .Table(readExpr.Table())
                 .Alias(alias)
                 .Columns(readExpr.Columns())
                 .Done().Ptr();
+
+            //map.insert({TString(alias->Content()), opRead});
 
             if (!joinExpr) {
                 joinExpr = opRead;
@@ -95,6 +78,32 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr& node, TExprContext& ctx, 
                     .Done().Ptr();
             }
             lastAlias = alias;
+        }
+    }
+
+    auto joinOps = GetSetting(setItem->Tail(), "join_ops");
+    for (ui32 i = 0; i < joinOps->Tail().ChildrenSize(); ++i) {
+        auto tuple = joinOps->Tail().Child(i);
+        //ui32 tableInputsCount = 0;
+        for (ui32 j = 0; j < tuple->ChildrenSize(); ++j) {
+            auto join = tuple->Child(j);
+            auto joinType = join->Child(0)->Content();
+            if (joinType == "push") {
+                //++tableInputsCount;
+                continue;
+            }
+
+            TVector<std::pair<TString, TString>> joinKeys;
+            // Lambda body
+            CollectJoinKeys(join->Child(1)->Child(1)->TailPtr(), joinKeys);
+            /*
+            keys.push_back(Build<TDqJoinKeyTuple>(ctx, Node->Pos())
+            .LeftLabel().Value(k.first.Alias).Build()
+            .LeftColumn().Value(k.first.ColumnName).Build()
+            .RightLabel().Value(k.second.Alias).Build()
+            .RightColumn().Value(k.second.ColumnName).Build()
+            .Done());
+            */
         }
     }
 

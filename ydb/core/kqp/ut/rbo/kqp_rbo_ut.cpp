@@ -167,6 +167,7 @@ Y_UNIT_TEST_SUITE(KqpRbo) {
             CREATE TABLE `/Root/foo` (
                 id	Int64	NOT NULL,	
 	            name	String,
+                fk Int64,
                 primary key(id)	
             );
 
@@ -179,6 +180,7 @@ Y_UNIT_TEST_SUITE(KqpRbo) {
             CREATE TABLE `/Root/t3` (
                 id	Int64	NOT NULL,	
 	            lastname	String,
+                fk Int64,
                 primary key(id)	
             );
 
@@ -190,7 +192,7 @@ Y_UNIT_TEST_SUITE(KqpRbo) {
         auto result = session2.ExecuteDataQuery(R"(
             --!syntax_pg
             SET TablePathPrefix = "/Root/";
-            SELECT f.id as "id2" FROM foo AS f left join bar on f.id = bar.id where name = 'some_name';
+            SELECT f.id as "id2" FROM foo AS f left join bar on f.id = bar.id left join t3 on t3.id = f.id and t3.fk = f.fk where name = 'some_name';
         )", TTxControl::BeginTx().CommitTx()).GetValueSync();
 
         UNIT_ASSERT_C(result.IsSuccess(), result.GetIssues().ToString());
