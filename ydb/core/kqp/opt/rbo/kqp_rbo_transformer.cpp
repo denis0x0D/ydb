@@ -9,32 +9,6 @@ using namespace NYql::NDq;
 
 namespace {
 
-[[maybe_unused]]
-void PrintTree(TExprNode::TPtr node, int level, std::map<int, std::vector<std::string>> &map) {
-    map[level].push_back(std::string(node->Content()));
-    for (auto &child : node->Children()) {
-        PrintTree(child, level + 1, map);
-    }
-}
-
-[[maybe_unused]]
-void CollectJoinKeys(const TExprNode::TPtr &node, TVector<std::pair<TString, TString>> &joinKeys) {
-    if (node->IsCallable("Member")) {
-        auto member = TCoMember(node);
-        auto memberName =  member.Name().StringValue();
-        if (auto it = memberName.find("."); it != TString::npos) {
-            auto tableName = memberName.substr(0, it);
-            tableName = tableName.substr(7, tableName.size() - 7);
-            auto columnName = memberName.substr(it + 1, memberName.size() - (it + 1));
-            joinKeys.push_back({tableName, columnName});
-        }
-    } else {
-        for (auto child : node->Children()) {
-            CollectJoinKeys(child, joinKeys);
-        }
-    }
-}
-
 TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr& node, TExprContext& ctx, const TTypeAnnotationContext& typeCtx) {
     Y_UNUSED(typeCtx);
     auto setItems = GetSetting(node->Head(), "set_items");
@@ -101,12 +75,10 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr& node, TExprContext& ctx, 
                 }
             });
 
-            TVector<TVector<std::pair<TString, TString>>> joinKeysPool;
+            TVector<TVector<TInfoUnit>> joinKeysPool;
             for (const auto &pgResolvedOp : pgResolvedOps) {
-                TVector<std::pair<TString, TString>> joinKeys;
-                TVector<TInfoUnit> units;
-                CollectJoinKeys(pgResolvedOp, joinKeys);
-                GetAllMembers(pgResolvedOp, units);
+                TVector<TInfoUnit> joinKeys;
+                GetAllMembers(pgResolvedOp, joinKeys);
                 joinKeysPool.push_back(std::move(joinKeys));
             }
 
@@ -119,16 +91,16 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr& node, TExprContext& ctx, 
                         TVector<TDqJoinKeyTuple> keys;
                         for (ui32 i = 0; i < joinKeys.size(); i += 2) {
                             keys.push_back(Build<TDqJoinKeyTuple>(ctx, node->Pos())
-                                .LeftLabel().Value(joinKeys[i].first).Build()
-                                .LeftColumn().Value(joinKeys[i].second).Build()
-                                .RightLabel().Value(joinKeys[i + 1].first).Build()
-                                .RightColumn().Value(joinKeys[i + 1].second).Build()
+                                .LeftLabel().Value(joinKeys[i].Alias).Build()
+                                .LeftColumn().Value(joinKeys[i].ColumnName).Build()
+                                .RightLabel().Value(joinKeys[i + 1].Alias).Build()
+                                .RightColumn().Value(joinKeys[i + 1].ColumnName).Build()
                                 .Done());
                         }
 
                         auto dqJoinKeys = Build<TDqJoinKeyTupleList>(ctx, node->Pos()).Add(keys).Done();
-                        auto leftLabel = joinKeys[0].first;
-                        auto rightLabel = joinKeys[1].first;
+                        auto leftLabel = joinKeys[0].Alias;
+                        auto rightLabel = joinKeys[1].Alias;
                         if (map.count(leftLabel) && map.count(rightLabel)) {
                             auto leftInputTable = map[leftLabel];
                             auto rightInputTable = map[rightLabel];
@@ -146,16 +118,16 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr& node, TExprContext& ctx, 
                         TVector<TDqJoinKeyTuple> keys;
                         for (ui32 i = 0; i < joinKeys.size(); i += 2) {
                             keys.push_back(Build<TDqJoinKeyTuple>(ctx, node->Pos())
-                                .LeftLabel().Value(joinKeys[i].first).Build()
-                                .LeftColumn().Value(joinKeys[i].second).Build()
-                                .RightLabel().Value(joinKeys[i + 1].first).Build()
-                                .RightColumn().Value(joinKeys[i + 1].second).Build()
+                                .LeftLabel().Value(joinKeys[i].Alias).Build()
+                                .LeftColumn().Value(joinKeys[i].ColumnName).Build()
+                                .RightLabel().Value(joinKeys[i + 1].Alias).Build()
+                                .RightColumn().Value(joinKeys[i + 1].ColumnName).Build()
                                 .Done());
                         }
 
                         auto dqJoinKeys = Build<TDqJoinKeyTupleList>(ctx, node->Pos()).Add(keys).Done();
-                        auto leftLabel = joinKeys[0].first;
-                        auto rightLabel = joinKeys[1].first;
+                        auto leftLabel = joinKeys[0].Alias;
+                        auto rightLabel = joinKeys[1].Alias;
                         Y_ENSURE(map.contains(rightLabel), "Label not contains ");
                         auto rightInputTable = map[rightLabel];
                         joinExpr = Build<TKqpOpJoin>(ctx, node->Pos())
