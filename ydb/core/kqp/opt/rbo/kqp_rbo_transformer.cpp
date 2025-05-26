@@ -9,6 +9,31 @@ using namespace NYql::NDq;
 
 namespace {
 
+class TJoinKeyBuilder {
+    TVector<TInfoUnit> joinKeys;
+
+public:
+    TJoinKeyBuilder(const TVector<TInfoUnit> &joinKeys) : joinKeys(joinKeys) {
+        Y_ENSURE(!(joinKeys.size() & 1));
+    }
+
+    TExprNode::TPtr BuildJoinKeysTwoTableInputs(TExprContext &ctx, TPositionHandle pos) {
+        TVector<TDqJoinKeyTuple> keys;
+        for (ui32 i = 0; i < joinKeys.size(); i += 2) {
+            keys.push_back(Build<TDqJoinKeyTuple>(ctx, pos)
+                .LeftLabel().Value(joinKeys[i].Alias).Build()
+                .LeftColumn().Value(joinKeys[i].ColumnName).Build()
+                .RightLabel().Value(joinKeys[i + 1].Alias).Build()
+                .RightColumn().Value(joinKeys[i + 1].ColumnName).Build()
+                .Done());
+        }
+        return Build<TDqJoinKeyTupleList>(ctx, pos).Add(keys).Done().Ptr();
+    }
+
+    TString GetLeftInputAlias() { return joinKeys[0].Alias; }
+    TString GetRightInputAlias() { return joinKeys[1].Alias; }
+};
+
 TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr& node, TExprContext& ctx, const TTypeAnnotationContext& typeCtx) {
     Y_UNUSED(typeCtx);
     auto setItems = GetSetting(node->Head(), "set_items");
@@ -88,29 +113,19 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr& node, TExprContext& ctx, 
                     if (joinKeys.empty()) {
                         // Cross join
                     } else {
-                        TVector<TDqJoinKeyTuple> keys;
-                        for (ui32 i = 0; i < joinKeys.size(); i += 2) {
-                            keys.push_back(Build<TDqJoinKeyTuple>(ctx, node->Pos())
-                                .LeftLabel().Value(joinKeys[i].Alias).Build()
-                                .LeftColumn().Value(joinKeys[i].ColumnName).Build()
-                                .RightLabel().Value(joinKeys[i + 1].Alias).Build()
-                                .RightColumn().Value(joinKeys[i + 1].ColumnName).Build()
-                                .Done());
-                        }
-
-                        auto dqJoinKeys = Build<TDqJoinKeyTupleList>(ctx, node->Pos()).Add(keys).Done();
-                        auto leftLabel = joinKeys[0].Alias;
-                        auto rightLabel = joinKeys[1].Alias;
-                        if (map.count(leftLabel) && map.count(rightLabel)) {
-                            auto leftInputTable = map[leftLabel];
-                            auto rightInputTable = map[rightLabel];
-                            joinExpr = Build<TKqpOpJoin>(ctx, node->Pos())
-                               .LeftInput(leftInputTable)
-                               .RightInput(rightInputTable)
-                               .JoinKind().Value(joinType).Build()
-                               .JoinKeys(dqJoinKeys)
-                               .Done().Ptr();
-                        }
+                        TJoinKeyBuilder joinKeyBuilder(joinKeys);
+                        auto leftLabel = joinKeyBuilder.GetLeftInputAlias();
+                        auto rightLabel = joinKeyBuilder.GetRightInputAlias();
+                        Y_ENSURE(map.count(leftLabel));
+                        Y_ENSURE(map.count(rightLabel));
+                        auto leftInputTable = map[leftLabel];
+                        auto rightInputTable = map[rightLabel];
+                        joinExpr = Build<TKqpOpJoin>(ctx, node->Pos())
+                            .LeftInput(leftInputTable)
+                            .RightInput(rightInputTable)
+                            .JoinKind().Value(joinType).Build()
+                            .JoinKeys(joinKeyBuilder.BuildJoinKeysTwoTableInputs(ctx, node->Pos()))
+                            .Done().Ptr();
                     }
                 } else if (tableInputsCount == 1) {
                     if (joinKeys.empty()) {
