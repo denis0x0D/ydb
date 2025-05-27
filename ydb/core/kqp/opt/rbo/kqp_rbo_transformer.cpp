@@ -14,7 +14,7 @@ class TJoinKeyBuilder {
 
 public:
     TJoinKeyBuilder(const TVector<TInfoUnit> &joinKeys) : joinKeys(joinKeys) {
-        Y_ENSURE(!(joinKeys.size() & 1));
+        Y_ENSURE(joinKeys.size() >= 2 && !(joinKeys.size() & 1));
     }
 
     TExprNode::TPtr BuildJoinKeysTwoTableInputs(TExprContext &ctx, TPositionHandle pos) {
@@ -47,7 +47,7 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr& node, TExprContext& ctx, 
     auto setItem = setItems->Tail().ChildPtr(0);
 
     auto from = GetSetting(setItem->Tail(), "from");
-    THashMap<TString, TExprNode::TPtr> map;
+    THashMap<TString, TExprNode::TPtr> aliasToInputMap;
 
     if (from) {
         for (auto fromItem : from->Child(1)->Children()) {
@@ -59,7 +59,7 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr& node, TExprContext& ctx, 
                 .Alias(alias)
                 .Columns(readExpr.Columns())
                 .Done().Ptr();
-            map.insert({TString(alias->Content()), opRead});
+            aliasToInputMap.insert({TString(alias->Content()), opRead});
             /*
 
             if (!joinExpr) {
@@ -100,58 +100,62 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr& node, TExprContext& ctx, 
                 }
             });
 
-            TVector<TVector<TInfoUnit>> joinKeysPool;
+            TVector<TInfoUnit> joinKeys;
             for (const auto &pgResolvedOp : pgResolvedOps) {
-                TVector<TInfoUnit> joinKeys;
-                GetAllMembers(pgResolvedOp, joinKeys);
-                joinKeysPool.push_back(std::move(joinKeys));
+                TVector<TInfoUnit> keys;
+                GetAllMembers(pgResolvedOp, keys);
+                joinKeys.insert(joinKeys.end(), keys.begin(), keys.end());
             }
 
             TSet<TString> processedTables;
-            for (const auto &joinKeys : joinKeysPool) {
-                if (tableInputsCount == 2) {
-                    if (joinKeys.empty()) {
-                        // Cross join
-                    } else {
-                        TJoinKeyBuilder joinKeyBuilder(joinKeys);
-                        auto leftLabel = joinKeyBuilder.GetLeftInputAlias();
-                        auto rightLabel = joinKeyBuilder.GetRightInputAlias();
-                        Y_ENSURE(map.count(leftLabel));
-                        Y_ENSURE(map.count(rightLabel));
-                        auto leftInputTable = map[leftLabel];
-                        auto rightInputTable = map[rightLabel];
-                        joinExpr = Build<TKqpOpJoin>(ctx, node->Pos())
-                            .LeftInput(leftInputTable)
-                            .RightInput(rightInputTable)
-                            .JoinKind().Value(joinType).Build()
-                            .JoinKeys(joinKeyBuilder.BuildJoinKeysTwoTableInputs(ctx, node->Pos()))
-                            .Done().Ptr();
+            if (tableInputsCount == 2) {
+                if (joinKeys.empty()) {
+                    // Cross join
+                } else {
+                    TJoinKeyBuilder joinKeyBuilder(joinKeys);
+                    auto leftLabel = joinKeyBuilder.GetLeftInputAlias();
+                    auto rightLabel = joinKeyBuilder.GetRightInputAlias();
+                    Y_ENSURE(aliasToInputMap.count(leftLabel));
+                    Y_ENSURE(aliasToInputMap.count(rightLabel));
+                    auto leftInputTable = aliasToInputMap[leftLabel];
+                    auto rightInputTable = aliasToInputMap[rightLabel];
+                    joinExpr = Build<TKqpOpJoin>(ctx, node->Pos())
+                                   .LeftInput(leftInputTable)
+                                   .RightInput(rightInputTable)
+                                   .JoinKind().Value(joinType).Build()
+                                   .JoinKeys(joinKeyBuilder.BuildJoinKeysTwoTableInputs(ctx, node->Pos()))
+                                   .Done().Ptr();
+                }
+            } else if (tableInputsCount == 1) {
+                if (joinKeys.empty()) {
+                    // Cross join
+                } else {
+                    TVector<TDqJoinKeyTuple> keys;
+                    for (ui32 i = 0; i < joinKeys.size(); i += 2) {
+                        keys.push_back(Build<TDqJoinKeyTuple>(ctx, node->Pos())
+                                           .LeftLabel().Value(joinKeys[i].Alias).Build()
+                                           .LeftColumn().Value(joinKeys[i].ColumnName).Build()
+                                           .RightLabel().Value(joinKeys[i + 1].Alias).Build()
+                                           .RightColumn().Value(joinKeys[i + 1].ColumnName)
+                                           .Build()
+                                           .Done());
                     }
-                } else if (tableInputsCount == 1) {
-                    if (joinKeys.empty()) {
-                    } else {
-                        TVector<TDqJoinKeyTuple> keys;
-                        for (ui32 i = 0; i < joinKeys.size(); i += 2) {
-                            keys.push_back(Build<TDqJoinKeyTuple>(ctx, node->Pos())
-                                .LeftLabel().Value(joinKeys[i].Alias).Build()
-                                .LeftColumn().Value(joinKeys[i].ColumnName).Build()
-                                .RightLabel().Value(joinKeys[i + 1].Alias).Build()
-                                .RightColumn().Value(joinKeys[i + 1].ColumnName).Build()
-                                .Done());
-                        }
 
-                        auto dqJoinKeys = Build<TDqJoinKeyTupleList>(ctx, node->Pos()).Add(keys).Done();
-                        auto leftLabel = joinKeys[0].Alias;
-                        auto rightLabel = joinKeys[1].Alias;
-                        Y_ENSURE(map.contains(rightLabel), "Label not contains ");
-                        auto rightInputTable = map[rightLabel];
-                        joinExpr = Build<TKqpOpJoin>(ctx, node->Pos())
-                            .LeftInput(joinExpr)
-                            .RightInput(rightInputTable)
-                            .JoinKind().Value(joinType).Build()
-                            .JoinKeys(dqJoinKeys)
-                            .Done().Ptr();
-                    }
+                    auto dqJoinKeys = Build<TDqJoinKeyTupleList>(ctx, node->Pos()).Add(keys).Done();
+                    auto leftLabel = joinKeys[0].Alias;
+                    auto rightLabel = joinKeys[1].Alias;
+                    Cerr << "RIGHT LABEL " << rightLabel << Endl;
+                    Y_ENSURE(aliasToInputMap.contains(rightLabel), "Label not contains ");
+                    auto rightInputTable = aliasToInputMap[rightLabel];
+                    joinExpr = Build<TKqpOpJoin>(ctx, node->Pos())
+                                   .LeftInput(joinExpr)
+                                   .RightInput(rightInputTable)
+                                   .JoinKind()
+                                   .Value(joinType)
+                                   .Build()
+                                   .JoinKeys(dqJoinKeys)
+                                   .Done()
+                                   .Ptr();
                 }
             }
             tableInputsCount = 0;
