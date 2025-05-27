@@ -9,30 +9,58 @@ using namespace NYql::NDq;
 
 namespace {
 
-class TJoinKeyBuilder {
-    TVector<TInfoUnit> joinKeys;
-
-public:
-    TJoinKeyBuilder(const TVector<TInfoUnit> &joinKeys) : joinKeys(joinKeys) {
-        Y_ENSURE(joinKeys.size() >= 2 && !(joinKeys.size() & 1));
-    }
-
-    TExprNode::TPtr BuildJoinKeysTwoTableInputs(TExprContext &ctx, TPositionHandle pos) {
-        TVector<TDqJoinKeyTuple> keys;
-        for (ui32 i = 0; i < joinKeys.size(); i += 2) {
-            keys.push_back(Build<TDqJoinKeyTuple>(ctx, pos)
-                .LeftLabel().Value(joinKeys[i].Alias).Build()
-                .LeftColumn().Value(joinKeys[i].ColumnName).Build()
-                .RightLabel().Value(joinKeys[i + 1].Alias).Build()
-                .RightColumn().Value(joinKeys[i + 1].ColumnName).Build()
-                .Done());
-        }
-        return Build<TDqJoinKeyTupleList>(ctx, pos).Add(keys).Done().Ptr();
-    }
-
-    TString GetLeftInputAlias() { return joinKeys[0].Alias; }
-    TString GetRightInputAlias() { return joinKeys[1].Alias; }
+struct TJoinTableAliases {
+    THashSet<TString> LeftSideAliases;
+    THashSet<TString> RightSideAliases;
 };
+
+TJoinTableAliases GatherJoinAliasesLeftSideMultiInputs(const TVector<TInfoUnit> &joinKeys, const THashSet<TString> &processedInputs) {
+    TJoinTableAliases joinAliases;
+    for (const auto &joinKey : joinKeys) {
+        if (processedInputs.count(joinKey.Alias)) {
+            joinAliases.LeftSideAliases.insert(joinKey.Alias);
+        } else {
+            joinAliases.RightSideAliases.insert(joinKey.Alias);
+        }
+    }
+    Y_ENSURE(joinAliases.LeftSideAliases.size(), "Left side of the join inputs are empty");
+    Y_ENSURE(joinAliases.RightSideAliases.size() == 1, "Right side of the join should have only one input");
+    return joinAliases;
+}
+
+TJoinTableAliases GatherJoinAliasesTwoInputs(const TVector<TInfoUnit> &joinKeys) {
+    TJoinTableAliases joinAliases;
+    for (ui32 i = 0; i < joinKeys.size(); i += 2) {
+        joinAliases.LeftSideAliases.insert(joinKeys[i].Alias);
+        joinAliases.RightSideAliases.insert(joinKeys[i + 1].Alias);
+    }
+
+    Y_ENSURE(joinAliases.LeftSideAliases.size() == 1, "Left side of the join should have only one input");
+    Y_ENSURE(joinAliases.RightSideAliases.size() == 1, "Right side of the join should have only one input");
+    return joinAliases;
+}
+
+TExprNode::TPtr BuildJoinKeys(const TVector<TInfoUnit>& joinKeys, const TJoinTableAliases& joinAliases, THashSet<TString>& processedInputs, TExprContext& ctx,
+                              TPositionHandle pos) {
+    Y_ENSURE(joinKeys.size() >= 2 && !(joinKeys.size() & 1), "Invalid join key size");
+    TVector<TDqJoinKeyTuple> keys;
+    for (ui32 i = 0; i < joinKeys.size(); i += 2) {
+        auto leftSideKey = joinKeys[i];
+        auto rightSideKey = joinKeys[i + 1];
+        if (joinAliases.LeftSideAliases.count(rightSideKey.Alias)) {
+            std::swap(leftSideKey, rightSideKey);
+        }
+        keys.push_back(Build<TDqJoinKeyTuple>(ctx, pos)
+                           .LeftLabel().Value(leftSideKey.Alias).Build()
+                           .LeftColumn().Value(leftSideKey.ColumnName).Build()
+                           .RightLabel().Value(rightSideKey.Alias).Build()
+                           .RightColumn().Value(rightSideKey.ColumnName).Build()
+                           .Done());
+        processedInputs.insert(leftSideKey.Alias);
+        processedInputs.insert(rightSideKey.Alias);
+    }
+    return Build<TDqJoinKeyTupleList>(ctx, pos).Add(keys).Done().Ptr();
+}
 
 TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr& node, TExprContext& ctx, const TTypeAnnotationContext& typeCtx) {
     Y_UNUSED(typeCtx);
@@ -80,6 +108,7 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr& node, TExprContext& ctx, 
         }
     }
 
+    THashSet<TString> processedInputs;
     auto joinOps = GetSetting(setItem->Tail(), "join_ops");
     for (ui32 i = 0; i < joinOps->Tail().ChildrenSize(); ++i) {
         ui32 tableInputsCount = 0;
@@ -107,55 +136,38 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr& node, TExprContext& ctx, 
                 joinKeys.insert(joinKeys.end(), keys.begin(), keys.end());
             }
 
-            TSet<TString> processedTables;
             if (tableInputsCount == 2) {
                 if (joinKeys.empty()) {
                     // Cross join
                 } else {
-                    TJoinKeyBuilder joinKeyBuilder(joinKeys);
-                    auto leftLabel = joinKeyBuilder.GetLeftInputAlias();
-                    auto rightLabel = joinKeyBuilder.GetRightInputAlias();
-                    Y_ENSURE(aliasToInputMap.count(leftLabel));
-                    Y_ENSURE(aliasToInputMap.count(rightLabel));
-                    auto leftInputTable = aliasToInputMap[leftLabel];
-                    auto rightInputTable = aliasToInputMap[rightLabel];
+                    const auto joinAliases = GatherJoinAliasesTwoInputs(joinKeys);
+                    const auto leftSideAlias = *joinAliases.LeftSideAliases.begin();
+                    const auto rightSideAlias = *joinAliases.RightSideAliases.begin();
+                    Y_ENSURE(aliasToInputMap.count(leftSideAlias));
+                    Y_ENSURE(aliasToInputMap.count(rightSideAlias));
+                    auto leftInputTable = aliasToInputMap[leftSideAlias];
+                    auto rightInputTable = aliasToInputMap[rightSideAlias];
                     joinExpr = Build<TKqpOpJoin>(ctx, node->Pos())
                                    .LeftInput(leftInputTable)
                                    .RightInput(rightInputTable)
                                    .JoinKind().Value(joinType).Build()
-                                   .JoinKeys(joinKeyBuilder.BuildJoinKeysTwoTableInputs(ctx, node->Pos()))
+                                   .JoinKeys(BuildJoinKeys(joinKeys, joinAliases, processedInputs, ctx, node->Pos()))
                                    .Done().Ptr();
                 }
             } else if (tableInputsCount == 1) {
                 if (joinKeys.empty()) {
                     // Cross join
                 } else {
-                    TVector<TDqJoinKeyTuple> keys;
-                    for (ui32 i = 0; i < joinKeys.size(); i += 2) {
-                        keys.push_back(Build<TDqJoinKeyTuple>(ctx, node->Pos())
-                                           .LeftLabel().Value(joinKeys[i].Alias).Build()
-                                           .LeftColumn().Value(joinKeys[i].ColumnName).Build()
-                                           .RightLabel().Value(joinKeys[i + 1].Alias).Build()
-                                           .RightColumn().Value(joinKeys[i + 1].ColumnName)
-                                           .Build()
-                                           .Done());
-                    }
-
-                    auto dqJoinKeys = Build<TDqJoinKeyTupleList>(ctx, node->Pos()).Add(keys).Done();
-                    auto leftLabel = joinKeys[0].Alias;
-                    auto rightLabel = joinKeys[1].Alias;
-                    Cerr << "RIGHT LABEL " << rightLabel << Endl;
-                    Y_ENSURE(aliasToInputMap.contains(rightLabel), "Label not contains ");
-                    auto rightInputTable = aliasToInputMap[rightLabel];
+                    const auto joinAliases = GatherJoinAliasesLeftSideMultiInputs(joinKeys, processedInputs);
+                    const auto rightSideAlias = *joinAliases.RightSideAliases.begin();
+                    Y_ENSURE(aliasToInputMap.contains(rightSideAlias), "Right side alias is not present in input tables");
+                    auto rightInputTable = aliasToInputMap[rightSideAlias];
                     joinExpr = Build<TKqpOpJoin>(ctx, node->Pos())
                                    .LeftInput(joinExpr)
                                    .RightInput(rightInputTable)
-                                   .JoinKind()
-                                   .Value(joinType)
-                                   .Build()
-                                   .JoinKeys(dqJoinKeys)
-                                   .Done()
-                                   .Ptr();
+                                   .JoinKind().Value(joinType).Build()
+                                   .JoinKeys(BuildJoinKeys(joinKeys, joinAliases, processedInputs, ctx, node->Pos()))
+                                   .Done().Ptr();
                 }
             }
             tableInputsCount = 0;
