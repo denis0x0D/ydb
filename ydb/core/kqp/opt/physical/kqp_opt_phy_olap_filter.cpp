@@ -782,11 +782,44 @@ std::pair<TVector<TOLAPPredicateNode>, TVector<TOLAPPredicateNode>> SplitForPart
     return {pushable, remaining};
 }
 
-} // anonymous namespace end
+void CollectExpressions(const TExprNode::TPtr& node, TNodeOnNodeOwnedMap &replaces, TExprContext &ctx) {
+    auto pred = [](const TExprNode::TPtr& n) -> bool {
+        if (auto maybeFilter = TMaybeNode<TCoAsStruct>(n)) { return true; } return false;
+    };
+
+    TVector<std::pair<TString, TExprNode::TPtr>> expressions;
+    if (auto asStruct = FindNode(node, pred)) {
+        for (auto child : TExprBase(asStruct).Cast<TCoAsStruct>()) {
+            if (child.Item(1).Maybe<TCoMember>()) {
+                TString name = TString(child.Item(0).Cast<TCoAtom>().Value());
+                //members.push_back({name, child.Itme(1).Cast<TCoMember>()});
+            } else {
+                // TODO: Add white list of supported expressions.
+                auto memberPred = [] (const TExprNode::TPtr &n) { 
+                    if (auto maybeMember = TMaybeNode<TCoMember>(n)) { return true; } return false;
+                };
+
+                if (auto maybeMember = FindNode(child.Item(1).Ptr(), memberPred)) {
+                    auto member = TExprBase(maybeMember).Cast<TCoMember>();
+                    auto newMember = Build<TCoMember>(ctx, node->Pos())
+                                            .Struct(member.Struct())
+                                            .Name(member.Name())
+                                        .Done();
+
+                    replaces[child.Item(1).Raw()] = newMember.Ptr();
+                    expressions.push_back({TString(member.Name()), child.Item(1).Ptr()});
+                }
+            }
+        }
+    }
+}
+
+}  // anonymous namespace end
 
 TExprBase KqpPushOlapFilter(TExprBase node, TExprContext& ctx, const TKqpOptimizeContext& kqpCtx,
     TTypeAnnotationContext& typesCtx)
 {
+    Cerr << "PUSH OLAP FILTER " << Endl;
     const auto pushdownOptions = TPushdownOptions{
         kqpCtx.Config->EnableOlapScalarApply,
         kqpCtx.Config->EnableOlapSubstringPushdown
@@ -799,7 +832,13 @@ TExprBase KqpPushOlapFilter(TExprBase node, TExprContext& ctx, const TKqpOptimiz
         return node;
     }
 
-    auto flatmap = node.Cast<TCoFlatMap>();
+    auto _flatmap = node.Cast<TCoFlatMap>();
+    TNodeOnNodeOwnedMap replaces;
+    CollectExpressions(_flatmap.Ptr(), replaces, ctx);
+    auto flatmap = TExprBase(ctx.ReplaceNodes(_flatmap.Ptr(), replaces)).Cast<TCoFlatMap>();
+    YQL_CLOG(TRACE, ProviderKqp) << "Created flatmap: " << KqpExprToPrettyString(TExprBase(flatmap), ctx);
+    return TExprBase(flatmap);
+
     auto read = flatmap.Input().Cast<TKqpReadOlapTableRanges>();
 
     if (read.Process().Body().Raw() != read.Process().Args().Arg(0).Raw()) {
