@@ -311,6 +311,8 @@ Y_UNIT_TEST_SUITE(KqpAgg) {
             )",
         };
 
+        std::vector<TString> results = {R"([[[3];[3]]])"};
+
         for (ui32 i = 0; i < queries.size(); ++i) {
             const auto query = queries[i];
             auto result =
@@ -323,7 +325,7 @@ Y_UNIT_TEST_SUITE(KqpAgg) {
             UNIT_ASSERT_VALUES_EQUAL(result.GetStatus(), EStatus::SUCCESS);
 
             TString output = FormatResultSetYson(result.GetResultSet(0));
-            UNIT_ASSERT_VALUES_EQUAL(FormatResultSetYson(result.GetResultSet(0)), "[[[3];[3]]]");
+            UNIT_ASSERT_VALUES_EQUAL(FormatResultSetYson(result.GetResultSet(0)), results[i]);
         }
     }
 }

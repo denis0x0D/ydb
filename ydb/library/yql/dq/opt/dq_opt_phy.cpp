@@ -1188,10 +1188,21 @@ TExprBase DqPushCombineToStageDependsOnOtherStage(TExprBase node, TExprContext& 
             return node;
         }
 
-        // Check that all collected connections are the same.
+        THashMap<TExprNode::TPtr, TVector<TExprNode::TPtr>> stagesInitHandler;
+        THashMap<TExprNode::TPtr, TVector<TExprNode::TPtr>> stagesUpdateHandler;
         for (ui32 i = 0; i < connectionsInitHandler.size(); ++i) {
-            if ((connectionsInitHandler[i].Get() != connectionsUpdateHandler[i].Get()) || (connectionsInitHandler[i].Get() == dqUnion.Raw()) ||
-                (connectionsUpdateHandler[i].Get() == dqUnion.Raw())) {
+            auto connectionInitHandler = connectionsInitHandler[i];
+            stagesInitHandler[TExprBase(connectionInitHandler).Cast<TDqConnection>().Output().Stage().Ptr()].push_back(connectionInitHandler);
+            auto connectionUpdateHandler = connectionsUpdateHandler[i];
+            stagesUpdateHandler[TExprBase(connectionUpdateHandler).Cast<TDqConnection>().Output().Stage().Ptr()].push_back(connectionUpdateHandler);
+        }
+
+        if (stagesInitHandler.size() || (stagesInitHandler.size() != stagesUpdateHandler.size())) {
+            return node;
+        }
+
+        for (const auto &[stage, connections] : stagesInitHandler) {
+            if (!stagesUpdateHandler.contains(stage)) {
                 return node;
             }
         }
