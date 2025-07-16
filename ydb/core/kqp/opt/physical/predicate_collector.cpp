@@ -277,6 +277,9 @@ bool CheckComparisonParametersForPushdown(const TCoCompare& compare, const TExpr
         case ETypeAnnotationKind::Stream:
             inputType = inputType->Cast<TStreamExprType>()->GetItemType();
             break;
+        case ETypeAnnotationKind::Optional:
+            inputType = inputType->Cast<TOptionalExprType>()->GetItemType();
+            break;
         case ETypeAnnotationKind::Struct:
             break;
         default:
@@ -403,6 +406,7 @@ bool ExistsCanBePushed(const TCoExists& exists, const TExprNode* lambdaArg) {
 }
 
 void CollectChildrenPredicates(const TExprNode& opNode, TOLAPPredicateNode& predicateTree, const TExprNode* lambdaArg, const TExprBase& lambdaBody, const TPushdownOptions& options) {
+
     predicateTree.Children.reserve(opNode.ChildrenSize());
     predicateTree.CanBePushed = true;
     predicateTree.CanBePushedApply = true;
