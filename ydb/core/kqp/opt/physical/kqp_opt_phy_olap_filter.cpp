@@ -809,7 +809,7 @@ TExprBase KqpPushOlapFilter(TExprBase node, TExprContext& ctx, const TKqpOptimiz
     const auto& lambda = flatmap.Lambda();
     const auto& lambdaArg = lambda.Args().Arg(0).Ref();
 
-    YQL_CLOG(TRACE, ProviderKqp) << "Initial OLAP lambda: " << KqpExprToPrettyString(lambda, ctx);
+    YQL_CLOG(TRACE, ProviderKqp) << "[KQP_PUSH_OLAP_FILTER] Initial lambda: " << KqpExprToPrettyString(lambda, ctx);
 
     const auto maybeOptionalIf = lambda.Body().Maybe<TCoOptionalIf>();
     if (!maybeOptionalIf.IsValid()) {
@@ -833,43 +833,42 @@ TExprBase KqpPushOlapFilter(TExprBase node, TExprContext& ctx, const TKqpOptimiz
 
     if (pushdownOptions.AllowOlapApply) {
         TVector<TOLAPPredicateNode> remainingAfterApply;
-        for(const auto& p: remaining) {
-            const auto optIf = Build<TCoOptionalIf>(ctx, node.Pos())
-                .Predicate(p.ExprNode)
-                .Value(value)
-            .Done();
-
-            auto newLambda = Build<TCoLambda>(ctx, node.Pos())
-                .Args({"arg"})
-                .Body<TExprApplier>()
-                    .Apply(optIf)
-                    .With(lambda.Args().Arg(0), "arg")
-                .Build()
-            .Done();
-
+        for (const auto &predicateExprHolder : remaining) {
             TVector<const TTypeAnnotationNode *> argTypes{lambda.Args().Arg(0).Ptr()->GetTypeAnn()};
-            auto program = Build<TKqpOlapPredicateClosure>(ctx, node.Pos())
-                .Lambda(newLambda)
+            auto olapPredicateClosure = Build<TKqpOlapPredicateClosure>(ctx, node.Pos())
+                .Lambda<TCoLambda>()
+                    .Args({"arg"})
+                    .Body<TCoOptionalIf>()
+                        .Predicate<TExprApplier>()
+                            .Apply(TExprBase(predicateExprHolder.ExprNode))
+                            .With(lambda.Args().Arg(0), "arg")
+                        .Build()
+                        .Value(value)
+                    .Build()
+                .Build()
                 .ArgsType(ExpandType(node.Pos(), *ctx.MakeType<TTupleExprType>(argTypes), ctx))
-                .Done();
+            .Done();
 
-            YQL_CLOG(TRACE, ProviderKqp) << "BEFORE PEEPHOLE: " << KqpExprToPrettyString(program, ctx);
+            YQL_CLOG(TRACE, ProviderKqp) << "[KQP_PUSH_OLAP_FILTER] Before peephole: " << KqpExprToPrettyString(olapPredicateClosure, ctx);
 
             TExprNode::TPtr afterPeephole;
             bool hasNonDeterministicFunctions;
-            if (const auto status = PeepHoleOptimizeNode(program.Ptr(), afterPeephole, ctx,
-                                                         typesCtx, &typeAnn, hasNonDeterministicFunctions);
+            if (const auto status =
+                    PeepHoleOptimizeNode(olapPredicateClosure.Ptr(), afterPeephole, ctx, typesCtx, &typeAnn, hasNonDeterministicFunctions);
                 status != IGraphTransformer::TStatus::Ok) {
-                YQL_CLOG(ERROR, ProviderKqp) << "Peephole OLAP failed." << Endl << ctx.IssueManager.GetIssues().ToString();
+                YQL_CLOG(ERROR, ProviderKqp) << "[KQP_PUSH_OLAP_FILTER] Peephole failed with status: " << status << Endl;
                 return node;
             }
 
-            YQL_CLOG(TRACE, ProviderKqp) << "AFTER PEEPHOLE: " << KqpExprToPrettyString(TExprBase(afterPeephole), ctx);
-            return node;
-            const TCoIf simplified(std::move(afterPeephole));
-            predicate = simplified.Predicate();
-            value = simplified.ThenValue().Cast<TCoJust>().Input();
+            YQL_CLOG(TRACE, ProviderKqp) << "[KQP_PUSH_OLAP_FILTER] After peephole: " << KqpExprToPrettyString(TExprBase(afterPeephole), ctx);
 
+            const auto maybeIf = TExprBase(afterPeephole).Cast<TKqpOlapPredicateClosure>().Lambda().Body().Maybe<TCoIf>();
+            if (!maybeIf.IsValid()) {
+                YQL_CLOG(TRACE, ProviderKqp) << "[KQP_PUSH_OLAP_FILTER] Cannot convert to TCoIf after peephole. " << Endl;
+                return node;
+            }
+
+            predicate = maybeIf.Cast();
             TOLAPPredicateNode predicateTree;
             predicateTree.ExprNode = predicate.Ptr();
             CollectPredicates(predicate, predicateTree, &lambdaArg, read.Process().Body(), {true, pushdownOptions.PushdownSubstring});
