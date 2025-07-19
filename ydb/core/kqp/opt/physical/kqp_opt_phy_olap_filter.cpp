@@ -781,14 +781,6 @@ std::pair<TVector<TOLAPPredicateNode>, TVector<TOLAPPredicateNode>> SplitForPart
     }
     return {pushable, remaining};
 }
-
-void Print(TOLAPPredicateNode &node, int level) {
-    Cerr << node.ExprNode->Content() << " can be pushed " << node.CanBePushedApply <<  " level " << level << Endl;
-    for (auto &child : node.Children) {
-        Print(child, level + 1);
-    }
-}
-
 } // anonymous namespace end
 
 TExprBase KqpPushOlapFilter(TExprBase node, TExprContext& ctx, const TKqpOptimizeContext& kqpCtx,
@@ -826,6 +818,7 @@ TExprBase KqpPushOlapFilter(TExprBase node, TExprContext& ctx, const TKqpOptimiz
     const auto& optionaIf = maybeOptionalIf.Cast();
     auto predicate = optionaIf.Predicate();
     auto value = optionaIf.Value();
+    auto originalValue = value;
 
     TOLAPPredicateNode predicateTree;
     predicateTree.ExprNode = predicate.Ptr();
@@ -841,6 +834,7 @@ TExprBase KqpPushOlapFilter(TExprBase node, TExprContext& ctx, const TKqpOptimiz
     if (pushdownOptions.AllowOlapApply) {
         TVector<TOLAPPredicateNode> remainingAfterApply;
         for (const auto &predicateExprHolder : remaining) {
+            // Closure an original predicate, we cannot call `Peephole` we free args.
             TVector<const TTypeAnnotationNode *> argTypes{lambda.Args().Arg(0).Ptr()->GetTypeAnn()};
             auto olapPredicateClosure = Build<TKqpOlapPredicateClosure>(ctx, node.Pos())
                 .Lambda<TCoLambda>()
@@ -881,17 +875,13 @@ TExprBase KqpPushOlapFilter(TExprBase node, TExprContext& ctx, const TKqpOptimiz
                 return node;
             }
 
-            predicate = maybeIf.Cast();
+            predicate = maybeIf.Cast().Predicate();
             TOLAPPredicateNode predicateTree;
             predicateTree.ExprNode = predicate.Ptr();
             CollectPredicates(predicate, predicateTree, &lArg, lambda.Body(), {true, pushdownOptions.PushdownSubstring});
 
-            Cerr << "PREDICATE TREE " << Endl;
-            Print(predicateTree, 0);
-
             YQL_ENSURE(predicateTree.IsValid(), "Collected OLAP predicates are invalid");
             auto [pushable, remaining] = SplitForPartialPushdown(predicateTree, true);
-            Cerr << "PUSHABLE SIZE " << pushable.size() << Endl;
             for (const auto &p : pushable) {
                 if (p.CanBePushed) {
                     auto pred = PredicatePushdown(TExprBase(p.ExprNode), lArg, ctx, node.Pos(), pushdownOptions.AllowOlapApply);
@@ -902,7 +892,14 @@ TExprBase KqpPushOlapFilter(TExprBase node, TExprContext& ctx, const TKqpOptimiz
                     pushedPredicates.emplace_back(pred);
                 }
             }
-            remainingAfterApply.insert(remainingAfterApply.end(), remaining.begin(), remaining.end());
+            if (remaining.size()) {
+                if (remaining.size() > 1) {
+                    // How this is possible, we already split tree at the first pass, just return a node for safety, instead Y_ENSURE.
+                    YQL_CLOG(TRACE, ProviderKqp) << "[KQP_PUSH_OLAP_FILTER] remaining size > 1 after peephole " << Endl;
+                    return node;
+                }
+                remainingAfterApply.push_back(predicateExprHolder);
+            }
         }
         remaining = std::move(remainingAfterApply);
     }
@@ -912,7 +909,6 @@ TExprBase KqpPushOlapFilter(TExprBase node, TExprContext& ctx, const TKqpOptimiz
     }
 
     const auto& pushedFilter = TFilterOpsLevels::Merge(pushedPredicates, ctx, node.Pos());
-
     const auto remainingFilter = CombinePredicatesWithAnd(remaining, ctx, node.Pos(), false, true);
 
     TMaybeNode<TExprBase> olapFilter;
@@ -974,7 +970,7 @@ TExprBase KqpPushOlapFilter(TExprBase node, TExprContext& ctx, const TKqpOptimiz
                     .With(lambda.Args().Arg(0), "new_arg")
                     .Build()
                 .Value<TExprApplier>()
-                    .Apply(value)
+                    .Apply(originalValue)
                     .With(lambda.Args().Arg(0), "new_arg")
                     .Build()
                 .Build()
