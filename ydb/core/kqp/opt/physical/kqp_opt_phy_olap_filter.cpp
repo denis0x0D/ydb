@@ -782,6 +782,13 @@ std::pair<TVector<TOLAPPredicateNode>, TVector<TOLAPPredicateNode>> SplitForPart
     return {pushable, remaining};
 }
 
+void Print(TOLAPPredicateNode &node, int level) {
+    Cerr << node.ExprNode->Content() << " can be pushed " << node.CanBePushedApply <<  " level " << level << Endl;
+    for (auto &child : node.Children) {
+        Print(child, level + 1);
+    }
+}
+
 } // anonymous namespace end
 
 TExprBase KqpPushOlapFilter(TExprBase node, TExprContext& ctx, const TKqpOptimizeContext& kqpCtx,
@@ -843,7 +850,10 @@ TExprBase KqpPushOlapFilter(TExprBase node, TExprContext& ctx, const TKqpOptimiz
                             .Apply(TExprBase(predicateExprHolder.ExprNode))
                             .With(lambda.Args().Arg(0), "arg")
                         .Build()
-                        .Value(value)
+                        .Value<TExprApplier>()
+                            .Apply(value)
+                            .With(lambda.Args().Arg(0), "arg")
+                        .Build()
                     .Build()
                 .Build()
                 .ArgsType(ExpandType(node.Pos(), *ctx.MakeType<TTupleExprType>(argTypes), ctx))
@@ -862,7 +872,10 @@ TExprBase KqpPushOlapFilter(TExprBase node, TExprContext& ctx, const TKqpOptimiz
 
             YQL_CLOG(TRACE, ProviderKqp) << "[KQP_PUSH_OLAP_FILTER] After peephole: " << KqpExprToPrettyString(TExprBase(afterPeephole), ctx);
 
-            const auto maybeIf = TExprBase(afterPeephole).Cast<TKqpOlapPredicateClosure>().Lambda().Body().Maybe<TCoIf>();
+            auto lambda = TExprBase(afterPeephole).Cast<TKqpOlapPredicateClosure>().Lambda();
+            auto &lArg = lambda.Args().Arg(0).Ref();
+
+            const auto maybeIf = lambda.Body().Maybe<TCoIf>();
             if (!maybeIf.IsValid()) {
                 YQL_CLOG(TRACE, ProviderKqp) << "[KQP_PUSH_OLAP_FILTER] Cannot convert to TCoIf after peephole. " << Endl;
                 return node;
@@ -871,17 +884,20 @@ TExprBase KqpPushOlapFilter(TExprBase node, TExprContext& ctx, const TKqpOptimiz
             predicate = maybeIf.Cast();
             TOLAPPredicateNode predicateTree;
             predicateTree.ExprNode = predicate.Ptr();
-            CollectPredicates(predicate, predicateTree, &lambdaArg, read.Process().Body(), {true, pushdownOptions.PushdownSubstring});
+            CollectPredicates(predicate, predicateTree, &lArg, lambda.Body(), {true, pushdownOptions.PushdownSubstring});
+
+            Cerr << "PREDICATE TREE " << Endl;
+            Print(predicateTree, 0);
 
             YQL_ENSURE(predicateTree.IsValid(), "Collected OLAP predicates are invalid");
             auto [pushable, remaining] = SplitForPartialPushdown(predicateTree, true);
-            for (const auto& p: pushable) {
+            Cerr << "PUSHABLE SIZE " << pushable.size() << Endl;
+            for (const auto &p : pushable) {
                 if (p.CanBePushed) {
-                    auto pred = PredicatePushdown(TExprBase(p.ExprNode), lambdaArg, ctx, node.Pos(), pushdownOptions.AllowOlapApply);
+                    auto pred = PredicatePushdown(TExprBase(p.ExprNode), lArg, ctx, node.Pos(), pushdownOptions.AllowOlapApply);
                     pushedPredicates.emplace_back(pred);
-                }
-                else {
-                    auto expr = YqlApplyPushdown(TExprBase(p.ExprNode), lambdaArg, ctx);
+                } else {
+                    auto expr = YqlApplyPushdown(TExprBase(p.ExprNode), lArg, ctx);
                     TFilterOpsLevels pred(expr);
                     pushedPredicates.emplace_back(pred);
                 }
