@@ -785,7 +785,7 @@ std::pair<TVector<TOLAPPredicateNode>, TVector<TOLAPPredicateNode>> SplitForPart
 } // anonymous namespace end
 
 TExprBase KqpPushOlapFilter(TExprBase node, TExprContext& ctx, const TKqpOptimizeContext& kqpCtx,
-    TTypeAnnotationContext& typesCtx)
+    TTypeAnnotationContext& typesCtx, NYql::IGraphTransformer &typeAnn)
 {
     const auto pushdownOptions = TPushdownOptions{
         kqpCtx.Config->EnableOlapScalarApply,
@@ -834,17 +834,38 @@ TExprBase KqpPushOlapFilter(TExprBase node, TExprContext& ctx, const TKqpOptimiz
     if (pushdownOptions.AllowOlapApply) {
         TVector<TOLAPPredicateNode> remainingAfterApply;
         for(const auto& p: remaining) {
-            const auto recoveredOptinalIfForNonPushedDownPredicates = Build<TCoOptionalIf>(ctx, node.Pos())
+            const auto optIf = Build<TCoOptionalIf>(ctx, node.Pos())
                 .Predicate(p.ExprNode)
                 .Value(value)
-            .Build();
+            .Done();
+
+            auto newLambda = Build<TCoLambda>(ctx, node.Pos())
+                .Args({"arg"})
+                .Body<TExprApplier>()
+                    .Apply(optIf)
+                    .With(lambda.Args().Arg(0), "arg")
+                .Build()
+            .Done();
+
+            TVector<const TTypeAnnotationNode *> argTypes{lambda.Args().Arg(0).Ptr()->GetTypeAnn()};
+            auto program = Build<TKqpOlapPredicateClosure>(ctx, node.Pos())
+                .Lambda(newLambda)
+                .ArgsType(ExpandType(node.Pos(), *ctx.MakeType<TTupleExprType>(argTypes), ctx))
+                .Done();
+
+            YQL_CLOG(TRACE, ProviderKqp) << "BEFORE PEEPHOLE: " << KqpExprToPrettyString(program, ctx);
+
             TExprNode::TPtr afterPeephole;
             bool hasNonDeterministicFunctions;
-            if (const auto status = PeepHoleOptimizeNode(recoveredOptinalIfForNonPushedDownPredicates.Value().Ptr(), afterPeephole, ctx, typesCtx, nullptr, hasNonDeterministicFunctions);
+            if (const auto status = PeepHoleOptimizeNode(program.Ptr(), afterPeephole, ctx,
+                                                         typesCtx, &typeAnn, hasNonDeterministicFunctions);
                 status != IGraphTransformer::TStatus::Ok) {
                 YQL_CLOG(ERROR, ProviderKqp) << "Peephole OLAP failed." << Endl << ctx.IssueManager.GetIssues().ToString();
                 return node;
             }
+
+            YQL_CLOG(TRACE, ProviderKqp) << "AFTER PEEPHOLE: " << KqpExprToPrettyString(TExprBase(afterPeephole), ctx);
+            return node;
             const TCoIf simplified(std::move(afterPeephole));
             predicate = simplified.Predicate();
             value = simplified.ThenValue().Cast<TCoJust>().Input();
