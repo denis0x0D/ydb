@@ -319,6 +319,18 @@ class TOpProject : public IUnaryOperator {
     TVector<TInfoUnit> ProjectList;
 };
 
+/*
+class TOpAggregation : public IUnaryOperator {
+  public:
+    TOpAggregation(std::shared_ptr<IOperator> input, TVector<TInfoUnit> groupBy);
+    virtual TVector<TInfoUnit> GetOutputIUs() override;
+
+    virtual TString ToString() override;
+
+    TVector<TInfoUnit> groupBy;
+};
+*/
+
 class TOpFilter : public IUnaryOperator {
   public:
     TOpFilter(std::shared_ptr<IOperator> input, TPositionHandle pos, TExprNode::TPtr filterLambda);

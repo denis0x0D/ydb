@@ -4240,6 +4240,7 @@ TExprNode::TPtr OptimizeExpandMap(const TExprNode::TPtr& node, TExprContext& ctx
                                 .Seal()
                             .Seal()
                             .Add(1, std::move(limit))
+                            // key extractor
                             .Lambda(2)
                                 .Params("items", inputWidth)
                                 .Apply(*input.Child(1U))
@@ -4260,6 +4261,7 @@ TExprNode::TPtr OptimizeExpandMap(const TExprNode::TPtr& node, TExprContext& ctx
                                     .Done()
                                 .Seal()
                             .Seal()
+                            // init handler
                             .Lambda(3)
                                 .Param("key")
                                 .Params("items", inputWidth)
@@ -4282,6 +4284,7 @@ TExprNode::TPtr OptimizeExpandMap(const TExprNode::TPtr& node, TExprContext& ctx
                                     .Done()
                                 .Seal()
                             .Seal()
+                            // update handler
                             .Lambda(4)
                                 .Param("key")
                                 .Params("items", inputWidth)
@@ -4318,6 +4321,7 @@ TExprNode::TPtr OptimizeExpandMap(const TExprNode::TPtr& node, TExprContext& ctx
                                     .Done()
                                 .Seal()
                             .Seal()
+                            // finish
                             .Lambda(5)
                                 .Param("key")
                                 .Params("state", stateWidth)

@@ -355,6 +355,80 @@ Y_UNIT_TEST_SUITE(KqpRbo) {
         UNIT_ASSERT_C(resultUpsert.IsSuccess(), resultUpsert.GetIssues().ToString());
     }
 
+    Y_UNIT_TEST(Aggregation) {
+        NKikimrConfig::TAppConfig appConfig;
+        appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+        TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        session.ExecuteSchemeQuery(R"(
+            CREATE TABLE `/Root/t1` (
+                a Int64 NOT NULL,
+	            b Int64,
+                c Int64,
+                d Int64,
+                primary key(a)
+            );
+
+            CREATE TABLE `/Root/t2` (
+                a Int64	NOT NULL,
+	            b Int64,
+                c Int64,
+                primary key(a)
+            );
+
+            CREATE TABLE `/Root/t3` (
+                a Int64 NOT NULL,
+	            b Int64,
+                c Int64,
+                primary key(a)
+            );
+
+            CREATE TABLE `/Root/t4` (
+                a Int64 NOT NULL,
+	            b Int64,
+                c Int64,
+                primary key(a)
+            );
+        )").GetValueSync();
+
+        db = kikimr.GetTableClient();
+        auto session2 = db.CreateSession().GetValueSync().GetSession();
+        /*
+        std::vector<std::pair<std::string, int>> tables{{"/Root/t1", 4}, {"/Root/t2", 3}, {"/Root/t3", 2}, {"/Root/t4", 1}};
+        for (const auto &[table, rowsNum] : tables) {
+            InsertIntoSchema0(db, table, rowsNum);
+        }
+        */
+
+        std::vector<std::string> queries = {
+            R"(
+                --!syntax_pg
+                SET TablePathPrefix = "/Root/";
+                select sum(t1.b) as BB from t1 group by t1.a;
+            )",
+            /*
+            R"(
+                pragma TablePathPrefix = "/Root/";
+                PRAGMA ydb.UseDqHashCombine = "false";
+                SELECT sum(t1.c) CCC FROM t1 group by t1.b;
+            )",
+            */
+        };
+
+        std::vector<std::string> results = {
+            R"([["0"];["1"];["2"];["3"];["0"];["1"];["2"]])"
+        };
+
+        for (ui32 i = 0; i < queries.size(); ++i) {
+            const auto &query = queries[i];
+            auto result = session2.ExecuteDataQuery(query, TTxControl::BeginTx().CommitTx()).GetValueSync();
+            UNIT_ASSERT_C(result.IsSuccess(), result.GetIssues().ToString());
+            Cerr << FormatResultSetYson(result.GetResultSet(0)) << Endl;
+        }
+    }
+
     Y_UNIT_TEST(UnionAll) {
         NKikimrConfig::TAppConfig appConfig;
         appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);

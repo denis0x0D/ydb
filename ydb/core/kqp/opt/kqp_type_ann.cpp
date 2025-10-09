@@ -2408,6 +2408,33 @@ TStatus AnnotateOpSort(const TExprNode::TPtr& input, TExprContext& ctx) {
     return TStatus::Ok;
 }
 
+TStatus AnnotateOpGroupBy(const TExprNode::TPtr& input, TExprContext& ctx) {
+    const auto* inputType = input->ChildPtr(TKqpOpRoot::idx_Input)->GetTypeAnn();
+    const auto* structType = inputType->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
+
+    THashMap<TStringBuf, std::pair<TStringBuf, const TTypeAnnotationNode *>> aggFuncMap;
+    for (const auto& expr : TExprBase(input->ChildPtr(TKqpOpGroupBy::idx_AggFunctions)).Cast<TExprList>()) {
+        const auto aggFunc = TExprBase(expr).Cast<TKqpOpAggFuncTuple>();
+        const auto originalColName = aggFunc.OriginalColName();
+        const auto resultColName = aggFunc.ResultColName();
+        const auto *resultType =  aggFunc.AggFunctionResultType().Ptr()->GetTypeAnn()->Cast<TTypeExprType>()->GetType();
+        aggFuncMap[originalColName] = {resultColName, resultType};
+    }
+
+    TVector<const TItemExprType*> newItemTypes;
+    for (const auto *itemType : structType->GetItems()) {
+        if (auto it = aggFuncMap.find(itemType->GetName()); it != aggFuncMap.end()) {
+            newItemTypes.push_back(ctx.MakeType<TItemExprType>(it->second.first, it->second.second));
+        } else {
+            newItemTypes.push_back(itemType);
+        }
+    }
+
+    auto resultType = ctx.MakeType<TListExprType>(ctx.MakeType<TStructExprType>(newItemTypes));
+    input->SetTypeAnn(resultType);
+    return TStatus::Ok;
+}
+
 TStatus AnnotateOpRoot(const TExprNode::TPtr& input, TExprContext& ctx) {
     Y_UNUSED(ctx);
     const TTypeAnnotationNode* inputType = input->ChildPtr(TKqpOpRoot::idx_Input)->GetTypeAnn();
@@ -2643,6 +2670,10 @@ TAutoPtr<IGraphTransformer> CreateKqpTypeAnnotationTransformer(const TString& cl
 
             if (TKqpOpSort::Match(input.Get())) {
                 return AnnotateOpSort(input, ctx);
+            }
+
+            if (TKqpOpGroupBy::Match(input.Get())) {
+                return AnnotateOpGroupBy(input, ctx);
             }
 
             if (TKqpOpRoot::Match(input.Get())) {

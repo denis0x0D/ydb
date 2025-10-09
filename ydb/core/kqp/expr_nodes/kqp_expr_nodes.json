@@ -892,7 +892,31 @@
             "Children": [
                 {"Index": 0, "Name": "Input", "Type": "TExprBase"}
             ]
+        },
+        {
+            "Name": "TKqpOpAggFuncTuple",
+            "Base": "TExprBase",
+            "Match": {"Type": "Tuple"},
+            "Children": [
+                {"Index": 0, "Name": "OriginalColName", "Type": "TCoAtom"},
+                {"Index": 1, "Name": "AggFunction", "Type": "TExprBase"},
+                {"Index": 2, "Name": "ResultColName", "Type": "TCoAtom"},
+                {"Index": 3, "Name": "AggFunctionResultType", "Type": "TExprBase"}
+            ]
+        },
+        {
+            "Name": "TKqpOpAggFuncTupleList",
+            "ListBase" : "TKqpOpAggFuncTuple"
+        },
+        {
+            "Name": "TKqpOpGroupBy",
+            "Base": "TCallable",
+            "Match" : {"Type": "Callable", "Name": "KqpOpGroupBy"},
+            "Children": [
+                {"Index": 0, "Name": "Input", "Type": "TExprBase"},
+                {"Index": 1, "Name": "AggFunctions", "Type": "TKqpOpAggFuncTupleList"},
+                {"Index": 2, "Name": "KeyColumns", "Type": "TCoAtomList", "Optional": true}
+            ]
         }
-
     ]
 }
