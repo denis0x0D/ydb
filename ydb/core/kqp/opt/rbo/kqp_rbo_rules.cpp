@@ -590,6 +590,9 @@ bool TAssignStagesRule::TestAndApply(std::shared_ptr<IOperator> &input, TExprCon
         props.StageGraph.Connect(*rightStage, newStageId, std::make_shared<TUnionAllConnection>(isRightSourceStage));
 
         YQL_CLOG(TRACE, CoreDq) << "Assign stages union_all";
+    } else if (input->Kind == EOperator::GroupBy) {
+        auto groupBy = CastOperator<TOpGroupBy>(input);
+        Y_ENSURE(false, "Group by not supported yet ");
     } else {
         Y_ENSURE(false, "Unknown operator encountered");
     }

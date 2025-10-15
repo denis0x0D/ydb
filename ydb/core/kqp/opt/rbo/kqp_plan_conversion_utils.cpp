@@ -171,7 +171,9 @@ std::shared_ptr<IOperator> PlanConverter::ConvertTKqpOpGroupBy(TExprNode::TPtr n
         keyColumns.push_back(TInfoUnit(TString(keyColumn)));
     }
 
-    return std::make_shared<TOpGroupBy>(input, opAggFunctions, keyColumns, node->Pos());
+    // FIXME: We need to properly convert agg func for initial and final aggregation.
+    auto initialAggregation = std::make_shared<TOpGroupBy>(input, opAggFunctions, keyColumns, EAggregationStage::Initial, node->Pos());
+    return std::make_shared<TOpGroupBy>(initialAggregation, opAggFunctions, keyColumns, EAggregationStage::Final, node->Pos());
 }
 
 } // namespace NKqp

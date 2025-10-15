@@ -13,6 +13,9 @@ using namespace NYql;
 
 enum EOperator : ui32 { EmptySource, Source, Map, Project, Filter, Join, GroupBy, Limit, UnionAll, Root };
 
+// Represents aggregation stages.
+enum EAggregationStage : ui32 {Initial, Final};
+
 /**
  * Info Unit is a reference to a column in the plan
  * Currently we only record the name and alias of the column, but we will extend it in the future
@@ -330,12 +333,14 @@ struct TOpAggFunction {
 
 class TOpGroupBy : public IUnaryOperator {
   public:
-    TOpGroupBy(std::shared_ptr<IOperator> input, TVector<TOpAggFunction> &aggFunctions, TVector<TInfoUnit> &keyColumns, TPositionHandle pos);
+    TOpGroupBy(std::shared_ptr<IOperator> input, TVector<TOpAggFunction>& aggFunctions, TVector<TInfoUnit>& keyColumns,
+               EAggregationStage aggStage, TPositionHandle pos);
     virtual TVector<TInfoUnit> GetOutputIUs() override;
 
     virtual TString ToString(TExprContext& ctx) override;
     TVector<TOpAggFunction> AggFunctions;
     TVector<TInfoUnit> KeyColumns;
+    EAggregationStage AggStage;
 };
 
 class TOpFilter : public IUnaryOperator {

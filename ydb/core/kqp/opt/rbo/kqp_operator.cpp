@@ -669,8 +669,8 @@ TString TOpLimit::ToString(TExprContext& ctx) {
 }
 
 TOpGroupBy::TOpGroupBy(std::shared_ptr<IOperator> input, TVector<TOpAggFunction>& aggFunctions, TVector<TInfoUnit>& keyColumns,
-                       TPositionHandle pos)
-    : IUnaryOperator(EOperator::GroupBy, pos, input), AggFunctions(aggFunctions), KeyColumns(keyColumns) {}
+                       EAggregationStage aggStage, TPositionHandle pos)
+    : IUnaryOperator(EOperator::GroupBy, pos, input), AggFunctions(aggFunctions), KeyColumns(keyColumns), AggStage(aggStage) {}
 
 TVector<TInfoUnit> TOpGroupBy::GetOutputIUs() {
     // FIXME: This is not right.
@@ -679,7 +679,31 @@ TVector<TInfoUnit> TOpGroupBy::GetOutputIUs() {
 
 TString TOpGroupBy::ToString(TExprContext& ctx) {
     Y_UNUSED(ctx);
-    return TStringBuilder() << "GroupBy: " << " TOOD more info ";
+
+    TStringBuilder strBuilder;
+    strBuilder << "GroupBy (";
+    for (ui32 i = 0; i < AggFunctions.size(); ++i) {
+        strBuilder << AggFunctions[i].AggFunction << "(" << AggFunctions[i].OriginalColName.GetFullName() << ")";
+        if (i + 1 != AggFunctions.size()) {
+            strBuilder << ", ";
+        }
+    }
+
+    strBuilder << " [";
+    for (ui32 i = 0; i < KeyColumns.size(); ++i) {
+        strBuilder << KeyColumns[i].GetFullName();
+        if (i + 1 != KeyColumns.size()) {
+            strBuilder << ", ";
+        }
+    }
+    strBuilder << "] : ";
+    if (AggStage == EAggregationStage::Initial) {
+        strBuilder << "Initial";
+    } else {
+        strBuilder << "Final";
+    }
+    strBuilder << ")";
+    return strBuilder;
 }
 
 TOpRoot::TOpRoot(std::shared_ptr<IOperator> input, TPositionHandle pos) : IUnaryOperator(EOperator::Root, pos, input) {}
