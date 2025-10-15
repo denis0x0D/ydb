@@ -11,7 +11,7 @@ namespace NKqp {
 
 using namespace NYql;
 
-enum EOperator : ui32 { EmptySource, Source, Map, Project, Filter, Join, GroupBy, Limit, UnionAll, Root };
+enum EOperator : ui32 { EmptySource, Source, Map, Project, Filter, Join, Aggregate, Limit, UnionAll, Root };
 
 // Represents aggregation stages.
 enum EAggregationStage : ui32 {Initial, Final};
@@ -322,8 +322,8 @@ class TOpProject : public IUnaryOperator {
     TVector<TInfoUnit> ProjectList;
 };
 
-struct TOpAggFunction {
-    TOpAggFunction(const TInfoUnit& originalColName, const TString& aggFunction, const TInfoUnit& resultColName)
+struct TOpAggregationTraits {
+    TOpAggregationTraits(const TInfoUnit& originalColName, const TString& aggFunction, const TInfoUnit& resultColName)
         : OriginalColName(originalColName), AggFunction(aggFunction), ResultColName(resultColName) {}
 
     TInfoUnit OriginalColName;
@@ -331,14 +331,15 @@ struct TOpAggFunction {
     TInfoUnit ResultColName;
 };
 
-class TOpGroupBy : public IUnaryOperator {
+class TOpAggregate : public IUnaryOperator {
   public:
-    TOpGroupBy(std::shared_ptr<IOperator> input, TVector<TOpAggFunction>& aggFunctions, TVector<TInfoUnit>& keyColumns,
-               EAggregationStage aggStage, TPositionHandle pos);
+    TOpAggregate(std::shared_ptr<IOperator> input, TVector<TOpAggregationTraits>& aggFunctions, TVector<TInfoUnit>& keyColumns,
+                 EAggregationStage aggStage, TPositionHandle pos);
     virtual TVector<TInfoUnit> GetOutputIUs() override;
 
     virtual TString ToString(TExprContext& ctx) override;
-    TVector<TOpAggFunction> AggFunctions;
+
+    TVector<TOpAggregationTraits> AggregationTraitsList;
     TVector<TInfoUnit> KeyColumns;
     EAggregationStage AggStage;
 };

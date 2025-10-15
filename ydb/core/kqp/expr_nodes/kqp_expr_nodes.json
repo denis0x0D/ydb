@@ -894,27 +894,27 @@
             ]
         },
         {
-            "Name": "TKqpOpAggFuncTuple",
+            "Name": "TKqpOpAggregationTraits",
             "Base": "TExprBase",
             "Match": {"Type": "Tuple"},
             "Children": [
                 {"Index": 0, "Name": "OriginalColName", "Type": "TCoAtom"},
-                {"Index": 1, "Name": "AggFunction", "Type": "TCoAtom"},
+                {"Index": 1, "Name": "AggregationFunction", "Type": "TCoAtom"},
                 {"Index": 2, "Name": "ResultColName", "Type": "TCoAtom"},
-                {"Index": 3, "Name": "AggFunctionResultType", "Type": "TExprBase"}
+                {"Index": 3, "Name": "AggregationFunctionResultType", "Type": "TExprBase"}
             ]
         },
         {
-            "Name": "TKqpOpAggFuncTupleList",
-            "ListBase" : "TKqpOpAggFuncTuple"
+            "Name": "TKqpOpAggregationTraitsList",
+            "ListBase" : "TKqpOpAggregationTraits"
         },
         {
-            "Name": "TKqpOpGroupBy",
+            "Name": "TKqpOpAggregate",
             "Base": "TCallable",
-            "Match" : {"Type": "Callable", "Name": "KqpOpGroupBy"},
+            "Match" : {"Type": "Callable", "Name": "KqpOpAggregate"},
             "Children": [
                 {"Index": 0, "Name": "Input", "Type": "TExprBase"},
-                {"Index": 1, "Name": "AggFunctions", "Type": "TKqpOpAggFuncTupleList"},
+                {"Index": 1, "Name": "AggregationTraitsList", "Type": "TKqpOpAggregationTraitsList"},
                 {"Index": 2, "Name": "KeyColumns", "Type": "TCoAtomList"}
             ]
         }

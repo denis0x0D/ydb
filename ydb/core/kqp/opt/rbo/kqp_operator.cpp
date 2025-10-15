@@ -668,23 +668,23 @@ TString TOpLimit::ToString(TExprContext& ctx) {
     return TStringBuilder() << "Limit: " << PrintRBOExpression(LimitCond, ctx); 
 }
 
-TOpGroupBy::TOpGroupBy(std::shared_ptr<IOperator> input, TVector<TOpAggFunction>& aggFunctions, TVector<TInfoUnit>& keyColumns,
-                       EAggregationStage aggStage, TPositionHandle pos)
-    : IUnaryOperator(EOperator::GroupBy, pos, input), AggFunctions(aggFunctions), KeyColumns(keyColumns), AggStage(aggStage) {}
+TOpAggregate::TOpAggregate(std::shared_ptr<IOperator> input, TVector<TOpAggregationTraits>& aggTraitsList, TVector<TInfoUnit>& keyColumns,
+                           EAggregationStage aggStage, TPositionHandle pos)
+    : IUnaryOperator(EOperator::Aggregate, pos, input), AggregationTraitsList(aggTraitsList), KeyColumns(keyColumns), AggStage(aggStage) {}
 
-TVector<TInfoUnit> TOpGroupBy::GetOutputIUs() {
+TVector<TInfoUnit> TOpAggregate::GetOutputIUs() {
     // FIXME: This is not right.
     return GetInput()->GetOutputIUs();
 }
 
-TString TOpGroupBy::ToString(TExprContext& ctx) {
+TString TOpAggregate::ToString(TExprContext& ctx) {
     Y_UNUSED(ctx);
 
     TStringBuilder strBuilder;
-    strBuilder << "GroupBy (";
-    for (ui32 i = 0; i < AggFunctions.size(); ++i) {
-        strBuilder << AggFunctions[i].AggFunction << "(" << AggFunctions[i].OriginalColName.GetFullName() << ")";
-        if (i + 1 != AggFunctions.size()) {
+    strBuilder << "Aggregate (";
+    for (ui32 i = 0; i < AggregationTraitsList.size(); ++i) {
+        strBuilder << AggregationTraitsList[i].AggFunction << "(" << AggregationTraitsList[i].OriginalColName.GetFullName() << ")";
+        if (i + 1 != AggregationTraitsList.size()) {
             strBuilder << ", ";
         }
     }

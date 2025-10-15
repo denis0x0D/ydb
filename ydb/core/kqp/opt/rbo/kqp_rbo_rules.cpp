@@ -590,15 +590,15 @@ bool TAssignStagesRule::TestAndApply(std::shared_ptr<IOperator> &input, TExprCon
         props.StageGraph.Connect(*rightStage, newStageId, std::make_shared<TUnionAllConnection>(isRightSourceStage));
 
         YQL_CLOG(TRACE, CoreDq) << "Assign stages union_all";
-    } else if (input->Kind == EOperator::GroupBy) {
-        auto groupBy = CastOperator<TOpGroupBy>(input);
-        const auto inputStageId = *(groupBy->GetInput()->Props.StageId);
+    } else if (input->Kind == EOperator::Aggregate) {
+        auto aggregate = CastOperator<TOpAggregate>(input);
+        const auto inputStageId = *(aggregate->GetInput()->Props.StageId);
 
         const auto newStageId = props.StageGraph.AddStage();
-        groupBy->Props.StageId = newStageId;
+        aggregate->Props.StageId = newStageId;
         const bool isInputSourceStage = props.StageGraph.IsSourceStage(inputStageId);
 
-        props.StageGraph.Connect(inputStageId, newStageId, std::make_shared<TShuffleConnection>(groupBy->KeyColumns, isInputSourceStage));
+        props.StageGraph.Connect(inputStageId, newStageId, std::make_shared<TShuffleConnection>(aggregate->KeyColumns, isInputSourceStage));
         YQL_CLOG(TRACE, CoreDq) << "Assign stage to Aggregation ";
     } else {
         Y_ENSURE(false, "Unknown operator encountered");

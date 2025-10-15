@@ -39,8 +39,8 @@ std::shared_ptr<IOperator> PlanConverter::ExprNodeToOperator(TExprNode::TPtr nod
         result = ConvertTKqpOpUnionAll(node);
     } else if (NYql::NNodes::TKqpOpSort::Match(node.Get())) {
         result = ConvertTKqpOpSort(node);
-    } else if (NYql::NNodes::TKqpOpGroupBy::Match(node.Get())) {
-        result = ConvertTKqpOpGroupBy(node);
+    } else if (NYql::NNodes::TKqpOpAggregate::Match(node.Get())) {
+        result = ConvertTKqpOpAggregate(node);
     } else {
         YQL_ENSURE(false, "Unknown operator node");
     }
@@ -153,27 +153,27 @@ std::shared_ptr<IOperator> PlanConverter::ConvertTKqpOpSort(TExprNode::TPtr node
     return output;
 }
 
-std::shared_ptr<IOperator> PlanConverter::ConvertTKqpOpGroupBy(TExprNode::TPtr node) {
-    auto opGroupBy = TKqpOpGroupBy(node);
-    auto input = ExprNodeToOperator(opGroupBy.Input().Ptr());
+std::shared_ptr<IOperator> PlanConverter::ConvertTKqpOpAggregate(TExprNode::TPtr node) {
+    auto opAggregate = TKqpOpAggregate(node);
+    auto input = ExprNodeToOperator(opAggregate.Input().Ptr());
 
-    TVector<TOpAggFunction> opAggFunctions;
-    for (const auto& aggFunc : opGroupBy.AggFunctions()) {
-        const auto originalColName = TInfoUnit(TString(aggFunc.OriginalColName()));
-        const auto aggFuncName = TString(aggFunc.AggFunction());
-        const auto resultColName = TInfoUnit(TString(aggFunc.ResultColName()));
-        TOpAggFunction opAggFunction(originalColName, aggFuncName, resultColName);
-        opAggFunctions.push_back(opAggFunction);
+    TVector<TOpAggregationTraits> opAggTraitsList;
+    for (const auto& traits : opAggregate.AggregationTraitsList()) {
+        const auto originalColName = TInfoUnit(TString(traits.OriginalColName()));
+        const auto aggFuncName = TString(traits.AggregationFunction());
+        const auto resultColName = TInfoUnit(TString(traits.ResultColName()));
+        TOpAggregationTraits opAggTraits(originalColName, aggFuncName, resultColName);
+        opAggTraitsList.push_back(opAggTraits);
     }
 
     TVector<TInfoUnit> keyColumns;
-    for (const auto &keyColumn : opGroupBy.KeyColumns()) {
+    for (const auto &keyColumn : opAggregate.KeyColumns()) {
         keyColumns.push_back(TInfoUnit(TString(keyColumn)));
     }
 
     // FIXME: We need to properly convert agg func for initial and final aggregation.
-    auto initialAggregation = std::make_shared<TOpGroupBy>(input, opAggFunctions, keyColumns, EAggregationStage::Initial, node->Pos());
-    return std::make_shared<TOpGroupBy>(initialAggregation, opAggFunctions, keyColumns, EAggregationStage::Final, node->Pos());
+    auto initialAggregation = std::make_shared<TOpAggregate>(input, opAggTraitsList, keyColumns, EAggregationStage::Initial, node->Pos());
+    return std::make_shared<TOpAggregate>(initialAggregation, opAggTraitsList, keyColumns, EAggregationStage::Final, node->Pos());
 }
 
 } // namespace NKqp

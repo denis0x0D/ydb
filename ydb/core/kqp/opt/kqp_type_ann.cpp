@@ -2408,22 +2408,22 @@ TStatus AnnotateOpSort(const TExprNode::TPtr& input, TExprContext& ctx) {
     return TStatus::Ok;
 }
 
-TStatus AnnotateOpGroupBy(const TExprNode::TPtr& input, TExprContext& ctx) {
-    const auto* inputType = input->ChildPtr(TKqpOpRoot::idx_Input)->GetTypeAnn();
+TStatus AnnotateOpAggregate(const TExprNode::TPtr& input, TExprContext& ctx) {
+    const auto* inputType = input->ChildPtr(TKqpOpAggregate::idx_Input)->GetTypeAnn();
     const auto* structType = inputType->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
 
-    THashMap<TStringBuf, std::pair<TStringBuf, const TTypeAnnotationNode *>> aggFuncMap;
-    for (const auto& expr : TExprBase(input->ChildPtr(TKqpOpGroupBy::idx_AggFunctions)).Cast<TExprList>()) {
-        const auto aggFunc = TExprBase(expr).Cast<TKqpOpAggFuncTuple>();
-        const auto originalColName = aggFunc.OriginalColName();
-        const auto resultColName = aggFunc.ResultColName();
-        const auto *resultType =  aggFunc.AggFunctionResultType().Ptr()->GetTypeAnn()->Cast<TTypeExprType>()->GetType();
-        aggFuncMap[originalColName] = {resultColName, resultType};
+    THashMap<TStringBuf, std::pair<TStringBuf, const TTypeAnnotationNode*>> aggTraitsMap;
+    for (const auto& item : TExprBase(input->ChildPtr(TKqpOpAggregate::idx_AggregationTraitsList)).Cast<TExprList>()) {
+        const auto aggTrait = TExprBase(item).Cast<TKqpOpAggregationTraits>();
+        const auto originalColName = aggTrait.OriginalColName();
+        const auto resultColName = aggTrait.ResultColName();
+        const auto* resultType = aggTrait.AggregationFunctionResultType().Ptr()->GetTypeAnn()->Cast<TTypeExprType>()->GetType();
+        aggTraitsMap[originalColName] = {resultColName, resultType};
     }
 
     TVector<const TItemExprType*> newItemTypes;
-    for (const auto *itemType : structType->GetItems()) {
-        if (auto it = aggFuncMap.find(itemType->GetName()); it != aggFuncMap.end()) {
+    for (const auto* itemType : structType->GetItems()) {
+        if (auto it = aggTraitsMap.find(itemType->GetName()); it != aggTraitsMap.end()) {
             newItemTypes.push_back(ctx.MakeType<TItemExprType>(it->second.first, it->second.second));
         } else {
             newItemTypes.push_back(itemType);
@@ -2672,8 +2672,8 @@ TAutoPtr<IGraphTransformer> CreateKqpTypeAnnotationTransformer(const TString& cl
                 return AnnotateOpSort(input, ctx);
             }
 
-            if (TKqpOpGroupBy::Match(input.Get())) {
-                return AnnotateOpGroupBy(input, ctx);
+            if (TKqpOpAggregate::Match(input.Get())) {
+                return AnnotateOpAggregate(input, ctx);
             }
 
             if (TKqpOpRoot::Match(input.Get())) {

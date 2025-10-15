@@ -400,7 +400,7 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr &node, TExprContext &ctx, 
         auto finalType = node->GetTypeAnn()->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
 
         // Collect PgAgg for each result item at first pass.
-        TVector<TKqpOpAggFuncTuple> aggFunctions;
+        TVector<TKqpOpAggregationTraits> aggTraitsList;
         for (ui32 i = 0; i < result->Child(1)->ChildrenSize(); ++i) {
             const auto resultItem = result->Child(1)->ChildPtr(i);
             auto lambda = TCoLambda(ctx.DeepCopyLambda(*(resultItem->Child(2))));
@@ -418,25 +418,25 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr &node, TExprContext &ctx, 
 
                 TString aggFuncName = TString(pgAgg->ChildPtr(0)->Content());
                 // clang-format off
-                auto aggFunc = Build<TKqpOpAggFuncTuple>(ctx, node->Pos())
+                auto aggregationTraits = Build<TKqpOpAggregationTraits>(ctx, node->Pos())
                     .OriginalColName<TCoAtom>()
                         .Value(originalColNames.front().GetFullName())
                     .Build()
-                    .AggFunction<TCoAtom>()
+                    .AggregationFunction<TCoAtom>()
                         .Value(aggFuncName)
                     .Build()
                     .ResultColName<TCoAtom>()
                         .Value(resultColName)
                     .Build()
-                    .AggFunctionResultType(ExpandType(node->Pos(), *aggFuncResultType, ctx))
+                    .AggregationFunctionResultType(ExpandType(node->Pos(), *aggFuncResultType, ctx))
                 .Done();
                 // clang-format on
-                aggFunctions.push_back(aggFunc);
+                aggTraitsList.push_back(aggregationTraits);
             }
         }
 
         TExprNode::TPtr resultExpr = filterExpr;
-        if (!aggFunctions.empty()) {
+        if (!aggTraitsList.empty()) {
             TVector<TCoAtom> keyColumns;
             for (const auto &column : groupByKeys) {
                 // clang-format off
@@ -448,10 +448,10 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr &node, TExprContext &ctx, 
             }
 
             // clang-format off
-            resultExpr = Build<TKqpOpGroupBy>(ctx, node->Pos())
+            resultExpr = Build<TKqpOpAggregate>(ctx, node->Pos())
                 .Input(resultExpr)
-                .AggFunctions<TKqpOpAggFuncTupleList>()
-                    .Add(aggFunctions)
+                .AggregationTraitsList<TKqpOpAggregationTraitsList>()
+                    .Add(aggTraitsList)
                 .Build()
                 .KeyColumns<TCoAtomList>()
                     .Add(keyColumns)
