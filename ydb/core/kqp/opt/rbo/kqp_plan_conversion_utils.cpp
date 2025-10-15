@@ -39,6 +39,8 @@ std::shared_ptr<IOperator> PlanConverter::ExprNodeToOperator(TExprNode::TPtr nod
         result = ConvertTKqpOpUnionAll(node);
     } else if (NYql::NNodes::TKqpOpSort::Match(node.Get())) {
         result = ConvertTKqpOpSort(node);
+    } else if (NYql::NNodes::TKqpOpGroupBy::Match(node.Get())) {
+        result = ConvertTKqpOpGroupBy(node);
     } else {
         YQL_ENSURE(false, "Unknown operator node");
     }
@@ -149,6 +151,27 @@ std::shared_ptr<IOperator> PlanConverter::ConvertTKqpOpSort(TExprNode::TPtr node
 
     output->Props.OrderEnforcer = TOrderEnforcer(EOrderEnforcerAction::REQUIRE, EOrderEnforcerReason::USER, sortElements);
     return output;
+}
+
+std::shared_ptr<IOperator> PlanConverter::ConvertTKqpOpGroupBy(TExprNode::TPtr node) {
+    auto opGroupBy = TKqpOpGroupBy(node);
+    auto input = ExprNodeToOperator(opGroupBy.Input().Ptr());
+
+    TVector<TOpAggFunction> opAggFunctions;
+    for (const auto& aggFunc : opGroupBy.AggFunctions()) {
+        const auto originalColName = TInfoUnit(TString(aggFunc.OriginalColName()));
+        const auto aggFuncName = TString(aggFunc.AggFunction());
+        const auto resultColName = TInfoUnit(TString(aggFunc.ResultColName()));
+        TOpAggFunction opAggFunction(originalColName, aggFuncName, resultColName);
+        opAggFunctions.push_back(opAggFunction);
+    }
+
+    TVector<TInfoUnit> keyColumns;
+    for (const auto &keyColumn : opGroupBy.KeyColumns()) {
+        keyColumns.push_back(TInfoUnit(TString(keyColumn)));
+    }
+
+    return std::make_shared<TOpGroupBy>(input, opAggFunctions, keyColumns, node->Pos());
 }
 
 } // namespace NKqp

@@ -668,6 +668,20 @@ TString TOpLimit::ToString(TExprContext& ctx) {
     return TStringBuilder() << "Limit: " << PrintRBOExpression(LimitCond, ctx); 
 }
 
+TOpGroupBy::TOpGroupBy(std::shared_ptr<IOperator> input, TVector<TOpAggFunction>& aggFunctions, TVector<TInfoUnit>& keyColumns,
+                       TPositionHandle pos)
+    : IUnaryOperator(EOperator::GroupBy, pos, input), AggFunctions(aggFunctions), KeyColumns(keyColumns) {}
+
+TVector<TInfoUnit> TOpGroupBy::GetOutputIUs() {
+    // FIXME: This is not right.
+    return GetInput()->GetOutputIUs();
+}
+
+TString TOpGroupBy::ToString(TExprContext& ctx) {
+    Y_UNUSED(ctx);
+    return TStringBuilder() << "GroupBy: " << " TOOD more info ";
+}
+
 TOpRoot::TOpRoot(std::shared_ptr<IOperator> input, TPositionHandle pos) : IUnaryOperator(EOperator::Root, pos, input) {}
 
 TVector<TInfoUnit> TOpRoot::GetOutputIUs() { return GetInput()->GetOutputIUs(); }

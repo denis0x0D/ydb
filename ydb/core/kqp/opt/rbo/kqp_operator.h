@@ -11,7 +11,7 @@ namespace NKqp {
 
 using namespace NYql;
 
-enum EOperator : ui32 { EmptySource, Source, Map, Project, Filter, Join, Limit, UnionAll, Root };
+enum EOperator : ui32 { EmptySource, Source, Map, Project, Filter, Join, GroupBy, Limit, UnionAll, Root };
 
 /**
  * Info Unit is a reference to a column in the plan
@@ -319,17 +319,24 @@ class TOpProject : public IUnaryOperator {
     TVector<TInfoUnit> ProjectList;
 };
 
-/*
-class TOpAggregation : public IUnaryOperator {
+struct TOpAggFunction {
+    TOpAggFunction(const TInfoUnit& originalColName, const TString& aggFunction, const TInfoUnit& resultColName)
+        : OriginalColName(originalColName), AggFunction(aggFunction), ResultColName(resultColName) {}
+
+    TInfoUnit OriginalColName;
+    TString AggFunction;
+    TInfoUnit ResultColName;
+};
+
+class TOpGroupBy : public IUnaryOperator {
   public:
-    TOpAggregation(std::shared_ptr<IOperator> input, TVector<TInfoUnit> groupBy);
+    TOpGroupBy(std::shared_ptr<IOperator> input, TVector<TOpAggFunction> &aggFunctions, TVector<TInfoUnit> &keyColumns, TPositionHandle pos);
     virtual TVector<TInfoUnit> GetOutputIUs() override;
 
-    virtual TString ToString() override;
-
-    TVector<TInfoUnit> groupBy;
+    virtual TString ToString(TExprContext& ctx) override;
+    TVector<TOpAggFunction> AggFunctions;
+    TVector<TInfoUnit> KeyColumns;
 };
-*/
 
 class TOpFilter : public IUnaryOperator {
   public:

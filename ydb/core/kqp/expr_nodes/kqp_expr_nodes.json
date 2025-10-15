@@ -899,7 +899,7 @@
             "Match": {"Type": "Tuple"},
             "Children": [
                 {"Index": 0, "Name": "OriginalColName", "Type": "TCoAtom"},
-                {"Index": 1, "Name": "AggFunction", "Type": "TExprBase"},
+                {"Index": 1, "Name": "AggFunction", "Type": "TCoAtom"},
                 {"Index": 2, "Name": "ResultColName", "Type": "TCoAtom"},
                 {"Index": 3, "Name": "AggFunctionResultType", "Type": "TExprBase"}
             ]
@@ -915,7 +915,7 @@
             "Children": [
                 {"Index": 0, "Name": "Input", "Type": "TExprBase"},
                 {"Index": 1, "Name": "AggFunctions", "Type": "TKqpOpAggFuncTupleList"},
-                {"Index": 2, "Name": "KeyColumns", "Type": "TCoAtomList", "Optional": true}
+                {"Index": 2, "Name": "KeyColumns", "Type": "TCoAtomList"}
             ]
         }
     ]
