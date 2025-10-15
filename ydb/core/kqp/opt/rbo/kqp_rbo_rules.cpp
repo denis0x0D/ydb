@@ -592,7 +592,14 @@ bool TAssignStagesRule::TestAndApply(std::shared_ptr<IOperator> &input, TExprCon
         YQL_CLOG(TRACE, CoreDq) << "Assign stages union_all";
     } else if (input->Kind == EOperator::GroupBy) {
         auto groupBy = CastOperator<TOpGroupBy>(input);
-        Y_ENSURE(false, "Group by not supported yet ");
+        const auto inputStageId = *(groupBy->GetInput()->Props.StageId);
+
+        const auto newStageId = props.StageGraph.AddStage();
+        groupBy->Props.StageId = newStageId;
+        const bool isInputSourceStage = props.StageGraph.IsSourceStage(inputStageId);
+
+        props.StageGraph.Connect(inputStageId, newStageId, std::make_shared<TShuffleConnection>(groupBy->KeyColumns, isInputSourceStage));
+        YQL_CLOG(TRACE, CoreDq) << "Assign stage to Aggregation ";
     } else {
         Y_ENSURE(false, "Unknown operator encountered");
     }

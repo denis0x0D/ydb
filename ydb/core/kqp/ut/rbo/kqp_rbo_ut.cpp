@@ -412,7 +412,7 @@ Y_UNIT_TEST_SUITE(KqpRbo) {
             R"(
                 pragma TablePathPrefix = "/Root/";
                 PRAGMA ydb.UseDqHashCombine = "false";
-                SELECT sum(t1.c) CCC FROM t1 group by t1.b;
+                SELECT sum(t1.c) CCC FROM t1 group by t1.b, t1.c;
             )",
             */
         };
