@@ -733,6 +733,8 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot &root, TExprContext &ctx, TTypeAnnotat
             stages[opStageId] = currentStageBody;
             stagePos[opStageId] = op->Pos;
             YQL_CLOG(TRACE, CoreDq) << "Converted UnionAll " << opStageId;
+        } else if (op->Kind == EOperator::Aggregate) {
+            Y_ENSURE(false, "Could not generate physical plan for Aggregate");
         } else {
             Y_ENSURE(false, "Could not generate physical plan");
         }
