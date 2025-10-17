@@ -468,7 +468,21 @@ TExprNode::TPtr BuildKeyExtractorLambda(const TVector<TInfoUnit>& inputColumns, 
             })
             .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
                 for (ui32 i = 0; i < keys.size(); ++i) {
-                    parent.Arg(i, "param" + std::to_string(i));
+                    parent
+                        .Callable("Member")
+                            .Callable(0, "AsStruct")
+                            .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                                for (ui32 i = 0; i < inputColumns.size(); ++i) {
+                                    parent.List(i)
+                                        .Atom(0, inputColumns[i].GetFullName())
+                                        .Arg(1, "param" + std::to_string(i))
+                                    .Seal();
+                                }
+                                return parent;
+                            })
+                            .Seal()
+                            .Atom(1, keys[i].GetFullName())
+                        .Seal();
                 }
                 return parent;
             })
