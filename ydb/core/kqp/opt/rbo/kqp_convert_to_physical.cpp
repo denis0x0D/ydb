@@ -455,6 +455,107 @@ TExprNode::TPtr BuildSort(TExprNode::TPtr input, TOrderEnforcer & enforcer, TExp
     // clang-format on
 }
 
+TExprNode::TPtr BuildKeyExtractorLambda(TVector<TInfoUnit> &inputColumns, const TVector<TInfoUnit> &keys, TExprContext &ctx, TPositionHandle pos) {
+    return ctx.Builder(pos)
+        .Lambda()
+            .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                for (ui32 i = 0; i < inputColumns.size(); ++i) {
+                    parent.Param("param" + std::to_string(i));
+                }
+                return parent;
+            })
+            .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                for (ui32 i = 0; i < keys.size(); ++i) {
+                    parent.Arg(i, "param" + std::to_string(i));
+                }
+                return parent;
+            })
+        .Seal().Build();
+}
+
+TExprNode::TPtr BuildInitHandlerLambda(TVector<TInfoUnit> &inputColumns, const TVector<TInfoUnit> &keys, TExprContext &ctx, TPositionHandle pos) {
+    return ctx.Builder(pos)
+        .Lambda()
+            .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                for (ui32 i = 0; i < inputColumns.size(); ++i) {
+                    parent.Param("param" + std::to_string(i));
+                }
+                return parent;
+            })
+            .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                for (ui32 i = 0; i < keys.size(); ++i) {
+                    parent.Arg(i, "param" + std::to_string(i));
+                }
+                return parent;
+            })
+        .Seal().Build();
+}
+
+TExprNode::TPtr BuildUpdateHandlerLambda(TVector<TInfoUnit> &inputColumns, const TVector<TInfoUnit> &keys, TExprContext &ctx, TPositionHandle pos) {
+    return ctx.Builder(pos)
+        .Lambda()
+            .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                for (ui32 i = 0; i < inputColumns.size(); ++i) {
+                    parent.Param("param" + std::to_string(i));
+                }
+                return parent;
+            })
+            .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                for (ui32 i = 0; i < keys.size(); ++i) {
+                    parent.Arg(i, "param" + std::to_string(i));
+                }
+                return parent;
+            })
+        .Seal().Build();
+}
+
+ TExprNode::TPtr BuildFinishHandlerLambda(TVector<TInfoUnit> &inputColumns, const TVector<TInfoUnit> &keys, TExprContext &ctx, TPositionHandle pos) {
+    return ctx.Builder(pos)
+        .Lambda()
+            .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                for (ui32 i = 0; i < inputColumns.size(); ++i) {
+                    parent.Param("param" + std::to_string(i));
+                }
+                return parent;
+            })
+            .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                for (ui32 i = 0; i < keys.size(); ++i) {
+                    parent.Arg(i, "param" + std::to_string(i));
+                }
+                return parent;
+            })
+        .Seal().Build();
+}
+
+TExprNode::TPtr BuildExpandMap(TExprNode::TPtr input, TVector<TInfoUnit> &inputColumns, TExprContext &ctx, TPositionHandle pos) {
+    return ctx.Builder(pos) 
+        .Callable("ExpandMap")
+            .Callable(0, "FromFlow")
+                .Add(0, input)
+            .Seal()
+            .Lambda(1)
+                .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                    for (ui32 i = 0; i < inputColumns.size(); ++i) {
+                        parent.Param("param" + std::to_string(i));
+                    }
+                    return parent;
+                })
+                .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                    for (ui32 i = 0; i < inputColumns.size(); ++i) {
+                        parent
+                            .Callable(i, "Member")
+                                .Arg(0, "param" + std::to_string(i))
+                                .Atom(1, inputColumns[i].GetFullName())
+                            .Seal();
+                    }
+                    return parent;
+                })
+            .Seal()
+        .Seal().Build();
+}
+
+
+
 } // namespace
 
 namespace NKikimr {
@@ -738,95 +839,19 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot &root, TExprContext &ctx, TTypeAnnotat
 
             auto [stageArg, stageInput] = graph.GenerateStageInput(stageInputCounter, root.Node, ctx, *aggregate->GetInput()->Props.StageId);
             stageArgs[opStageId].push_back(stageArg);
-            //auto limit = ctx.NewAtom(op->Pos(), "");
 
-            TVector<TString> keys = {"a", "b", "c"};
-
-            // WideCombiner(ExpandMap(FromFlow()))
-            auto expandMap = ctx.Builder(op->Pos) 
-                .Callable("ExpandMap")
-                    .Callable(0, "FromFlow")
-                        .Add(0, stageInput)
-                    .Seal()
-                    .Lambda(1)
-                        .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
-                            for (ui32 i = 0; i < keys.size(); ++i) {
-                                parent.Param("param" + std::to_string(i));
-                            }
-                            return parent;
-                        })
-                        .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
-                            for (ui32 i = 0; i < keys.size(); ++i) {
-                                parent
-                                    .Callable(i, "Member")
-                                        .Arg(0, "param" + std::to_string(i))
-                                        .Atom(1, keys[i])
-                                    .Seal();
-                            }
-                            return parent;
-                        })
-                    .Seal()
-                .Seal().Build();
-
+            // TODO: Add limit.
+            auto memLimit = ctx.NewAtom(op->Pos, "");
+            auto keys = aggregate->KeyColumns;
+                        
             auto wideCombiner = ctx.Builder(op->Pos)
                 .Callable("WideCombiner")
-                    .Add(0, expandMap)
-                    .Lambda(1)
-                        .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
-                            for (ui32 i = 0; i < keys.size(); ++i) {
-                                parent.Param("param" + std::to_string(i));
-                            }
-                            return parent;
-                        })
-                        .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
-                            for (ui32 i = 0; i < 1; ++i) {
-                                parent.Arg(i, "param" + std::to_string(i));
-                            }
-                            return parent;
-                        })
-                    .Seal()
-                    .Lambda(2)
-                        .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
-                            for (ui32 i = 0; i < keys.size(); ++i) {
-                                parent.Param("param" + std::to_string(i));
-                            }
-                            return parent;
-                        })
-                        .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
-                            for (ui32 i = 0; i < 1; ++i) {
-                                parent.Arg(i, "param" + std::to_string(i));
-                            }
-                            return parent;
-                        })
-                    .Seal()
-                    .Lambda(3)
-                        .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
-                            for (ui32 i = 0; i < keys.size(); ++i) {
-                                parent.Param("param" + std::to_string(i));
-                            }
-                            return parent;
-                        })
-                        .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
-                            for (ui32 i = 0; i < 1; ++i) {
-                                parent.Arg(i, "param" + std::to_string(i));
-                            }
-                            return parent;
-                        })
-                    .Seal()
-                    .Lambda(4)
-                        .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
-                            for (ui32 i = 0; i < keys.size(); ++i) {
-                                parent.Param("param" + std::to_string(i));
-                            }
-                            return parent;
-                        })
-                        .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
-                            for (ui32 i = 0; i < 1; ++i) {
-                                parent.Arg(i, "param" + std::to_string(i));
-                            }
-                            return parent;
-                        })
-                    .Seal()
+                    .Add(0, BuildExpandMap(stageInput, keys, ctx, op->Pos))
+                    .Add(1, memLimit)
+                    .Add(2, BuildKeyExtractorLambda(keys, keys, ctx, op->Pos))
+                    .Add(3, BuildInitHandlerLambda(keys, keys, ctx, op->Pos))
+                    .Add(4, BuildUpdateHandlerLambda(keys, keys, ctx, op->Pos))
+                    .Add(5, BuildFinishHandlerLambda(keys, keys, ctx, op->Pos))
                 .Seal().Build();
 
             YQL_CLOG(TRACE, CoreDq) << "EXPAND MAP " << KqpExprToPrettyString(TExprBase(wideCombiner), ctx);
