@@ -734,10 +734,210 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot &root, TExprContext &ctx, TTypeAnnotat
             stagePos[opStageId] = op->Pos;
             YQL_CLOG(TRACE, CoreDq) << "Converted UnionAll " << opStageId;
         } else if (op->Kind == EOperator::Aggregate) {
+            auto aggregate = CastOperator<TOpAggregate>(op);
+
+            auto [stageArg, stageInput] = graph.GenerateStageInput(stageInputCounter, root.Node, ctx, *aggregate->GetInput()->Props.StageId);
+            stageArgs[opStageId].push_back(stageArg);
+            //auto limit = ctx.NewAtom(op->Pos(), "");
+
+            TVector<TString> keys = {"a", "b", "c"};
+
+            // WideCombiner(ExpandMap(FromFlow()))
+            auto expandMap = ctx.Builder(op->Pos) 
+                .Callable("ExpandMap")
+                    .Callable(0, "FromFlow")
+                        .Add(0, stageInput)
+                    .Seal()
+                    .Lambda(1)
+                        .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                            for (ui32 i = 0; i < keys.size(); ++i) {
+                                parent.Param("param" + std::to_string(i));
+                            }
+                            return parent;
+                        })
+                        .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                            for (ui32 i = 0; i < keys.size(); ++i) {
+                                parent
+                                    .Callable(i, "Member")
+                                        .Arg(0, "param" + std::to_string(i))
+                                        .Atom(1, keys[i])
+                                    .Seal();
+                            }
+                            return parent;
+                        })
+                    .Seal()
+                .Seal().Build();
+
+            auto wideCombiner = ctx.Builder(op->Pos)
+                .Callable("WideCombiner")
+                    .Add(0, expandMap)
+                    .Lambda(1)
+                        .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                            for (ui32 i = 0; i < keys.size(); ++i) {
+                                parent.Param("param" + std::to_string(i));
+                            }
+                            return parent;
+                        })
+                        .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                            for (ui32 i = 0; i < 1; ++i) {
+                                parent.Arg(i, "param" + std::to_string(i));
+                            }
+                            return parent;
+                        })
+                    .Seal()
+                    .Lambda(2)
+                        .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                            for (ui32 i = 0; i < keys.size(); ++i) {
+                                parent.Param("param" + std::to_string(i));
+                            }
+                            return parent;
+                        })
+                        .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                            for (ui32 i = 0; i < 1; ++i) {
+                                parent.Arg(i, "param" + std::to_string(i));
+                            }
+                            return parent;
+                        })
+                    .Seal()
+                    .Lambda(3)
+                        .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                            for (ui32 i = 0; i < keys.size(); ++i) {
+                                parent.Param("param" + std::to_string(i));
+                            }
+                            return parent;
+                        })
+                        .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                            for (ui32 i = 0; i < 1; ++i) {
+                                parent.Arg(i, "param" + std::to_string(i));
+                            }
+                            return parent;
+                        })
+                    .Seal()
+                    .Lambda(4)
+                        .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                            for (ui32 i = 0; i < keys.size(); ++i) {
+                                parent.Param("param" + std::to_string(i));
+                            }
+                            return parent;
+                        })
+                        .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                            for (ui32 i = 0; i < 1; ++i) {
+                                parent.Arg(i, "param" + std::to_string(i));
+                            }
+                            return parent;
+                        })
+                    .Seal()
+                .Seal().Build();
+
+            YQL_CLOG(TRACE, CoreDq) << "EXPAND MAP " << KqpExprToPrettyString(TExprBase(wideCombiner), ctx);
             Y_ENSURE(false, "Could not generate physical plan for Aggregate");
-        } else {
-            Y_ENSURE(false, "Could not generate physical plan");
-        }
+
+            /*
+            return ctx.Builder(node->Pos())
+                .Callable("NarrowMap")
+                    .Callable(0, "WideCombiner")
+                        .Add(0, stageInput)
+                        .Add(1, std::move(limit))
+                        .Lambda(2)
+                            .Params("items", inputWidth)
+                            .Apply(*node->Child(1U))
+                                .With(0)
+                                    .Apply(node->Head().Tail())
+                                        .With("items")
+                                    .Seal()
+                                .Done()
+                            .Seal()
+                        .Seal()
+                        .Lambda(3)
+                            .Param("key")
+                            .Params("items", inputWidth)
+                            .ApplyPartial(node->Child(2U)->HeadPtr(), std::move(init))
+                                .With(0, "key")
+                                .With(1)
+                                    .Apply(node->Head().Tail())
+                                        .With("items")
+                                    .Seal()
+                                .Done()
+                            .Seal()
+                        .Seal()
+                        .Lambda(4)
+                            .Param("key")
+                            .Params("items", inputWidth)
+                            .Params("state", stateWidth)
+                            .ApplyPartial(node->Child(3U)->HeadPtr(), std::move(update))
+                                .With(0, "key")
+                                .With(1)
+                                    .Apply(node->Head().Tail())
+                                        .With("items")
+                                    .Seal()
+                                .Done()
+                                .With(2)
+                                    .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                                        if (stateFields.empty())
+                                            parent.Arg("state", 0);
+                                        else {
+                                            auto str = parent.Callable("AsStruct");
+                                            for (ui32 i = 0U; i < stateWidth; ++i) {
+                                                str.List(i)
+                                                    .Add(0, stateFields[i])
+                                                    .Arg(1, "state", i)
+                                                .Seal();
+                                            }
+                                            str.Seal();
+                                        }
+                                        return parent;
+                                    })
+                                .Done()
+                            .Seal()
+                        .Seal()
+                        .Lambda(5)
+                            .Param("key")
+                            .Params("state", stateWidth)
+                            .ApplyPartial(node->Child(4U)->HeadPtr(), std::move(finish))
+                                .With(0, "key")
+                                .With(1)
+                                    .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                                        if (stateFields.empty())
+                                            parent.Arg("state", 0);
+                                        else {
+                                            auto str = parent.Callable("AsStruct");
+                                            for (ui32 i = 0U; i < stateWidth; ++i) {
+                                                str.List(i)
+                                                    .Add(0, std::move(stateFields[i]))
+                                                    .Arg(1, "state", i)
+                                                .Seal();
+                                            }
+                                            str.Seal();
+                                        }
+                                        return parent;
+                                    })
+                                .Done()
+                            .Seal()
+                        .Seal()
+                    .Seal()
+                    .Lambda(1)
+                        .Params("items", outputWidth)
+                        .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                            if (outputFields.empty())
+                                parent.Arg("items", 0);
+                            else {
+                                auto str = parent.Callable("AsStruct");
+                                for (ui32 i = 0U; i < outputWidth; ++i) {
+                                    str.List(i)
+                                        .Add(0, std::move(outputFields[i]))
+                                        .Arg(1, "items", i)
+                                    .Seal();
+                                }
+                                str.Seal();
+                            }
+                            return parent;
+                        })
+                    .Seal()
+                .Seal().Build();
+                */
+            } else {
+                Y_ENSURE(false, "Could not generate physical plan");
+            }
     }
 
     // We need to build up stages in a topological sort order
