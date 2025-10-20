@@ -687,19 +687,20 @@ TExprNode::TPtr BuildExpandMap(TExprNode::TPtr input, const TVector<TString> &in
     // clang-format on
 }
 
-TVector<TString> GetAggFields(const TVector<TInfoUnit> &inputColumns, const TVector<TOpAggregationTraits> &aggregationTraitsList, bool isResult = false) {
+TVector<TString> GetAggFields(const TVector<TInfoUnit>& inputColumns, const TVector<TOpAggregationTraits>& aggregationTraitsList,
+                              bool isResult = false) {
     TVector<TString> aggFields;
     THashMap<TString, TString> aggColumns;
-    for (const auto &aggregationTraits : aggregationTraitsList) {
+    for (const auto& aggregationTraits : aggregationTraitsList) {
         aggColumns[aggregationTraits.OriginalColName.GetFullName()] = aggregationTraits.AggFunction;
     }
 
     for (ui32 i = 0; i < inputColumns.size(); ++i) {
         const auto fullName = inputColumns[i].GetFullName();
         if (aggColumns.contains(fullName)) {
-            const auto prefix = "__kqp_" + ToString(i);
+            const auto prefix = "__kqp_agg_" + ToString(i);
             if (isResult) {
-                aggFields.push_back(prefix + aggColumns[fullName]);
+                aggFields.push_back(prefix + "_" + aggColumns[fullName]);
             } else {
                 aggFields.push_back(prefix);
             }
@@ -707,7 +708,7 @@ TVector<TString> GetAggFields(const TVector<TInfoUnit> &inputColumns, const TVec
             aggFields.push_back(fullName);
         }
     }
- 
+
     return aggFields;
 }
 
