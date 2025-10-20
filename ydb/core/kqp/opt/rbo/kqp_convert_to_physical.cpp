@@ -540,8 +540,9 @@ TExprNode::TPtr BuildInitHandlerLambda(const TVector<TInfoUnit>& inputFields, TE
     // clang-forat on
 }
 
-TExprNode::TPtr BuildUpdateHandlerLambda(const TVector<TInfoUnit>& inputFields, const TVector<TInfoUnit>& stateFields, TExprContext& ctx,
-                                         const TPositionHandle pos) {
+TExprNode::TPtr BuildUpdateHandlerLambda(const TVector<TInfoUnit>& inputFields, const TVector<TInfoUnit>& stateFields,
+                                         const TVector<TOpAggregationTraits>& aggs, TExprContext& ctx, const TPositionHandle pos) {
+    (void) aggs;
     ui32 lambdaArgsCounter = 0;
     TVector<TExprNode::TPtr> lambdaArgs;
     lambdaArgs.push_back(ctx.NewArgument(pos, "param" + ToString(lambdaArgsCounter++)));
@@ -685,6 +686,17 @@ TExprNode::TPtr BuildExpandMap(TExprNode::TPtr input, const TVector<TInfoUnit> &
         .Seal().Build();
     // clang-format on
 }
+
+TVector<TInfoUnit> GetInputFields(const TVector<TInfoUnit> &inputColumns, const TVector<TOpAggregationTraits> &aggs) {
+    (void) aggs;
+    return inputColumns;
+}
+
+TVector<TInfoUnit> GetStateFields(const TVector<TInfoUnit> &inputColumns, const TVector<TOpAggregationTraits> &aggs) {
+    (void) aggs;
+    return inputColumns;
+}
+
 } // namespace
 
 namespace NKikimr {
@@ -971,18 +983,20 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot &root, TExprContext &ctx, TTypeAnnotat
 
             // TODO: Add limit.
             auto memLimit = ctx.NewAtom(op->Pos, "");
-            const TVector<TInfoUnit> keys = aggregate->KeyColumns;
+            const TVector<TInfoUnit> keyFields = aggregate->KeyColumns;
             const TVector<TInfoUnit> inputColumns = aggregate->GetInput()->GetOutputIUs();
-            const TVector<TInfoUnit> stateColumns = keys;
+            const auto aggregationTraitsList = aggregate->AggregationTraitsList;
+            const TVector<TInfoUnit> inputFields = GetInputFields(inputColumns, aggregationTraitsList);
+            const TVector<TInfoUnit> stateFields = GetStateFields(inputColumns, aggregationTraitsList);
                         
             auto wideCombiner = ctx.Builder(op->Pos)
                 .Callable("WideCombiner")
-                    .Add(0, BuildExpandMap(stageInput, inputColumns, ctx, op->Pos))
+                    .Add(0, BuildExpandMap(stageInput, inputFields, ctx, op->Pos))
                     .Add(1, memLimit)
-                    .Add(2, BuildKeyExtractorLambda(inputColumns, keys, ctx, op->Pos))
-                    .Add(3, BuildInitHandlerLambda(inputColumns, ctx, op->Pos))
-                    .Add(4, BuildUpdateHandlerLambda(keys, keys, ctx, op->Pos))
-                    .Add(5, BuildFinishHandlerLambda(keys, ctx, op->Pos))
+                    .Add(2, BuildKeyExtractorLambda(inputFields, keyFields, ctx, op->Pos))
+                    .Add(3, BuildInitHandlerLambda(inputFields, ctx, op->Pos))
+                    .Add(4, BuildUpdateHandlerLambda(inputFields, stateFields, aggregationTraitsList, ctx, op->Pos))
+                    .Add(5, BuildFinishHandlerLambda(stateFields, ctx, op->Pos))
                 .Seal().Build();
 
             YQL_CLOG(TRACE, CoreDq) << "EXPAND MAP " << KqpExprToPrettyString(TExprBase(wideCombiner), ctx);
