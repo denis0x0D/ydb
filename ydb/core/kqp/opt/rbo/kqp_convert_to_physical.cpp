@@ -455,11 +455,11 @@ TExprNode::TPtr BuildSort(TExprNode::TPtr input, TOrderEnforcer & enforcer, TExp
     // clang-format on
 }
 
-TExprNode::TPtr BuildKeyExtractorLambda(const TVector<TInfoUnit>& inputColumns, const TVector<TInfoUnit>& keys, TExprContext& ctx,
+TExprNode::TPtr BuildKeyExtractorLambda(const TVector<TInfoUnit>& inputFields, const TVector<TInfoUnit>& keyFields, TExprContext& ctx,
                                         const TPositionHandle pos) {
     // At fitst generate a lambda args, the size of args is equal to number of input columns.
     TVector<TExprNode::TPtr> lambdaArgs;
-    for (ui32 i = 0; i < inputColumns.size(); ++i) {
+    for (ui32 i = 0; i < inputFields.size(); ++i) {
         lambdaArgs.push_back(ctx.NewArgument(pos, "param" + ToString(i)));
     }
 
@@ -468,9 +468,9 @@ TExprNode::TPtr BuildKeyExtractorLambda(const TVector<TInfoUnit>& inputColumns, 
     auto asStruct = ctx.Builder(pos)
         .Callable("AsStruct")
         .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
-            for (ui32 i = 0; i < inputColumns.size(); ++i) {
+            for (ui32 i = 0; i < inputFields.size(); ++i) {
                 parent.List(i)
-                    .Atom(0, inputColumns[i].GetFullName())
+                    .Atom(0, inputFields[i].GetFullName())
                     .Add(1, lambdaArgs[i])
                 .Seal();
             }
@@ -481,12 +481,12 @@ TExprNode::TPtr BuildKeyExtractorLambda(const TVector<TInfoUnit>& inputColumns, 
 
     // Extract keys.
     TVector<TExprNode::TPtr> lambdaResults;
-    for (ui32 i = 0; i < keys.size(); ++i) {
+    for (ui32 i = 0; i < keyFields.size(); ++i) {
         // clang-format off
         auto member = ctx.Builder(pos)
             .Callable("Member")
                 .Add(0, asStruct)
-                .Atom(1, keys[i].GetFullName())
+                .Atom(1, keyFields[i].GetFullName())
             .Seal().Build();
         // clang-format on
         lambdaResults.push_back(member);
@@ -496,70 +496,168 @@ TExprNode::TPtr BuildKeyExtractorLambda(const TVector<TInfoUnit>& inputColumns, 
     return ctx.NewLambda(pos, ctx.NewArguments(pos, std::move(lambdaArgs)), std::move(lambdaResults));
 }
 
-TExprNode::TPtr BuildInitHandlerLambda(const TVector<TInfoUnit>& inputColumns, const TVector<TInfoUnit>& keys, const TVector<TInfoUnit>& states,
-                                       TExprContext& ctx, const TPositionHandle pos) {
-    (void) states;
+TExprNode::TPtr BuildInitHandlerLambda(const TVector<TInfoUnit>& inputFields, TExprContext& ctx,
+                                       const TPositionHandle pos) {
     // clang-format off
-    return ctx.Builder(pos)
-        .Lambda()
-            .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
-                for (ui32 i = 0; i < inputColumns.size(); ++i) {
-                    parent.Param("param" + std::to_string(i));
-                }
-                return parent;
-            })
-            .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
-                for (ui32 i = 0; i < keys.size(); ++i) {
-                    parent.Arg(i, "param" + std::to_string(i));
-                }
-                return parent;
-            })
-        .Seal().Build();
-    // clang-format on
-}
+    TVector<TExprNode::TPtr> lambdaArgs;
+    // Key param.
+    lambdaArgs.push_back(ctx.NewArgument(pos, "param0"));
+    for (ui32 i = 0; i < inputFields.size(); ++i) {
+        lambdaArgs.push_back(ctx.NewArgument(pos, "param" + ToString(i + 1)));
+    }
 
-TExprNode::TPtr BuildUpdateHandlerLambda(const TVector<TInfoUnit>& inputColumns, const TVector<TInfoUnit>& keys, TExprContext& ctx,
-                                         const TPositionHandle pos) {
+    // Pack all columns to struct.
     // clang-format off
-    return ctx.Builder(pos)
-        .Lambda()
-            .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
-                for (ui32 i = 0; i < inputColumns.size(); ++i) {
-                    parent.Param("param" + std::to_string(i));
-                }
-                return parent;
-            })
-            .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
-                for (ui32 i = 0; i < keys.size(); ++i) {
-                    parent.Arg(i, "param" + std::to_string(i));
-                }
-                return parent;
-            })
-        .Seal().Build();
+    auto asStruct = ctx.Builder(pos)
+        .Callable("AsStruct")
+        .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+            for (ui32 i = 0; i < inputFields.size(); ++i) {
+                parent.List(i)
+                    .Atom(0, inputFields[i].GetFullName())
+                    .Add(1, lambdaArgs[i + 1])
+                .Seal();
+            }
+            return parent;
+        })
+    .Seal().Build();
+    // clang-format on
+
+    // Extract keys.
+    TVector<TExprNode::TPtr> lambdaResults;
+    for (ui32 i = 0; i < inputFields.size(); ++i) {
+        // clang-format off
+        auto member = ctx.Builder(pos)
+            .Callable("Member")
+                .Add(0, asStruct)
+                .Atom(1, inputFields[i].GetFullName())
+            .Seal().Build();
+        // clang-format on
+        lambdaResults.push_back(member);
+    }
+
+    // Create a wide lambda - lambda with multiple outputs.
+    return ctx.NewLambda(pos, ctx.NewArguments(pos, std::move(lambdaArgs)), std::move(lambdaResults));
     // clang-forat on
 }
 
- TExprNode::TPtr BuildFinishHandlerLambda(const TVector<TInfoUnit> &inputColumns, const TVector<TInfoUnit> &keys, TExprContext &ctx, const TPositionHandle pos) {
+TExprNode::TPtr BuildUpdateHandlerLambda(const TVector<TInfoUnit>& inputFields, const TVector<TInfoUnit>& stateFields, TExprContext& ctx,
+                                         const TPositionHandle pos) {
+    ui32 lambdaArgsCounter = 0;
+    TVector<TExprNode::TPtr> lambdaArgs;
+    lambdaArgs.push_back(ctx.NewArgument(pos, "param" + ToString(lambdaArgsCounter++)));
+
+    TVector<TExprNode::TPtr> inputArgs;
+    for (ui32 i = 0; i < inputFields.size(); ++i) {
+        inputArgs.push_back(ctx.NewArgument(pos, "param" + ToString(lambdaArgsCounter++)));
+    }
+
+    TVector<TExprNode::TPtr> stateArgs;
+    for (ui32 i = 0; i < stateFields.size(); ++i) {
+        stateArgs.push_back(ctx.NewArgument(pos, "param" + ToString(lambdaArgsCounter++)));
+    }
+
     // clang-format off
-    return ctx.Builder(pos)
-        .Lambda()
-            .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
-                for (ui32 i = 0; i < inputColumns.size(); ++i) {
-                    parent.Param("param" + std::to_string(i));
-                }
-                return parent;
-            })
-            .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
-                for (ui32 i = 0; i < keys.size(); ++i) {
-                    parent.Arg(i, "param" + std::to_string(i));
-                }
-                return parent;
-            })
-        .Seal().Build();
+    auto asStructInputColumns = ctx.Builder(pos)
+        .Callable("AsStruct")
+        .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+            for (ui32 i = 0; i < inputFields.size(); ++i) {
+                parent.List(i)
+                    .Atom(0, inputFields[i].GetFullName())
+                    .Add(1, inputArgs[i])
+                .Seal();
+            }
+            return parent;
+        })
+    .Seal().Build();
+    // clang-format on
+
+    // clang-format off
+    auto asStructStateColumns = ctx.Builder(pos)
+        .Callable("AsStruct")
+        .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+            for (ui32 i = 0; i < stateFields.size(); ++i) {
+                parent.List(i)
+                    .Atom(0, stateFields[i].GetFullName())
+                    .Add(1, stateArgs[i])
+                .Seal();
+            }
+            return parent;
+        })
+    .Seal().Build();
+    // clang-format on
+
+    TVector<TExprNode::TPtr> lambdaResults;
+    for (ui32 i = 0; i < inputFields.size(); ++i) {
+        // clang-format off
+        auto member = ctx.Builder(pos)
+            .Callable("Member")
+                .Add(0, asStructInputColumns)
+                .Atom(1, inputFields[i].GetFullName())
+            .Seal().Build();
+        // clang-format on
+        lambdaResults.push_back(member);
+    }
+
+    for (ui32 i = 0; i < stateFields.size(); ++i) {
+        // clang-format off
+        auto member = ctx.Builder(pos)
+            .Callable("Member")
+                .Add(0, asStructStateColumns)
+                .Atom(1, stateFields[i].GetFullName())
+            .Seal().Build();
+        // clang-format on
+        lambdaResults.push_back(member);
+    }
+
+    lambdaArgs.insert(lambdaArgs.end(), inputArgs.begin(), inputArgs.end());
+    lambdaArgs.insert(lambdaArgs.end(), stateArgs.begin(), stateArgs.end());
+
+    return ctx.NewLambda(pos, ctx.NewArguments(pos, std::move(lambdaArgs)), std::move(lambdaResults));
+}
+
+ TExprNode::TPtr BuildFinishHandlerLambda(const TVector<TInfoUnit> &inputFields, TExprContext &ctx, const TPositionHandle pos) {
+    TVector<TExprNode::TPtr> lambdaArgs;
+    // Key param.
+    lambdaArgs.push_back(ctx.NewArgument(pos, "param0"));
+    for (ui32 i = 0; i < inputFields.size(); ++i) {
+        lambdaArgs.push_back(ctx.NewArgument(pos, "param" + ToString(i + 1)));
+    }
+
+    // Pack all columns to struct.
+    // clang-format off
+    auto asStruct = ctx.Builder(pos)
+        .Callable("AsStruct")
+        .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+            for (ui32 i = 0; i < inputFields.size(); ++i) {
+                parent.List(i)
+                    .Atom(0, inputFields[i].GetFullName())
+                    .Add(1, lambdaArgs[i + 1])
+                .Seal();
+            }
+            return parent;
+        })
+    .Seal().Build();
+    // clang-format on
+
+    // Extract keys.
+    TVector<TExprNode::TPtr> lambdaResults;
+    for (ui32 i = 0; i < inputFields.size(); ++i) {
+        // clang-format off
+        auto member = ctx.Builder(pos)
+            .Callable("Member")
+                .Add(0, asStruct)
+                .Atom(1, inputFields[i].GetFullName())
+            .Seal().Build();
+        // clang-format on
+        lambdaResults.push_back(member);
+    }
+
+    // Create a wide lambda - lambda with multiple outputs.
+    return ctx.NewLambda(pos, ctx.NewArguments(pos, std::move(lambdaArgs)), std::move(lambdaResults));
     // clang-format on
 }
 
-TExprNode::TPtr BuildExpandMap(TExprNode::TPtr input, const TVector<TInfoUnit> &inputColumns, TExprContext &ctx, const TPositionHandle pos) {
+TExprNode::TPtr BuildExpandMap(TExprNode::TPtr input, const TVector<TInfoUnit> &inputFields, TExprContext &ctx, const TPositionHandle pos) {
     // clang-format off
     return ctx.Builder(pos) 
         .Callable("ExpandMap")
@@ -568,17 +666,17 @@ TExprNode::TPtr BuildExpandMap(TExprNode::TPtr input, const TVector<TInfoUnit> &
             .Seal()
             .Lambda(1)
                 .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
-                    for (ui32 i = 0; i < inputColumns.size(); ++i) {
+                    for (ui32 i = 0; i < inputFields.size(); ++i) {
                         parent.Param("param" + std::to_string(i));
                     }
                     return parent;
                 })
                 .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
-                    for (ui32 i = 0; i < inputColumns.size(); ++i) {
+                    for (ui32 i = 0; i < inputFields.size(); ++i) {
                         parent
                             .Callable(i, "Member")
                                 .Arg(0, "param" + std::to_string(i))
-                                .Atom(1, inputColumns[i].GetFullName())
+                                .Atom(1, inputFields[i].GetFullName())
                             .Seal();
                     }
                     return parent;
@@ -875,16 +973,16 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot &root, TExprContext &ctx, TTypeAnnotat
             auto memLimit = ctx.NewAtom(op->Pos, "");
             const TVector<TInfoUnit> keys = aggregate->KeyColumns;
             const TVector<TInfoUnit> inputColumns = aggregate->GetInput()->GetOutputIUs();
-            const TVector<TInfoUnit> states;
+            const TVector<TInfoUnit> stateColumns = keys;
                         
             auto wideCombiner = ctx.Builder(op->Pos)
                 .Callable("WideCombiner")
                     .Add(0, BuildExpandMap(stageInput, inputColumns, ctx, op->Pos))
                     .Add(1, memLimit)
                     .Add(2, BuildKeyExtractorLambda(inputColumns, keys, ctx, op->Pos))
-                    .Add(3, BuildInitHandlerLambda(inputColumns, keys, states, ctx, op->Pos))
+                    .Add(3, BuildInitHandlerLambda(inputColumns, ctx, op->Pos))
                     .Add(4, BuildUpdateHandlerLambda(keys, keys, ctx, op->Pos))
-                    .Add(5, BuildFinishHandlerLambda(keys, keys, ctx, op->Pos))
+                    .Add(5, BuildFinishHandlerLambda(keys, ctx, op->Pos))
                 .Seal().Build();
 
             YQL_CLOG(TRACE, CoreDq) << "EXPAND MAP " << KqpExprToPrettyString(TExprBase(wideCombiner), ctx);
