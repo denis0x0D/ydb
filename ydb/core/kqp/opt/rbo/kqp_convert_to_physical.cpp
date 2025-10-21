@@ -526,11 +526,13 @@ TExprNode::TPtr BuildInitHandlerLambda(const TVector<TString>& keyFields, const 
     for (ui32 i = 0; i < inputFields.size(); ++i) {
         // clang-format off
         auto member = ctx.Builder(pos)
-            .Callable("Member")
-                .Add(0, asStruct)
-                .Atom(1, inputFields[i])
+            //.Callable("Just")
+                .Callable("Member")
+                    .Add(0, asStruct)
+                    .Atom(1, inputFields[i])
+             //   .Seal()
             .Seal().Build();
-        // clang-format on
+            // clang-format on
         lambdaResults.push_back(member);
     }
 
@@ -601,7 +603,7 @@ TExprNode::TPtr BuildUpdateHandlerLambda(const TVector<TString>& keyFields, cons
                     .Add(0, asStructStateColumns)
                     .Atom(1, aggField.second)
                 .Seal()
-            .Seal().Build();
+        .Seal().Build();
         lambdaResults.push_back(aggFunc);
     }
 
