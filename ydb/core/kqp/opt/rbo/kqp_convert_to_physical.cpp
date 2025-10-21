@@ -541,7 +541,7 @@ TExprNode::TPtr BuildInitHandlerLambda(const TVector<TString>& inputFields, TExp
 }
 
 TExprNode::TPtr BuildUpdateHandlerLambda(const TVector<TString>& inputFields, const TVector<TString>& stateFields, const TVector<TString> &keyFields,
-                                         const TVector<std::pair<TString, TString>> &aggPairs, TExprContext& ctx, const TPositionHandle pos) {
+                                         const TVector<std::pair<TString, TString>> &aggFields, TExprContext& ctx, const TPositionHandle pos) {
     ui32 lambdaArgsCounter = 0;
     TVector<TExprNode::TPtr> lambdaArgs;
     lambdaArgs.push_back(ctx.NewArgument(pos, "param" + ToString(lambdaArgsCounter++)));
@@ -587,16 +587,16 @@ TExprNode::TPtr BuildUpdateHandlerLambda(const TVector<TString>& inputFields, co
     // clang-format on
 
     TVector<TExprNode::TPtr> lambdaResults;
-    for (const auto &aggPair : aggPairs) {
+    for (const auto &aggField : aggFields) {
         auto aggFunc = ctx.Builder(pos)
             .Callable("AggrAdd")
                 .Callable(0, "Member")
                     .Add(0, asStructInputColumns)
-                    .Atom(1, aggPair.first)
+                    .Atom(1, aggField.first)
                 .Seal()
                 .Callable(1, "Member")
                     .Add(0, asStructStateColumns)
-                    .Atom(1, aggPair.second)
+                    .Atom(1, aggField.second)
                 .Seal()
             .Seal().Build();
         lambdaResults.push_back(aggFunc);
@@ -661,25 +661,55 @@ TExprNode::TPtr BuildFinishHandlerLambda(const TVector<TString> &stateFields, TE
     // clang-format on
 }
 
-TExprNode::TPtr BuildExpandMap(TExprNode::TPtr input, const TVector<TString> &inputFields, TExprContext &ctx, const TPositionHandle pos) {
+TExprNode::TPtr BuildExpandMap(TExprNode::TPtr input, const TVector<TString>& inputColumns, TExprContext& ctx, const TPositionHandle pos) {
     // clang-format off
     return ctx.Builder(pos) 
         .Callable("ExpandMap")
-            .Callable(0, "FromFlow")
+            .Callable(0, "ToFlow")
                 .Add(0, input)
             .Seal()
             .Lambda(1)
                 .Param("narrow_input_param")
                 .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
-                    for (ui32 i = 0; i < inputFields.size(); ++i) {
+                    for (ui32 i = 0; i < inputColumns.size(); ++i) {
                         parent
                             .Callable(i, "Member")
                                 .Arg(0, "narrow_input_param")
-                                .Atom(1, inputFields[i])
+                                .Atom(1, inputColumns[i])
                             .Seal();
                     }
                     return parent;
                 })
+            .Seal()
+        .Seal().Build();
+    // clang-format on
+}
+
+TExprNode::TPtr BuildNarrowMap(TExprNode::TPtr input, const TVector<TString>& stateFields, const THashMap<TString, TString>& aggRenames,
+                               TExprContext& ctx, const TPositionHandle pos) {
+    // clang-format off
+    return ctx.Builder(pos) 
+        .Callable("NarrowMap")
+            .Add(0, input)
+            .Lambda(1)
+                .Params("wide_param", stateFields.size())
+                .Callable("AsStruct")
+                .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                    for (ui32 i = 0; i < stateFields.size(); ++i) {
+                        // Apply rename.
+                        auto fieldName = stateFields[i];
+                        auto it = aggRenames.find(fieldName);
+                        if (it != aggRenames.end()) {
+                            fieldName = it->second;
+                        }
+                        parent.List(i)
+                            .Atom(0, fieldName)
+                            .Arg(1, "wide_param", i)
+                        .Seal();
+                    }
+                    return parent;
+                })
+                .Seal()
             .Seal()
         .Seal().Build();
     // clang-format on
@@ -696,29 +726,31 @@ TVector<TString> GetInputColumns(const TVector<TOpAggregationTraits>& aggregatio
     return inputFields;
 }
 
-TVector<TString> GetAggFields(const TVector<TString>& inputColumns, const TVector<TOpAggregationTraits>& aggregationTraitsList,
-                              TVector<TString>& aggFields, bool isResult = false) {
-    TVector<TString> aggStates;
-    THashMap<TString, TString> aggColumns;
+void GetAggregationFields(const TVector<TString>& inputColumns, const TVector<TOpAggregationTraits>& aggregationTraitsList,
+                          TVector<TString>& inputFields, TVector<TString>& stateFields, TVector<std::pair<TString, TString>>& aggFields,
+                          THashMap<TString, TString>& aggRenames) {
+    THashMap<TString, std::pair<TString, TString>> aggColumns;
     for (const auto& aggregationTraits : aggregationTraitsList) {
-        aggColumns[aggregationTraits.OriginalColName.GetFullName()] = aggregationTraits.AggFunction;
+        aggColumns[aggregationTraits.OriginalColName.GetFullName()] =
+            std::make_pair(aggregationTraits.AggFunction, aggregationTraits.ResultColName.GetFullName());
     }
 
     for (ui32 i = 0; i < inputColumns.size(); ++i) {
         const auto fullName = inputColumns[i];
-        TString aggName = "__kqp_agg_" + ToString(i);
-        if (aggColumns.contains(fullName)) {
-            if (isResult) {
-                aggName += "_" + aggColumns[fullName];
-            }
-            aggStates.push_back(aggName);
-            aggFields.push_back(aggName);
+        if (auto it = aggColumns.find(fullName); it != aggColumns.end()) {
+            const auto aggName = "__kqp_agg_" + ToString(i);
+            const auto stateName = aggName + "_" + it->second.first;
+
+            inputFields.push_back(aggName);
+            stateFields.push_back(stateName);
+            aggFields.push_back({aggName, stateName});
+            // Map agg state name to result name.
+            aggRenames[stateName] = it->second.second;
         } else {
-            aggStates.push_back(fullName);
+            inputFields.push_back(fullName);
+            stateFields.push_back(fullName);
         }
     }
-
-    return aggStates;
 }
 
 TVector<TString> GetKeyFields(const TVector<TInfoUnit>& keyColumns) {
@@ -1010,7 +1042,8 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot &root, TExprContext &ctx, TTypeAnnotat
         } else if (op->Kind == EOperator::Aggregate) {
             auto aggregate = CastOperator<TOpAggregate>(op);
 
-            auto [stageArg, stageInput] = graph.GenerateStageInput(stageInputCounter, root.Node, ctx, *aggregate->GetInput()->Props.StageId);
+            auto [stageArg, stageInput] =
+                graph.GenerateStageInput(stageInputCounter, root.Node, ctx, *aggregate->GetInput()->Props.StageId);
             stageArgs[opStageId].push_back(stageArg);
 
             // TODO: Add limit.
@@ -1018,35 +1051,39 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot &root, TExprContext &ctx, TTypeAnnotat
             const auto& aggregationTraitsList = aggregate->AggregationTraitsList;
             const auto& keyColumns = aggregate->KeyColumns;
 
-            TVector<TString> aggInputFields;
-            TVector<TString> aggStateFields;
             const TVector<TString> inputColumns = GetInputColumns(aggregationTraitsList, keyColumns);
-            const TVector<TString> inputFields = GetAggFields(inputColumns, aggregationTraitsList, aggInputFields);
-            const TVector<TString> stateFields = GetAggFields(inputColumns, aggregationTraitsList, aggStateFields, true);
             const TVector<TString> keyFields = GetKeyFields(aggregate->KeyColumns);
 
-            // Put it all together.
-            TVector<std::pair<TString, TString>> aggPairs;
-            for (ui32 i = 0; i < aggInputFields.size(); ++i) {
-                aggPairs.push_back({aggInputFields[i], aggStateFields[i]});
-            }
+            TVector<TString> inputFields;
+            TVector<TString> stateFields;
+            TVector<std::pair<TString, TString>> aggFields;
+            THashMap<TString, TString> aggRenames;
+            GetAggregationFields(inputColumns, aggregationTraitsList, inputFields, stateFields, aggFields, aggRenames);
 
+            // clang-format off
             auto wideCombiner = ctx.Builder(op->Pos)
                 .Callable("WideCombiner")
-                    .Add(0, BuildExpandMap(stageInput, inputFields, ctx, op->Pos))
+                    .Add(0, BuildExpandMap(stageInput, inputColumns, ctx, op->Pos))
                     .Add(1, memLimit)
                     .Add(2, BuildKeyExtractorLambda(inputFields, keyFields, ctx, op->Pos))
                     .Add(3, BuildInitHandlerLambda(inputFields, ctx, op->Pos))
-                    .Add(4, BuildUpdateHandlerLambda(inputFields, stateFields, keyFields, aggPairs, ctx, op->Pos))
+                    .Add(4, BuildUpdateHandlerLambda(inputFields, stateFields, keyFields, aggFields, ctx, op->Pos))
                     .Add(5, BuildFinishHandlerLambda(stateFields, ctx, op->Pos))
                 .Seal().Build();
+            // clang-format on
 
-            YQL_CLOG(TRACE, CoreDq) << "WIDECOMBINER " << KqpExprToPrettyString(TExprBase(wideCombiner), ctx);
-            Y_ENSURE(false, "Could not generate physical plan for Aggregate");
+            // TODO: We could eliminate narrow map with wide channels enabled in dq stage settings.
+            auto narrowMap = BuildNarrowMap(wideCombiner, stateFields, aggRenames, ctx, op->Pos);
+            currentStageBody = narrowMap;
 
-            } else {
-                Y_ENSURE(false, "Could not generate physical plan");
-            }
+            stages[opStageId] = currentStageBody;
+            stagePos[opStageId] = op->Pos;
+
+           // YQL_CLOG(TRACE, CoreDq) << "WIDECOMBINER " << KqpExprToPrettyString(TExprBase(narrowMap), ctx);
+           // Y_ENSURE(false, "Could not generate physical plan for Aggregate");
+        } else {
+            Y_ENSURE(false, "Could not generate physical plan");
+        }
     }
 
     // We need to build up stages in a topological sort order
