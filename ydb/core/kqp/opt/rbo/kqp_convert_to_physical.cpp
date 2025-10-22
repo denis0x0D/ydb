@@ -720,7 +720,7 @@ TExprNode::TPtr BuildNarrowMap(TExprNode::TPtr input, const TVector<TString>& ke
             .Add(0, input)
             .Lambda(1)
                 .Params("wide_param", outputFields.size())
-                .Callable("AsStruct")
+                .Callable(0, "AsStruct")
                 .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
                     for (ui32 i = 0; i < outputFields.size(); ++i) {
                         // Apply rename.
@@ -731,7 +731,9 @@ TExprNode::TPtr BuildNarrowMap(TExprNode::TPtr input, const TVector<TString>& ke
                         }
                         parent.List(i)
                             .Atom(0, fieldName)
-                            .Arg(1, "wide_param", i)
+                            .Callable(1, "ToPg")
+                                .Arg(0, "wide_param", i)
+                            .Seal()
                         .Seal();
                     }
                     return parent;
@@ -765,7 +767,7 @@ void GetAggregationFields(const TVector<TString>& inputColumns, const TVector<TO
     for (ui32 i = 0; i < inputColumns.size(); ++i) {
         const auto fullName = inputColumns[i];
         if (auto it = aggColumns.find(fullName); it != aggColumns.end()) {
-            const auto aggName = "__kqp_agg_" + ToString(i);
+            const auto aggName = "_kqp_agg_" + ToString(i);
             const auto stateName = aggName + "_" + it->second.first;
 
             inputFields.push_back(aggName);
@@ -1095,7 +1097,10 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot &root, TExprContext &ctx, TTypeAnnotat
 
             // TODO: We could eliminate narrow map with wide channels enabled in dq stage settings.
             auto narrowMap = BuildNarrowMap(wideCombiner, keyFields, aggFields, aggRenames, ctx, op->Pos);
-            currentStageBody = narrowMap;
+            currentStageBody = ctx.Builder(op->Pos)
+                .Callable("FromFlow")
+                    .Add(0, narrowMap)
+                .Seal().Build();
 
             stages[opStageId] = currentStageBody;
             stagePos[opStageId] = op->Pos;
