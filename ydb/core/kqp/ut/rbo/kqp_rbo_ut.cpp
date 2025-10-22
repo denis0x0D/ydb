@@ -365,9 +365,7 @@ Y_UNIT_TEST_SUITE(KqpRbo) {
         session.ExecuteSchemeQuery(R"(
             CREATE TABLE `/Root/t1` (
                 a Int64 NOT NULL,
-	            b Int64,
-                c Int64,
-                d Int64,
+	            b Int64 not null,
                 primary key(a)
             );
 
@@ -395,6 +393,21 @@ Y_UNIT_TEST_SUITE(KqpRbo) {
 
         db = kikimr.GetTableClient();
         auto session2 = db.CreateSession().GetValueSync().GetSession();
+
+        NYdb::TValueBuilder rowsTable;
+        rowsTable.BeginList();
+        for (size_t i = 0; i < 4; ++i) {
+            rowsTable.AddListItem()
+                .BeginStruct()
+                .AddMember("a").Int64(i)
+                .AddMember("b").Int64(1)
+                .EndStruct();
+        }
+        rowsTable.EndList();
+
+        auto resultUpsert = db.BulkUpsert("/Root/t1", rowsTable.Build()).GetValueSync();
+        UNIT_ASSERT_C(resultUpsert.IsSuccess(), resultUpsert.GetIssues().ToString());
+
         /*
         std::vector<std::pair<std::string, int>> tables{{"/Root/t1", 4}, {"/Root/t2", 3}, {"/Root/t3", 2}, {"/Root/t4", 1}};
         for (const auto &[table, rowsNum] : tables) {
@@ -406,13 +419,13 @@ Y_UNIT_TEST_SUITE(KqpRbo) {
             R"(
                 --!syntax_pg
                 SET TablePathPrefix = "/Root/";
-                select sum(t1.b) as BB from t1 group by t1.a;
+                select sum(t1.a) as BB from t1 group by t1.b;
             )",
             /*
             R"(
                 pragma TablePathPrefix = "/Root/";
                 PRAGMA ydb.UseDqHashCombine = "false";
-                SELECT sum(t1.c) CCC FROM t1 group by t1.b, t1.c;
+                SELECT sum(t1.b) CCC FROM t1 group by t1.a;
             )",
             */
         };

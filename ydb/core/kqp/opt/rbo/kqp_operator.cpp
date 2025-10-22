@@ -669,8 +669,8 @@ TString TOpLimit::ToString(TExprContext& ctx) {
 }
 
 TOpAggregate::TOpAggregate(std::shared_ptr<IOperator> input, TVector<TOpAggregationTraits>& aggTraitsList, TVector<TInfoUnit>& keyColumns,
-                           EAggregationStage aggStage, TPositionHandle pos)
-    : IUnaryOperator(EOperator::Aggregate, pos, input), AggregationTraitsList(aggTraitsList), KeyColumns(keyColumns), AggStage(aggStage) {}
+                           EAggregationPhase aggPhase, TPositionHandle pos)
+    : IUnaryOperator(EOperator::Aggregate, pos, input), AggregationTraitsList(aggTraitsList), KeyColumns(keyColumns), AggregationPhase(aggPhase) {}
 
 TVector<TInfoUnit> TOpAggregate::GetOutputIUs() {
     // FIXME: This is not right.
@@ -697,7 +697,7 @@ TString TOpAggregate::ToString(TExprContext& ctx) {
         }
     }
     strBuilder << "] : ";
-    if (AggStage == EAggregationStage::Initial) {
+    if (AggregationPhase == EAggregationPhase::Intermediate) {
         strBuilder << "Initial";
     } else {
         strBuilder << "Final";
