@@ -731,9 +731,7 @@ TExprNode::TPtr BuildNarrowMap(TExprNode::TPtr input, const TVector<TString>& ke
                         }
                         parent.List(i)
                             .Atom(0, fieldName)
-                            .Callable(1, "ToPg")
-                                .Arg(0, "wide_param", i)
-                            .Seal()
+                            .Arg(1, "wide_param", i)
                         .Seal();
                     }
                     return parent;
