@@ -475,8 +475,9 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr &node, TExprContext &ctx, 
             bool convertToPg;
             Y_ENSURE(ExtractPgType(actualTypeNode, actualPgTypeId, convertToPg, node->Pos(), ctx));
 
-            auto needPgCast = (expectedType->GetId() != actualPgTypeId);
+            bool needPgCast = (expectedType->GetId() != actualPgTypeId);
             auto lambda = TCoLambda(ctx.DeepCopyLambda(*(resultItem->Child(2))));
+            needPgCast = true;
 
             auto pgAgg = GetPgAgg(lambda.Body().Ptr());
             if (pgAgg) {
