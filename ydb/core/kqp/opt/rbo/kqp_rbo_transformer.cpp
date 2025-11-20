@@ -140,7 +140,7 @@ TExprNode::TPtr BuildJoinKeys(const TVector<TInfoUnit> &joinKeys, const TJoinTab
 }
 
 TExprNode::TPtr BuildAggregationTraits(const TString& originalColName, const TString& resultColName, const TString& aggFunction,
-                                       const TTypeAnnotationNode* resultType, TExprContext &ctx, TPositionHandle pos) {
+                                       TExprContext &ctx, TPositionHandle pos) {
     // clang-format off
     return Build<TKqpOpAggregationTraits>(ctx, pos)
         .OriginalColName<TCoAtom>()
@@ -152,7 +152,6 @@ TExprNode::TPtr BuildAggregationTraits(const TString& originalColName, const TSt
         .ResultColName<TCoAtom>()
             .Value(resultColName)
         .Build()
-        .AggregationFunctionResultType(ExpandType(pos, *resultType, ctx))
     .Done().Ptr();
     // clang-format on
 }
@@ -667,7 +666,7 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr &node, TExprContext &ctx, 
                     // Distinct for column or expression f(distinct a) => (distinct a) as b -> f(b).
                     if (!!GetSetting(*aggregation->Child(1), "distinct")) {
                         const auto colName = aggColName.GetFullName();
-                        auto distinctAggTraits = BuildAggregationTraits(colName, colName, "distinct", aggFuncResultType, ctx, node->Pos());
+                        auto distinctAggTraits = BuildAggregationTraits(colName, colName, "distinct", ctx, node->Pos());
                         distinctAggregationTraitsPreAggregate.AggTraitsList.push_back(distinctAggTraits);
                         distinctAggregationTraitsPreAggregate.KeyColumns.push_back(aggColName);
                         distinctPreAggregate = true;
@@ -676,7 +675,7 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr &node, TExprContext &ctx, 
                     const TString aggFuncName = TString(aggregation->ChildPtr(0)->Content());
                     // Build an aggregation traits.
                     auto aggregationTraits =
-                        BuildAggregationTraits(aggColName.GetFullName(), aggColName.GetFullName(), aggFuncName, aggFuncResultType, ctx, node->Pos());
+                        BuildAggregationTraits(aggColName.GetFullName(), aggColName.GetFullName(), aggFuncName, ctx, node->Pos());
                     aggTraits.AggTraitsList.push_back(aggregationTraits);
                 }
 
@@ -717,7 +716,7 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr &node, TExprContext &ctx, 
                 // Case for distinct after aggregation.
                 if (distinctAll) {
                     auto distinctAggTraits =
-                        BuildAggregationTraits(resultColName, resultColName, "distinct", aggFuncResultType, ctx, node->Pos());
+                        BuildAggregationTraits(resultColName, resultColName, "distinct", ctx, node->Pos());
                     distinctAggregationTraitsPostAggregate.AggTraitsList.push_back(distinctAggTraits);
                     distinctAggregationTraitsPostAggregate.KeyColumns.push_back(TInfoUnit(resultColName));
                 }
@@ -735,7 +734,7 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr &node, TExprContext &ctx, 
                 }
 
                 auto distinctAggTraits =
-                    BuildAggregationTraits(colName.GetFullName(), colName.GetFullName(), "distinct", aggFuncResultType, ctx, node->Pos());
+                    BuildAggregationTraits(colName.GetFullName(), colName.GetFullName(), "distinct", ctx, node->Pos());
                 distinctAggregationTraitsPostAggregate.AggTraitsList.push_back(distinctAggTraits);
                 distinctAggregationTraitsPostAggregate.KeyColumns.push_back(colName);
             }
@@ -747,7 +746,7 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr &node, TExprContext &ctx, 
                 const auto colName = key.GetFullName();
                 const auto* aggFuncResultType = finalType->FindItemType(key.ColumnName);
                 Y_ENSURE(aggFuncResultType, "Cannot find type for aggregation result");
-                auto distinctAggTraits = BuildAggregationTraits(colName, colName, "distinct", aggFuncResultType, ctx, node->Pos());
+                auto distinctAggTraits = BuildAggregationTraits(colName, colName, "distinct", ctx, node->Pos());
                 distinctAggregationTraitsPreAggregate.AggTraitsList.push_back(distinctAggTraits);
                 distinctAggregationTraitsPreAggregate.KeyColumns.push_back(colName);
             }
@@ -760,7 +759,7 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr &node, TExprContext &ctx, 
                 const auto* aggFuncResultType = finalType->FindItemType(key.ColumnName);
                 // agg key in result set.
                 if (aggFuncResultType) {
-                    auto distinctAggTraits = BuildAggregationTraits(colName, colName, "distinct", aggFuncResultType, ctx, node->Pos());
+                    auto distinctAggTraits = BuildAggregationTraits(colName, colName, "distinct", ctx, node->Pos());
                     distinctAggregationTraitsPostAggregate.AggTraitsList.push_back(distinctAggTraits);
                     distinctAggregationTraitsPostAggregate.KeyColumns.push_back(colName);
                 }
