@@ -742,10 +742,10 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr &node, TExprContext &ctx, 
 
         // Distinct pre aggregate fro group by keys.
         if (distinctPreAggregate) {
+            Y_ENSURE(distinctAggregationTraitsPreAggregate.AggTraitsList.size() == 1 && aggTraits.AggTraitsList.size() == 1,
+                     "Multiple distinct is not supported");
             for (const auto& key : aggTraits.KeyColumns) {
                 const auto colName = key.GetFullName();
-                const auto* aggFuncResultType = finalType->FindItemType(key.ColumnName);
-                Y_ENSURE(aggFuncResultType, "Cannot find type for aggregation result");
                 auto distinctAggTraits = BuildAggregationTraits(colName, colName, "distinct", ctx, node->Pos());
                 distinctAggregationTraitsPreAggregate.AggTraitsList.push_back(distinctAggTraits);
                 distinctAggregationTraitsPreAggregate.KeyColumns.push_back(colName);
@@ -756,13 +756,9 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr &node, TExprContext &ctx, 
         if (distinctAll) {
             for (const auto& key : aggTraits.KeyColumns) {
                 const auto colName = key.GetFullName();
-                const auto* aggFuncResultType = finalType->FindItemType(key.ColumnName);
-                // agg key in result set.
-                if (aggFuncResultType) {
-                    auto distinctAggTraits = BuildAggregationTraits(colName, colName, "distinct", ctx, node->Pos());
-                    distinctAggregationTraitsPostAggregate.AggTraitsList.push_back(distinctAggTraits);
-                    distinctAggregationTraitsPostAggregate.KeyColumns.push_back(colName);
-                }
+                auto distinctAggTraits = BuildAggregationTraits(colName, colName, "distinct", ctx, node->Pos());
+                distinctAggregationTraitsPostAggregate.AggTraitsList.push_back(distinctAggTraits);
+                distinctAggregationTraitsPostAggregate.KeyColumns.push_back(colName);
             }
         }
 
