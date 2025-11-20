@@ -20,6 +20,21 @@ struct TAggregationTraits {
     TVector<TInfoUnit> KeyColumns;
 };
 
+TString GetColumnNameFromPgGroupRef(TExprNode::TPtr pgGroupRef, const TVector<std::pair<TInfoUnit, TExprNode::TPtr>>& groupByKeysExpressionsMap) {
+    TString colName;
+    if (pgGroupRef->ChildrenSize() == 4) {
+        colName = TString(pgGroupRef->ChildPtr(3)->Content());
+    } else if (pgGroupRef->ChildrenSize() == 3) {
+        // In this case we can get a column name from group expr map
+        const auto groupByKeyExprId = FromString<uint32_t>(TString(pgGroupRef->ChildPtr(2)->Content()));
+        Y_ENSURE(groupByKeysExpressionsMap.size() > groupByKeyExprId);
+        colName = groupByKeysExpressionsMap[groupByKeyExprId].first.GetFullName();
+    } else {
+        Y_ENSURE(false, "Invalid children size for `pgGroupRef`");
+    }
+    return colName;
+}
+
 THashSet<TString> SupportedAggregationFunctions{"sum", "min", "max", "count"};
 ui64 KqpUniqueAggColumnId{0};
 
@@ -711,11 +726,7 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr &node, TExprContext &ctx, 
                 auto pgGroupRef = GetPgCallable(lambda.Body().Ptr(), "PgGroupRef");
                 TInfoUnit colName;
                 if (pgGroupRef) {
-                    if (pgGroupRef->ChildrenSize() == 4) {
-                        colName = TInfoUnit(TString(pgGroupRef->ChildPtr(3)->Content()));
-                    } else {
-                        Y_ENSURE(false, "Invalid column size for PgGroupRef");
-                    }
+                    colName = TInfoUnit(GetColumnNameFromPgGroupRef(pgGroupRef, groupByKeysExpressionsMap));
                 } else {
                     auto body = lambda.Body().Ptr();
                     Y_ENSURE(body->IsCallable("Member"), "Distinct on expression is not supported");
@@ -809,16 +820,7 @@ TExprNode::TPtr RewritePgSelect(const TExprNode::TPtr &node, TExprContext &ctx, 
             auto aggColName = columnName;
             if (pgAgg || pgGroupRef) {
                 if (pgGroupRef) {
-                    if (pgGroupRef->ChildrenSize() == 4) {
-                        aggColName = TString(pgGroupRef->ChildPtr(3)->Content());
-                    } else if (pgGroupRef->ChildrenSize() == 3) {
-                        // In this case we can get a column name from group expr map
-                        const auto groupByKeyExprId = FromString<uint32_t>(TString(pgGroupRef->ChildPtr(2)->Content()));
-                        Y_ENSURE(groupByKeysExpressionsMap.size() > groupByKeyExprId);
-                        aggColName = groupByKeysExpressionsMap[groupByKeyExprId].first.GetFullName();
-                    } else {
-                        Y_ENSURE(false, "Invalid children size for `pgGroupRef`");
-                    }
+                    aggColName = GetColumnNameFromPgGroupRef(pgGroupRef, groupByKeysExpressionsMap);
                 }
 
                 // clang-format off
