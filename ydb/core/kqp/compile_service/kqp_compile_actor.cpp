@@ -563,7 +563,7 @@ private:
         }
 
         if (IsSuitableToFallbackToYqlOptimizer(status)) {
-            //Counters->ReportCompileEnforceConfigFailed(DbCounters);
+            Counters->ReportCompileNewRBOFailed(DbCounters);
 
             LOG_ERROR_S(ctx, NKikimrServices::KQP_COMPILE_ACTOR, "Compilation with NewRBO failed, retrying compilation with Yql"
                 << ", self: " << ctx.SelfID
@@ -573,15 +573,16 @@ private:
             // Explicitly drop ptr to result, it holds `ExprNode` allocated from `TExprContext` in KqpHost.
             AsyncCompileResult.Drop();
             EnableNewRBO = false;
-            EnableFallbackToYqlOptimizer = false;
             Config = BuildConfiguration(TableServiceConfig);
             auto prepareSettings = PrepareCompilationSettings(ctx);
 
             StartCompilationWithSettings(prepareSettings);
             Continue(ctx);
             return;
-        } else if (IsSuitableToReportSuccessOnNewRBOWithFallback(status)) {
-            //Counters->ReportCompileEnforceConfigSuccess(DbCounters);
+        } else if (IsSuitableToReportSuccessOnNewRBO(status)) {
+            Counters->ReportCompileNewRBOSuccess(DbCounters);
+        } else if (IsSuitableToReportFailOnNewRBO(status)) {
+            Counters->ReportCompileNewRBOFailed(DbCounters);
         }
 
         // If compilation failed and we tried SqlVersion = 1, retry with SqlVersion = 0
@@ -674,8 +675,12 @@ private:
         return EnableNewRBO && EnableFallbackToYqlOptimizer && status != Ydb::StatusIds::SUCCESS;
     }
 
-    bool IsSuitableToReportSuccessOnNewRBOWithFallback(Ydb::StatusIds::StatusCode status) {
-        return EnableNewRBO && EnableFallbackToYqlOptimizer && status == Ydb::StatusIds::SUCCESS;
+    bool IsSuitableToReportSuccessOnNewRBO(Ydb::StatusIds::StatusCode status) {
+        return EnableNewRBO && status == Ydb::StatusIds::SUCCESS;
+    }
+
+    bool IsSuitableToReportFailOnNewRBO(Ydb::StatusIds::StatusCode status) {
+        return EnableNewRBO && status != Ydb::StatusIds::SUCCESS;
     }
 
     bool IsSuitableToFallbackToSqlV0(Ydb::StatusIds::StatusCode status) {

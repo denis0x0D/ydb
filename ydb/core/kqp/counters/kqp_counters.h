@@ -103,6 +103,8 @@ protected:
     void ReportCompileDurations(TDuration duration, TDuration cpuTime);
     void ReportCompileEnforceConfigSuccess();
     void ReportCompileEnforceConfigFailed();
+    void ReportCompileNewRBOSuccess();
+    void ReportCompileNewRBOFailed();
     void ReportRecompileRequestGet();
     ::NMonitoring::TDynamicCounterPtr GetQueryReplayCounters() const;
 
@@ -208,8 +210,10 @@ protected:
     ::NMonitoring::TDynamicCounters::TCounterPtr CompileTotal;
     ::NMonitoring::TDynamicCounters::TCounterPtr CompileErrors;
     ::NMonitoring::TDynamicCounters::TCounterPtr CompileActive;
-    ::NMonitoring::TDynamicCounters::TCounterPtr CompileEnforceConfigSuccess;
     ::NMonitoring::TDynamicCounters::TCounterPtr CompileEnforceConfigFailed;
+    ::NMonitoring::TDynamicCounters::TCounterPtr CompileEnforceConfigSuccess;
+    ::NMonitoring::TDynamicCounters::TCounterPtr CompileNewRBOFailed;
+    ::NMonitoring::TDynamicCounters::TCounterPtr CompileNewRBOSuccess;
     NMonitoring::THistogramPtr CompileCpuTime;
     NMonitoring::THistogramPtr YdbCompileDuration;
 };
@@ -337,6 +341,8 @@ public:
     void ReportCompileDurations(TKqpDbCountersPtr dbCounters, TDuration duration, TDuration cpuTime);
     void ReportCompileEnforceConfigSuccess(TKqpDbCountersPtr dbCounters);
     void ReportCompileEnforceConfigFailed(TKqpDbCountersPtr dbCounters);
+    void ReportCompileNewRBOSuccess(TKqpDbCountersPtr dbCounters);
+    void ReportCompileNewRBOFailed(TKqpDbCountersPtr dbCounters);
     void ReportRecompileRequestGet(TKqpDbCountersPtr dbCounters);
     void ReportCompileQueueWaitTime(const TDuration& duration);
 
