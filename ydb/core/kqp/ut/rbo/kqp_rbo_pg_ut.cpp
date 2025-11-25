@@ -61,6 +61,8 @@ double TimeQuery(NKikimr::NKqp::TKikimrRunner& kikimr, TString query, int nItera
 double TimeQuery(TString schema, TString query, int nIterations) {
     NKikimrConfig::TAppConfig appConfig;
     appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+    appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
+
     TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
     auto db = kikimr.GetTableClient();
     auto session = db.CreateSession().GetValueSync().GetSession();
@@ -84,6 +86,8 @@ Y_UNIT_TEST_SUITE(KqpRboPg) {
     Y_UNIT_TEST(Select) {
         NKikimrConfig::TAppConfig appConfig;
         appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+        appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
+
         TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
@@ -99,6 +103,8 @@ Y_UNIT_TEST_SUITE(KqpRboPg) {
     Y_UNIT_TEST(Filter) {
         NKikimrConfig::TAppConfig appConfig;
         appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+        appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
+
         TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
@@ -157,6 +163,8 @@ Y_UNIT_TEST_SUITE(KqpRboPg) {
     Y_UNIT_TEST(ConstantFolding) {
         NKikimrConfig::TAppConfig appConfig;
         appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+        appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
+
         TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
@@ -209,6 +217,8 @@ Y_UNIT_TEST_SUITE(KqpRboPg) {
     Y_UNIT_TEST(ScalarSubquery) {
         NKikimrConfig::TAppConfig appConfig;
         appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+        appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
+
         TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
@@ -282,6 +292,8 @@ Y_UNIT_TEST_SUITE(KqpRboPg) {
     Y_UNIT_TEST(CrossInnerJoin) {
         NKikimrConfig::TAppConfig appConfig;
         appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+        appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
+
         TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
@@ -379,6 +391,8 @@ Y_UNIT_TEST_SUITE(KqpRboPg) {
     Y_UNIT_TEST(PredicatePushdownLeftJoin) {
         NKikimrConfig::TAppConfig appConfig;
         appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+        appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
+
         TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
@@ -480,9 +494,60 @@ Y_UNIT_TEST_SUITE(KqpRboPg) {
         UNIT_ASSERT_C(resultUpsert.IsSuccess(), resultUpsert.GetIssues().ToString());
     }
 
+    Y_UNIT_TEST(FallbackToYql) {
+        NKikimrConfig::TAppConfig appConfig;
+        appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+        appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(true);
+
+        TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        session.ExecuteSchemeQuery(R"(
+            CREATE TABLE `/Root/t1` (
+                a Int64 NOT NULL,
+	            b Int64,
+                c Int64,
+                primary key(a)
+            );
+
+            CREATE TABLE `/Root/t2` (
+                a Int64	NOT NULL,
+	            b Int64,
+                c Int64,
+                primary key(a)
+            );
+        )").GetValueSync();
+
+        db = kikimr.GetTableClient();
+        auto session2 = db.CreateSession().GetValueSync().GetSession();
+        std::vector<std::string> queries = {
+            // Multiple distinct is not supported
+            R"(
+                 --!syntax_pg
+                SET TablePathPrefix = "/Root/";
+                select sum(distinct t1.c), sum(distinct t1.a) from t1 group by t1.b order by t1.b;
+            )",
+            // Insert is not supported
+            R"(
+                INSERT INTO `/Root/t1` (a, b, c) VALUES (1, 2, 3);
+            )",
+        };
+
+        for (ui32 i = 0; i < queries.size(); ++i) {
+            const auto &query = queries[i];
+            auto result = session2.ExecuteDataQuery(query, TTxControl::BeginTx().CommitTx()).GetValueSync();
+            UNIT_ASSERT_C(result.IsSuccess(), result.GetIssues().ToString());
+            //Cout << "OUTPUT_RESULT " << FormatResultSetYson(result.GetResultSet(0)) << Endl;
+            //UNIT_ASSERT_VALUES_EQUAL(FormatResultSetYson(result.GetResultSet(0)), results[i]);
+        }
+    }
+
     Y_UNIT_TEST(Aggregation) {
         NKikimrConfig::TAppConfig appConfig;
         appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+        appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
+
         TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
@@ -720,6 +785,8 @@ Y_UNIT_TEST_SUITE(KqpRboPg) {
     Y_UNIT_TEST(UnionAll) {
         NKikimrConfig::TAppConfig appConfig;
         appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+        appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
+
         TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
@@ -817,6 +884,8 @@ Y_UNIT_TEST_SUITE(KqpRboPg) {
     Y_UNIT_TEST(OrderBy) {
         NKikimrConfig::TAppConfig appConfig;
         appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+        appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
+
         TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
@@ -885,6 +954,8 @@ Y_UNIT_TEST_SUITE(KqpRboPg) {
     Y_UNIT_TEST(LeftJoinToKqpOpJoin) {
         NKikimrConfig::TAppConfig appConfig;
         appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+        appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
+
         TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
@@ -978,6 +1049,8 @@ Y_UNIT_TEST_SUITE(KqpRboPg) {
     void AliasesRenamesTest(bool newRbo) {
         NKikimrConfig::TAppConfig appConfig;
         appConfig.MutableTableServiceConfig()->SetEnableNewRBO(newRbo);
+        appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
+
         TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
@@ -1043,6 +1116,8 @@ Y_UNIT_TEST_SUITE(KqpRboPg) {
     Y_UNIT_TEST(Bench_Select) {
         NKikimrConfig::TAppConfig appConfig;
         appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+        appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
+
         TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
 
         auto time = TimeQuery(kikimr, R"(
@@ -1058,6 +1133,8 @@ Y_UNIT_TEST_SUITE(KqpRboPg) {
     Y_UNIT_TEST(Bench_Filter) {
         NKikimrConfig::TAppConfig appConfig;
         appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+        appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
+
         TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
@@ -1082,6 +1159,8 @@ Y_UNIT_TEST_SUITE(KqpRboPg) {
     Y_UNIT_TEST(Bench_CrossFilter) {
         NKikimrConfig::TAppConfig appConfig;
         appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+        appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
+
         TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
@@ -1112,6 +1191,8 @@ Y_UNIT_TEST_SUITE(KqpRboPg) {
     Y_UNIT_TEST(Bench_JoinFilter) {
         NKikimrConfig::TAppConfig appConfig;
         appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+        appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
+
         TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
@@ -1142,93 +1223,84 @@ Y_UNIT_TEST_SUITE(KqpRboPg) {
     Y_UNIT_TEST(Bench_10Joins) {
         NKikimrConfig::TAppConfig appConfig;
         appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+        appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
+
         TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
 
         auto schema = R"(
-CREATE TABLE `/Root/foo_0` (
-    id Int64 NOT NULL,
-    join_id Int64,
-    primary key(id)
-    );
-    
+            CREATE TABLE `/Root/foo_0` (
+                id Int64 NOT NULL,
+                join_id Int64,
+                primary key(id)
+            );
 
-    CREATE TABLE `/Root/foo_1` (
-    id Int64 NOT NULL,
-    join_id Int64,
-    primary key(id)
-    );
-    
+            CREATE TABLE `/Root/foo_1` (
+                id Int64 NOT NULL,
+                join_id Int64,
+                primary key(id)
+           );
 
-    CREATE TABLE `/Root/foo_2` (
-    id Int64 NOT NULL,
-    join_id Int64,
-    primary key(id)
-    );
-    
+            CREATE TABLE `/Root/foo_2` (
+                id Int64 NOT NULL,
+                join_id Int64,
+                primary key(id)
+            );
 
-    CREATE TABLE `/Root/foo_3` (
-    id Int64 NOT NULL,
-    join_id Int64,
-    primary key(id)
-    );
-    
+            CREATE TABLE `/Root/foo_3` (
+                id Int64 NOT NULL,
+                join_id Int64,
+                primary key(id)
+            );
 
-    CREATE TABLE `/Root/foo_4` (
-    id Int64 NOT NULL,
-    join_id Int64,
-    primary key(id)
-    );
-    
+            CREATE TABLE `/Root/foo_4` (
+                id Int64 NOT NULL,
+                join_id Int64,
+                primary key(id)
+            );
 
-    CREATE TABLE `/Root/foo_5` (
-    id Int64 NOT NULL,
-    join_id Int64,
-    primary key(id)
-    );
-    
+            CREATE TABLE `/Root/foo_5` (
+                id Int64 NOT NULL,
+                join_id Int64,
+                primary key(id)
+            );
 
-    CREATE TABLE `/Root/foo_6` (
-    id Int64 NOT NULL,
-    join_id Int64,
-    primary key(id)
-    );
-    
+            CREATE TABLE `/Root/foo_6` (
+                id Int64 NOT NULL,
+                join_id Int64,
+                primary key(id)
+            );
 
-    CREATE TABLE `/Root/foo_7` (
-    id Int64 NOT NULL,
-    join_id Int64,
-    primary key(id)
-    );
-    
+            CREATE TABLE `/Root/foo_7` (
+                id Int64 NOT NULL,
+                join_id Int64,
+                primary key(id)
+            );
 
-    CREATE TABLE `/Root/foo_8` (
-    id Int64 NOT NULL,
-    join_id Int64,
-    primary key(id)
-    );
-    
+            CREATE TABLE `/Root/foo_8` (
+                id Int64 NOT NULL,
+                join_id Int64,
+                primary key(id)
+            );
 
-    CREATE TABLE `/Root/foo_9` (
-    id Int64 NOT NULL,
-    join_id Int64,
-    primary key(id)
-    );
-    )";
+            CREATE TABLE `/Root/foo_9` (
+                id Int64 NOT NULL,
+                join_id Int64,
+                primary key(id)
+            );
+        )";
 
         auto query = R"(
             --!syntax_pg
-     SET TablePathPrefix = "/Root/";
+            SET TablePathPrefix = "/Root/";
 
-     SELECT foo_0.id as "id2"
-     FROM foo_0, foo_1, foo_2, foo_3, foo_4, foo_5, foo_6, foo_7, foo_8, foo_9
-     WHERE foo_0.join_id = foo_1.id AND foo_0.join_id = foo_2.id AND foo_0.join_id = foo_3.id AND foo_0.join_id = foo_4.id AND foo_0.join_id = foo_5.id AND foo_0.join_id = foo_6.id AND foo_0.join_id = foo_7.id AND foo_0.join_id = foo_8.id AND foo_0.join_id = foo_9.id;
-     
-    )";
+            SELECT foo_0.id as "id2"
+            FROM foo_0, foo_1, foo_2, foo_3, foo_4, foo_5, foo_6, foo_7, foo_8, foo_9
+            WHERE foo_0.join_id = foo_1.id AND foo_0.join_id = foo_2.id AND foo_0.join_id = foo_3.id AND foo_0.join_id = foo_4.id AND foo_0.join_id = foo_5.id AND foo_0.join_id = foo_6.id AND foo_0.join_id = foo_7.id AND foo_0.join_id = foo_8.id AND foo_0.join_id = foo_9.id;
+        )";
 
         auto time = TimeQuery(schema, query, 10);
-
         Cout << "Time per query: " << time;     
     }
 }
