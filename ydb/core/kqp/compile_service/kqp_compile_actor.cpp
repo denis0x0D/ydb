@@ -113,6 +113,7 @@ public:
             EnforcedSqlVersion = false;
         }
 
+        // This is either the default setting or the explicit exclusion of a new RBO when compilation fails and recompilation is attempted.
         config->EnableNewRBO = EnableNewRBO;
 
         if (QueryId.Settings.QueryType == NKikimrKqp::QUERY_TYPE_SQL_GENERIC_SCRIPT || QueryId.Settings.QueryType == NKikimrKqp::QUERY_TYPE_SQL_GENERIC_QUERY) {
@@ -564,20 +565,10 @@ private:
 
         if (IsSuitableToFallbackToYqlOptimizer(status)) {
             Counters->ReportCompileNewRBOFailed(DbCounters);
-
-            LOG_ERROR_S(ctx, NKikimrServices::KQP_COMPILE_ACTOR, "Compilation with NewRBO failed, retrying compilation with Yql"
-                << ", self: " << ctx.SelfID
-                << ", database: " << QueryId.Database
-                << ", text: \"" << EscapeC(QueryId.Text) << "\"");
-
-            // Explicitly drop ptr to result, it holds `ExprNode` allocated from `TExprContext` in KqpHost.
-            AsyncCompileResult.Drop();
+            // Disable compilation with new RBO.
             EnableNewRBO = false;
-            Config = BuildConfiguration(TableServiceConfig);
-            auto prepareSettings = PrepareCompilationSettings(ctx);
-
-            StartCompilationWithSettings(prepareSettings);
-            Continue(ctx);
+            TString logMessage = "Compilation with new RBO failed, retrying with YQL optimizer";
+            RebuildConfigAndStartCompilation(ctx, std::move(logMessage));
             return;
         } else if (IsSuitableToReportSuccessOnNewRBO(status)) {
             Counters->ReportCompileNewRBOSuccess(DbCounters);
@@ -588,17 +579,9 @@ private:
         // If compilation failed and we tried SqlVersion = 1, retry with SqlVersion = 0
         if (IsSuitableToFallbackToSqlV0(status)) {
             Counters->ReportCompileEnforceConfigFailed(DbCounters);
-            LOG_ERROR_S(ctx, NKikimrServices::KQP_COMPILE_ACTOR, "Compilation with SqlVersion = 1 failed, retrying with SqlVersion = 0"
-                << ", self: " << ctx.SelfID
-                << ", database: " << QueryId.Database
-                << ", text: \"" << EscapeC(QueryId.Text) << "\"");
-
             EnforcedSqlVersion = false;
-            Config = BuildConfiguration(TableServiceConfig);
-            auto prepareSettings = PrepareCompilationSettings(ctx);
-
-            StartCompilationWithSettings(prepareSettings);
-            Continue(ctx);
+            TString logMessage = "Compilation with SqlVersion = 1 failed, retrying with SqlVersion = 0";
+            RebuildConfigAndStartCompilation(ctx, std::move(logMessage));
             return;
         } else if (IsSuitableToReportSuccessOnEnforcedSqlVersion(status)) {
             Counters->ReportCompileEnforceConfigSuccess(DbCounters);
@@ -669,6 +652,21 @@ private:
         }
         meta["parameters"] = parameters;
         return meta;
+    }
+
+    void RebuildConfigAndStartCompilation(const TActorContext &ctx, TString&& logMessage) {
+        LOG_ERROR_S(ctx, NKikimrServices::KQP_COMPILE_ACTOR, logMessage
+                << ", self: " << ctx.SelfID
+                << ", database: " << QueryId.Database
+                << ", text: \"" << EscapeC(QueryId.Text) << "\"");
+
+        // Explicitly drop ptr to result, it holds `ExprNode` allocated from `TExprContext` in KqpHost.
+        AsyncCompileResult.Drop();
+        Config = BuildConfiguration(TableServiceConfig);
+        auto prepareSettings = PrepareCompilationSettings(ctx);
+
+        StartCompilationWithSettings(prepareSettings);
+        Continue(ctx);
     }
 
     bool IsSuitableToFallbackToYqlOptimizer(Ydb::StatusIds::StatusCode status) {
