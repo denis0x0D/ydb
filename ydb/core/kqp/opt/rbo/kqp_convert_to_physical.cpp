@@ -1098,9 +1098,9 @@ namespace NKikimr {
 namespace NKqp {
 
 TExprNode::TPtr ConvertToPhysical(TOpRoot &root, TRBOContext& rboCtx, TAutoPtr<IGraphTransformer> typeAnnTransformer, 
-                                TAutoPtr<IGraphTransformer> peepholeTransformer) {
+                                 TAutoPtr<IGraphTransformer> peepholeTransformer) {
     Y_UNUSED(peepholeTransformer);
-    TExprContext & ctx = rboCtx.ExprCtx;
+    TExprContext& ctx = rboCtx.ExprCtx;
 
     THashMap<int, TExprNode::TPtr> stages;
     THashMap<int, TVector<TExprNode::TPtr>> stageArgs;
@@ -1144,27 +1144,54 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot &root, TRBOContext& rboCtx, TAutoPtr<I
                 columns.push_back(ctx.NewAtom(op->Pos, c));
             }
 
-            // clang-format off
-            currentStageBody = Build<TDqSource>(ctx, op->Pos)
-                .DataSource(source)
-                .Settings<TKqpReadRangesSourceSettings>()
-                    .Table(opSource->TableCallable)
-                    .Columns().Add(columns).Build()
-                    .Settings<TCoNameValueTupleList>().Build()
-                    .RangesExpr<TCoVoid>().Build()
-                    .ExplainPrompt<TCoNameValueTupleList>().Build()
-                .Build()
-            .Done().Ptr();
-            // clang-format on
-
-            stages[opStageId] = currentStageBody;
-            stagePos[opStageId] = op->Pos;
+            switch (opSource->SourceType) {
+                case ETableSourceType::Row: {
+                    // clang-format off
+                    currentStageBody = Build<TDqSource>(ctx, op->Pos)
+                        .DataSource(source)
+                        .Settings<TKqpReadRangesSourceSettings>()
+                            .Table(opSource->TableCallable)
+                            .Columns().Add(columns).Build()
+                            .Settings<TCoNameValueTupleList>().Build()
+                            .RangesExpr<TCoVoid>().Build()
+                            .ExplainPrompt<TCoNameValueTupleList>().Build()
+                        .Build()
+                    .Done().Ptr();
+                    // clang-format on
+                    break;
+                }
+                case ETableSourceType::Column: {
+                    // clang-format off
+                    currentStageBody = 
+                        Build<TCoFromFlow>(ctx, op->Pos)
+                            .Input<TCoWideFromBlocks>()
+                                .Input<TKqpBlockReadOlapTableRanges>()
+                                    .Table(opSource->TableCallable)
+                                    .Ranges<TCoVoid>().Build()
+                                    .Columns().Add(columns).Build()
+                                    .Settings<TCoNameValueTupleList>().Build()
+                                    .ExplainPrompt<TCoNameValueTupleList>().Build()
+                                    .Process()
+                                    .Args({"row"})
+                                        .Body("row")
+                                    .Build()
+                                .Build()
+                            .Build()
+                        .Done().Ptr();
+                    // clang-format on
+                    break;
+                }
+                default:
+                    Y_ENSURE(false, "Unsupported table source type");
+            }
 
             // If we need to remap columns or perform a sort, we need to create a new stage
             if (opSource->Props.OrderEnforcer.has_value()) {
                 Y_ENSURE(false, "Sorting over read operator not supported");
             }
 
+            stages[opStageId] = currentStageBody;
+            stagePos[opStageId] = op->Pos;
             YQL_CLOG(TRACE, CoreDq) << "Converted Read " << opStageId;
         } else if (op->Kind == EOperator::Filter) {
             if (!currentStageBody) {
@@ -1184,6 +1211,7 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot &root, TRBOContext& rboCtx, TAutoPtr<I
             auto map_arg = Build<TCoArgument>(ctx, op->Pos).Name("arg").Done().Ptr();
 
             auto newFilterBody = ReplaceArg(filterBody.Ptr(), filter_arg, ctx);
+            // FIXME: Eliminate this for YQL pipeline.
             newFilterBody = ctx.Builder(op->Pos).Callable("FromPg").Add(0, newFilterBody).Seal().Build();
 
             TVector<TExprBase> items;
@@ -1452,21 +1480,34 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot &root, TRBOContext& rboCtx, TAutoPtr<I
         }
 
         TExprNode::TPtr stage;
-        if (graph.IsSourceStage(id)) {
+        if (graph.IsSourceStageRowType(id)) {
             stage = stages.at(id);
         } else {
-            // clang-format off
-            stage = Build<TDqPhyStage>(ctx, stagePos.at(id))
-                .Inputs()
-                    .Add(inputs)
+            if (graph.IsSourceStageColumnType(id)) {
+                // clang-format off
+                stage = Build<TDqPhyStage>(ctx, stagePos.at(id))
+                    .Inputs().Build()
+                    .Program()
+                        .Args({})
+                        .Body(stages.at(id))
                     .Build()
-                .Program()
-                    .Args(stageArgs.at(id))
-                    .Body(stages.at(id))
+                    .Settings().Build()
+                .Done().Ptr();
+                // clang-format on
+            } else {
+                // clang-format off
+                stage = Build<TDqPhyStage>(ctx, stagePos.at(id))
+                    .Inputs()
+                        .Add(inputs)
                     .Build()
-                .Settings().Build()
-            .Done().Ptr();
-            // clang-format on
+                    .Program()
+                        .Args(stageArgs.at(id))
+                        .Body(stages.at(id))
+                    .Build()
+                    .Settings().Build()
+                .Done().Ptr();
+                // clang-format on
+            }
 
             txStages.push_back(stage);
             YQL_CLOG(TRACE, CoreDq) << "Added stage " << stage->UniqueId();
@@ -1522,7 +1563,7 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot &root, TRBOContext& rboCtx, TAutoPtr<I
                                 .Name().Build("type")
                                 .Value<TCoAtom>().Build("data_query")
                             .Done().Ptr());
-    // clang-format off
+    // clang-format on
 
     // Build result type
     typeAnnTransformer->Rewind();

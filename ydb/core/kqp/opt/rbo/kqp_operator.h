@@ -14,6 +14,9 @@ using namespace NYql;
 
 enum EOperator : ui32 { EmptySource, Source, Map, Project, Filter, Join, Aggregate, Limit, UnionAll, Root };
 
+/* Represents a table source type. */
+enum ETableSourceType : ui32 { Row, Column };
+
 /* Represents aggregation phases. */
 enum EAggregationPhase : ui32 {Intermediate, Final};
 
@@ -159,8 +162,17 @@ struct TSourceConnection : public TConnection {
  */
 
 struct TStageGraph {
+    struct TSourceStageTraits {
+        TSourceStageTraits(const TVector<std::pair<TString, TInfoUnit>>& renames, const ETableSourceType sourceType)
+            : Renames(renames)
+            , SourceType(sourceType) {
+        }
+        TVector<std::pair<TString, TInfoUnit>> Renames;
+        ETableSourceType SourceType;
+    };
+
     TVector<int> StageIds;
-    THashMap<int, TVector<std::pair<TString, TInfoUnit>>> SourceStageRenames;
+    THashMap<int, TSourceStageTraits> SourceStageRenames;
     THashMap<int, TVector<int>> StageInputs;
     THashMap<int, TVector<int>> StageOutputs;
     THashMap<std::pair<int, int>, std::shared_ptr<TConnection>> Connections;
@@ -173,19 +185,39 @@ struct TStageGraph {
         return newStageId;
     }
 
-    int AddSourceStage(TVector<TString> columns, TVector<TInfoUnit> renames, bool needsMap=true) {
+    int AddSourceStage(const TVector<TString>& columns, const TVector<TInfoUnit>& renames, const ETableSourceType& sourceType, bool needsMap = true) {
         int res = AddStage();
         TVector<std::pair<TString, TInfoUnit>> renamePairs;
         if (needsMap) {
-            for (size_t i=0; i<columns.size(); i++) {
-                renamePairs.push_back(std::make_pair(columns[i], renames[i]));
+            for (size_t i = 0; i < columns.size(); i++) {
+                renamePairs.emplace_back(columns[i], renames[i]);
             }
         }
-        SourceStageRenames[res] = renamePairs;
+
+        TSourceStageTraits traits(renamePairs, sourceType);
+        SourceStageRenames.insert({res, traits});
         return res;
     }
 
-    bool IsSourceStage(int id) { return SourceStageRenames.contains(id); }
+    bool IsSourceStage(int id) {
+        return SourceStageRenames.contains(id);
+    }
+
+    bool IsSourceStageRowType(int id) {
+        auto it = SourceStageRenames.find(id);
+        if (it != SourceStageRenames.end()) {
+            return it->second.SourceType == ETableSourceType::Row;
+        }
+        return false;
+    }
+
+    bool IsSourceStageColumnType(int id) {
+        auto it = SourceStageRenames.find(id);
+        if (it != SourceStageRenames.end()) {
+            return it->second.SourceType == ETableSourceType::Column;
+        }
+        return false;
+    }
 
     void Connect(int from, int to, std::shared_ptr<TConnection> conn) {
         auto &outputs = StageOutputs.at(from);
@@ -346,6 +378,7 @@ class TOpRead : public IOperator {
     TString Alias;
     TVector<TString> Columns;
     TVector<TInfoUnit> OutputIUs;
+    ETableSourceType SourceType;
     TExprNode::TPtr TableCallable;
 };
 
