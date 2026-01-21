@@ -973,11 +973,12 @@ TExprNode::TPtr RewriteSelect(const TExprNode::TPtr &node, TExprContext &ctx, co
                     const ui32 aggInputIndex = aggregation->ChildrenSize() == 3 ? 2 : 3;
                     const bool aggHasInput = aggregation->ChildrenSize() > 2;
                     const bool aggHasType = aggHasInput;
+                    const bool isExpression = aggHasInput && IsExpression(aggInput);
 
                     // Aggregation with column specified.
                     if (aggHasInput) {
                         auto aggInput = aggregation->ChildPtr(aggInputIndex);
-                        if (IsExpression(aggInput)) {
+                        if (isExpression) {
                             // Aggregation on expression f(a x b).
                             // We pull expression outside a given aggregation and rename result of a given expression with unique name
                             // to later process result with aggregate function.
@@ -990,15 +991,11 @@ TExprNode::TPtr RewriteSelect(const TExprNode::TPtr &node, TExprContext &ctx, co
                             // For example: f(a) -> map(a -> a) -> f(a).
                             // This is needed to simplify logic for translation from PgSelect to KqpOp.
                             exprBody = GetMember(aggInput);
-
                             Y_ENSURE(exprBody, "Aggregation input is not a member");
                             auto member = TCoMember(exprBody);
-                            // f(a), g(a) => map(a -> a, a -> b) -> f(a), g(b)
-                            aggColName = TInfoUnit(member.Name().StringValue());
-                            if (aggregationUniqueColNames.contains(aggColName.GetFullName())) {
-                                aggColName = TInfoUnit(GenerateUniqueColumnName("expr"));
-                            }
-                            aggregationUniqueColNames.insert(aggColName.GetFullName());
+                            const auto colName = member.Name().StringValue();
+                            aggColName = TInfoUnit(colName);
+                            aggregationUniqueColNames.insert(colName);
                         }
                     } else {
                         // count(*)
@@ -1023,22 +1020,27 @@ TExprNode::TPtr RewriteSelect(const TExprNode::TPtr &node, TExprContext &ctx, co
 
                     // This is a special case to force optional type for non optional column.
                     const bool forceOptional = aggHasType ? (IsEmptyGroupByKeys && IsForceOptionalNeeded(aggregation->ChildPtr(2), aggFuncName)) : false;
-                    expressionsMapPreAgg.push_back({aggColName, exprLambda, forceOptional});
-                    aggregationsForReplacement[aggregation] = aggColName.GetFullName();
+
+                    // We can map column only if its unique, for example: select a, f(a) group by a => map(a) -> agg(f(a), a) -> map(f(a), a)
+                    if (IsExpression || forceOptional || !aggregationUniqueColName.contains(aggColname.GetFullName())) {
+                        expressionsMapPreAgg.push_back({aggColName, exprLambda, forceOptional});
+                    }
 
                     // Distinct for column or expression f(distinct a) => (distinct a) as b -> f(b).
                     if (!!GetSetting(*aggregation->Child(1), "distinct")) {
                         const auto colName = aggColName.GetFullName();
-                        auto distinctAggTraits = BuildAggregationTraits(colName, "distinct", ctx, node->Pos());
+                        auto distinctAggTraits = BuildAggregationTraits(colName, "distinct", colName, ctx, node->Pos());
                         distinctAggregationTraitsPreAggregate.AggTraitsList.push_back(distinctAggTraits);
                         distinctAggregationTraitsPreAggregate.KeyColumns.push_back(aggColName);
                         distinctPreAggregate = true;
                     }
 
+                    const auto resultColName = TInfoUnit(GenerateUniqueColumnName(aggColName));
                     // Build an aggregation traits.
                     auto aggregationTraits =
-                        BuildAggregationTraits(aggColName.GetFullName(), aggFuncName, ctx, node->Pos());
+                        BuildAggregationTraits(aggColName.GetFullName(), aggFuncName, resultColName ctx, node->Pos());
                     aggTraits.AggTraitsList.push_back(aggregationTraits);
+                    aggregationsForReplacement[aggregation] = resultColName;
                 }
 
                 TNodeOnNodeOwnedMap nodeReplacementMap;
@@ -1081,7 +1083,7 @@ TExprNode::TPtr RewriteSelect(const TExprNode::TPtr &node, TExprContext &ctx, co
 
                 // Case for distinct after aggregation.
                 if (distinctAll) {
-                    auto distinctAggTraits = BuildAggregationTraits(resultColName, "distinct", ctx, node->Pos());
+                    auto distinctAggTraits = BuildAggregationTraits(resultColName, "distinct", resultColName, ctx, node->Pos());
                     distinctAggregationTraitsPostAggregate.AggTraitsList.push_back(distinctAggTraits);
                     distinctAggregationTraitsPostAggregate.KeyColumns.push_back(TInfoUnit(resultColName));
                 }
@@ -1098,7 +1100,7 @@ TExprNode::TPtr RewriteSelect(const TExprNode::TPtr &node, TExprContext &ctx, co
                     colName = TInfoUnit(member.Name().StringValue());
                 }
 
-                auto distinctAggTraits = BuildAggregationTraits(colName.GetFullName(), "distinct", ctx, node->Pos());
+                const auto distinctAggTraits = BuildAggregationTraits(colName.GetFullName(), "distinct", colName.GetFullName(), ctx, node->Pos());
                 distinctAggregationTraitsPostAggregate.AggTraitsList.push_back(distinctAggTraits);
                 distinctAggregationTraitsPostAggregate.KeyColumns.push_back(colName);
             }
@@ -1110,7 +1112,7 @@ TExprNode::TPtr RewriteSelect(const TExprNode::TPtr &node, TExprContext &ctx, co
                      "Multiple distinct is not supported");
             for (const auto& key : aggTraits.KeyColumns) {
                 const auto colName = key.GetFullName();
-                auto distinctAggTraits = BuildAggregationTraits(colName, "distinct", ctx, node->Pos());
+                const auto distinctAggTraits = BuildAggregationTraits(colName, "distinct", colName, ctx, node->Pos());
                 distinctAggregationTraitsPreAggregate.AggTraitsList.push_back(distinctAggTraits);
                 distinctAggregationTraitsPreAggregate.KeyColumns.push_back(colName);
             }
@@ -1120,7 +1122,7 @@ TExprNode::TPtr RewriteSelect(const TExprNode::TPtr &node, TExprContext &ctx, co
         if (distinctAll) {
             for (const auto& key : aggTraits.KeyColumns) {
                 const auto colName = key.GetFullName();
-                auto distinctAggTraits = BuildAggregationTraits(colName, "distinct", ctx, node->Pos());
+                const auto distinctAggTraits = BuildAggregationTraits(colName, "distinct", colName, ctx, node->Pos());
                 distinctAggregationTraitsPostAggregate.AggTraitsList.push_back(distinctAggTraits);
                 distinctAggregationTraitsPostAggregate.KeyColumns.push_back(colName);
             }

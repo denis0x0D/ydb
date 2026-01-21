@@ -1,4 +1,5 @@
 #include "kqp_rbo_physical_aggregation_builder.h"
+#include "kqp_rbo_physical_convertion_utils.h"
 using namespace NYql::NNodes;
 using namespace NKikimr;
 using namespace NKikimr::NKqp;
@@ -1020,6 +1021,23 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildNarrowMapForPhysicalAggregatio
         outputFields.push_back(aggTraits.StateFieldName);
     }
 
+    /*
+    THasMap<TString, ui32> indices;
+    for (ui32 i = 0; i < outputFields.size(); ++i) {
+        indices.emplace_back(outputField, i);
+    }
+    THashSet<ui32, TString> outIndices;
+    for (const auto& outputField : outputFields) {
+        auto it = projectionMap.find(outputField);
+        if (it != projecitonMap.end()) {
+            const auto& fieldName = it->second;
+            Y_ENSURE(indices.contains(fieldName));
+            outIndices.emplace(indices[fieldName], fieldName);
+        }
+    }
+        */
+
+    THashSet<TString> uniqueFields;
     if (keyFields.empty()) {
         // clang-format off
         input = Build<TCoTake>(Ctx, Pos)
@@ -1048,6 +1066,10 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildNarrowMapForPhysicalAggregatio
                         if (it != projectionMap.end()) {
                             fieldName = it->second;
                         }
+                        if (uniqueFields.contains(fieldName)) {
+                            continue;
+                        }
+                        uniqueFields.insert(fieldName);
                         parent.List(i)
                             .Atom(0, fieldName)
                             .Arg(1, "wide_param", i)
@@ -1079,10 +1101,10 @@ TVector<TString> TPhysicalAggregationBuilder::GetInputColumns(const TVector<TOpA
     return TVector<TString>(inputFields.begin(), inputFields.end());
 }
 
-void TPhysicalAggregationBuilder::GetPhysicalAggregationTraits(const TVector<TString>& inputColumns,
-                                                                const TVector<TOpAggregationTraits>& aggregationTraitsList, TVector<TString>& inputFields,
-                                                                TVector<TPhysicalAggregationTraits>& aggTraits, THashMap<TString, TString>& projectionMap,
-                                                                const TTypeAnnotationNode* inputType, const TTypeAnnotationNode* outputType) {
+void TPhysicalAggregationBuilder::GetPhysicalAggregationTraits(const TVector<TString>& inputColumns, const TVector<TOpAggregationTraits>& aggregationTraitsList,
+                                                               TVector<TString>& inputFields, TVector<TPhysicalAggregationTraits>& aggTraits,
+                                                               THashMap<TString, TString>& projectionMap, const TTypeAnnotationNode* inputType,
+                                                               const TTypeAnnotationNode* outputType) {
     Y_ENSURE(inputType && outputType);
     const auto* inputStructType = inputType->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
     const auto* outputStructType = outputType->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
@@ -1099,16 +1121,15 @@ void TPhysicalAggregationBuilder::GetPhysicalAggregationTraits(const TVector<TSt
     for (ui32 i = 0; i < inputColumns.size(); ++i) {
         const auto fullName = inputColumns[i];
         if (auto it = aggColumns.find(fullName); it != aggColumns.end()) {
-            auto aggName = "_kqp_agg_" + ToString(i);
+            const auto aggName = fullName;
             const auto& tupleTraits = it->second;
             const auto& aggFunction = std::get<0>(tupleTraits);
             const auto* inputType = std::get<1>(tupleTraits);
             const auto* outputType = std::get<2>(tupleTraits);
 
-            auto stateName = aggName + "_" + aggFunction;
+            auto stateName = "__kqp_agg_state_" + aggName + "_" + aggFunction;
             // No renames for distinct, we want to process only keys.
             if (aggFunction == "distinct") {
-                aggName = fullName;
                 stateName = fullName;
             }
 
@@ -1230,9 +1251,17 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildPhysicalAggregation(TExprNode:
     GetPhysicalAggregationTraits(inputColumns, aggregationTraitsList, inputFields, phyAggregationTraitsList, projectionMap, inputType, outputType);
 
     // clang-format off
+    input = Ctx.Builder(Pos)
+        .Callable("ToFlow")
+            .Add(0, input)
+        .Seal()
+    .Build();
+    // clang-format on
+
+    // clang-format off
     auto wideCombiner = Ctx.Builder(Pos)
         .Callable(PhysicalAggregationName)
-            .Add(0, BuildExpandMapForPhysicalAggregationInput(input, inputColumns))
+            .Add(0, NPhysicalConvertionUtils::BuildExpandMapForNarrowInput(input, inputColumns, Ctx))
             .Add(1, Ctx.NewAtom(Pos, ""))
             .Add(2, BuildKeyExtractorLambda(keyFields, inputFields))
             .Add(3, BuildInitHandlerLambda(keyFields, inputFields, phyAggregationTraitsList))

@@ -590,7 +590,7 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot &root, TRBOContext& rboCtx) {
             auto [stageArg, stageInput] = graph.GenerateStageInput(stageInputCounter, root.Node, ctx, *aggregate->GetInput()->Props.StageId);
             stageArgs[opStageId].push_back(stageArg);
 
-            TPhysicalAggregationBuilder aggregationBuilder(aggregate, ctx, op->Pos);
+            TPhysicalAggregationBuilder aggregationBuilder(aggregate, ctx, op->Pos, true);
             currentStageBody = aggregationBuilder.BuildPhysicalAggregation(stageInput);
             stages[opStageId] = currentStageBody;
             stagePos[opStageId] = op->Pos;
