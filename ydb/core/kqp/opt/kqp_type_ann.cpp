@@ -2696,10 +2696,11 @@ TStatus AnnotateOpAggregate(const TExprNode::TPtr& input, TExprContext& ctx) {
     const auto* structType = inputType->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
     auto opAggregate = TKqpOpAggregate(input);
 
+    TVector<const TItemExprType*> newItemTypes;
     THashMap<TString, const TTypeAnnotationNode*> aggTraitsMap;
     for (const auto* itemType : structType->GetItems()) {
         const auto itemName = itemType->GetName();
-        aggTraitsMap.emplace(itemName, itemType);
+        aggTraitsMap.emplace(itemName, itemType->GetItemType());
     }
 
     for (const auto& keyColumn : opAggregate.KeyColumns()) {
@@ -2720,10 +2721,10 @@ TStatus AnnotateOpAggregate(const TExprNode::TPtr& input, TExprContext& ctx) {
         if (aggFunction == "count") {
             aggFieldType = ctx.MakeType<TDataExprType>(EDataSlot::Uint64);
         } else if (aggFunction == "sum") {
-            Y_ENSURE(GetSumResultType(dummyPos, *it->second->GetItemType(), aggFieldType, ctx),
+            Y_ENSURE(GetSumResultType(dummyPos, *it->second, aggFieldType, ctx),
                         "Unsupported type for sum aggregation function");
         } else if (aggFunction == "avg") {
-            Y_ENSURE(GetAvgResultType(dummyPos, *it->second->GetItemType(), aggFieldType, ctx),
+            Y_ENSURE(GetAvgResultType(dummyPos, *it->second, aggFieldType, ctx),
                         "Unsupported type for avg aggregation function");
         }
 
