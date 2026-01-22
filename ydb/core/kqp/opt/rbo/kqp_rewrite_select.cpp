@@ -22,8 +22,7 @@ struct TAggregationTraits {
     TVector<TInfoUnit> KeyColumns;
 };
 
-THashSet<TString> SupportedAggregationFunctions{"sum", "min", "max", "count", "avg"};
-ui64 KqpUniqueAggColumnId{0};
+const THashSet<TString> SupportedAggregationFunctions{"sum", "min", "max", "count", "avg"};
 
 TString GetColumnNameFromGroupRef(TExprNode::TPtr groupRef,
                                   const TVector<std::pair<TInfoUnit, TExprNode::TPtr>>& groupByKeysExpressionsMap) {
@@ -271,14 +270,14 @@ TExprNode::TPtr BuildAggregateExpressionMap(TExprNode::TPtr resultExpr,
     // clang-format on
 }
 
-TString GenerateUniqueColumnName(const TString& prefix, const TString& colName) {
+TString GenerateUniqueColumnName(ui64& uniqueId, const TString& prefix, const TString& colName) {
     TStringBuilder strBuilder;
     strBuilder << "__kqp_";
     strBuilder << prefix;
     strBuilder << "_";
     strBuilder << colName;
     strBuilder << "_";
-    strBuilder << ToString(KqpUniqueAggColumnId++);
+    strBuilder << ToString(uniqueId++);
     return strBuilder;
 }
 
@@ -663,6 +662,8 @@ TExprNode::TPtr RewriteSelect(const TExprNode::TPtr &node, TExprContext &ctx, co
     Y_UNUSED(typeCtx);
     Y_UNUSED(pgSyntax);
     TVector<TString> finalColumnOrder;
+    // Start from beggining for each proccesed select;
+    ui64 uniqueAggColumnId = 0;
 
     auto setItems = GetSetting(node->Head(), "set_items")->TailPtr();
     TVector<TExprNode::TPtr> setItemsResults;
@@ -922,8 +923,8 @@ TExprNode::TPtr RewriteSelect(const TExprNode::TPtr &node, TExprContext &ctx, co
                     // For exression we use map.
                     // For example: f(a) group by b + c => map(a -> a, b + c -> d) -> f(a) group by d
                     newBody = pgSyntax ? ctx.NewCallable(node->Pos(), "FromPg", {body}) : body;
-                    groupByKeyName = TInfoUnit(GenerateUniqueColumnName("agg_input", "group_expr"));
-               } else {
+                    groupByKeyName = TInfoUnit(GenerateUniqueColumnName(uniqueAggColumnId, "agg_input", "group_expr"));
+                } else {
                     Y_ENSURE(body->IsCallable("Member"), "Invalid callable for PgGroup: " + TString(body->Content()));
                     auto member = TCoMember(body);
                     groupByKeyName = TInfoUnit(member.Name().StringValue());
@@ -990,7 +991,7 @@ TExprNode::TPtr RewriteSelect(const TExprNode::TPtr &node, TExprContext &ctx, co
                             // to later process result with aggregate function.
                             // For example: f(a x b) => map((a x b) -> c) -> f(c)
                             exprBody = pgSyntax ? ctx.NewCallable(aggInput->Pos(), "FromPg", {aggInput}) : aggInput;
-                            aggColName = TInfoUnit(GenerateUniqueColumnName("agg_input", "agg_expr"));
+                            aggColName = TInfoUnit(GenerateUniqueColumnName(uniqueAggColumnId, "agg_input", "agg_expr"));
                         } else {
                             // Pure aggregation f(a).
                             // Here we want to get just a column name for aggregation.
@@ -999,19 +1000,21 @@ TExprNode::TPtr RewriteSelect(const TExprNode::TPtr &node, TExprContext &ctx, co
                             exprBody = GetMember(aggInput);
                             Y_ENSURE(exprBody, "Aggregation input is not a member");
                             auto member = TCoMember(exprBody);
-                            const auto colName = member.Name().StringValue();
-                            aggColName = TInfoUnit(colName);
-                            aggregationUniqueColNames.insert(colName);
+                            aggColName = TInfoUnit(member.Name().StringValue());
                         }
                     } else {
                         // count(*)
                         Y_ENSURE(aggFuncName == "count", "Invalid agg function for *");
-                        aggColName = TInfoUnit(GenerateUniqueColumnName("agg_input", "agg_asterisks"));
+                        aggColName = TInfoUnit(GenerateUniqueColumnName(uniqueAggColumnId, "agg_input", "agg_asterisks"));
                         // Input of aggregate is empty - count(*).
                         // Here we create a new column with non optional type,
                         // because aggregation for optional and non optional is different.
                         // count(*) counts nulls, count(a) does not.
-                        exprBody = Build<TCoUint64>(ctx, node->Pos()).Literal().Build("1").Done().Ptr();
+                        // clang-format off
+                        exprBody = Build<TCoUint64>(ctx, node->Pos())
+                            .Literal().Build("1")
+                        .Done().Ptr();
+                        // clang-format on
                     }
 
                     // clang-format off
@@ -1024,20 +1027,20 @@ TExprNode::TPtr RewriteSelect(const TExprNode::TPtr &node, TExprContext &ctx, co
                     .Done().Ptr();
                     // clang-format on
 
-                    // This is a special case to force optional type for non optional column.
+                    // This is a special case to force optional type for non optional column. f(a) => map(b : Just(a)) -> f(b)
                     const bool forceOptional = aggHasType ? (isEmptyGroupByKeys && IsForceOptionalNeeded(aggregation->ChildPtr(2), aggFuncName)) : false;
+                    if (forceOptional) {
+                        aggColName = TInfoUnit(GenerateUniqueColumnName(uniqueAggColumnId, "agg_input", "agg_col"));
+                    }
 
                     // Adds a column into pre aggregation map in following cases:
                     // 1) It's an expression: f(a + 1) => map(b : a + 1) -> f(b);
-                    // 2) We need to force optional for column: f(a) => map(just(a)) -> f(a);
+                    // 2) We need to force optional for column: f(a) => map(b: Just(a)) -> f(b);
                     // 3) It's a unique column name: (f(a), g(a)) => map(a) -> (f(a), g(a));
                     if (isExpression || forceOptional || !aggregationUniqueColNames.contains(aggColName.GetFullName())) {
-                        if (forceOptional && aggregationUniqueColNames.contains(aggColName.GetFullName())) {
-                            // In case of force optional and column already proccessed, we have to add rename.
-                            aggColName = TInfoUnit(GenerateUniqueColumnName("agg_input", "agg_col"));
-                        }
                         expressionsMapPreAgg.push_back({aggColName, exprLambda, forceOptional});
                     }
+                    aggregationUniqueColNames.insert(aggColName.GetFullName());
 
                     // Distinct for column or expression f(distinct a) => (distinct a) as b -> f(b).
                     if (!!GetSetting(*aggregation->Child(1), "distinct")) {
@@ -1049,7 +1052,7 @@ TExprNode::TPtr RewriteSelect(const TExprNode::TPtr &node, TExprContext &ctx, co
                     }
 
                     // Rename for aggregation result.
-                    const auto aggResultColName = TInfoUnit(GenerateUniqueColumnName("agg_result", "agg_col"));
+                    const auto aggResultColName = TInfoUnit(GenerateUniqueColumnName(uniqueAggColumnId, "agg_result", "agg_col"));
                     // Build an aggregation traits.
                     auto aggregationTraits = BuildAggregationTraits(aggColName.GetFullName(), aggFuncName, aggResultColName.GetFullName(), ctx, node->Pos());
                     aggTraits.AggTraitsList.push_back(aggregationTraits);
