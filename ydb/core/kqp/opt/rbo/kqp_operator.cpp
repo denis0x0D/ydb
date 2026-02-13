@@ -62,8 +62,8 @@ TOpRead::TOpRead(TExprNode::TPtr node) : IOperator(EOperator::Source, node->Pos(
     TableCallable = opSource.Table().Ptr();
 }
 
-TOpRead::TOpRead(const TString& alias, const TVector<TString>& columns, const TVector<TInfoUnit>& outputIUs, const NYql::EStorageType storageType, const TExprNode::TPtr& tableCallable,
-                 const TExprNode::TPtr& olapFilterLambda, TPositionHandle pos)
+TOpRead::TOpRead(const TString& alias, const TVector<TString>& columns, const TVector<TInfoUnit>& outputIUs, const NYql::EStorageType storageType,
+                 const TExprNode::TPtr& tableCallable, const TExprNode::TPtr& olapFilterLambda, TPositionHandle pos)
     : IOperator(EOperator::Source, pos)
     , Alias(alias)
     , Columns(columns)
@@ -86,13 +86,15 @@ bool TOpRead::NeedsMap() {
     return false;
 }
 
-void TOpRead::RenameIUs(const THashMap<TInfoUnit, TInfoUnit, TInfoUnit::THashFunction> &renameMap, TExprContext &ctx, const THashSet<TInfoUnit, TInfoUnit::THashFunction> &stopList) {
+void TOpRead::RenameIUs(const THashMap<TInfoUnit, TInfoUnit, TInfoUnit::THashFunction>& renameMap, TExprContext& ctx,
+                        const THashSet<TInfoUnit, TInfoUnit::THashFunction>& stopList) {
     Y_UNUSED(ctx);
     Y_UNUSED(stopList);
 
-    for (auto &c : OutputIUs) {
-        if (renameMap.contains(c)) {
-            c = renameMap.at(c);
+    for (auto& column : OutputIUs) {
+        const auto it = renameMap.find(column);
+        if (it != renameMap.end()) {
+            column = it->second;
         }
     }
 }
@@ -172,7 +174,7 @@ TVector<TInfoUnit> TOpMap::GetOutputIUs() {
         res = GetInput()->GetOutputIUs();
     }
 
-    for (const auto &mapElement : MapElements) {
+    for (const auto& mapElement : MapElements) {
         res.push_back(mapElement.GetElementName());
     }
 
@@ -274,8 +276,9 @@ void TOpMap::RenameIUs(const THashMap<TInfoUnit, TInfoUnit, TInfoUnit::THashFunc
 
     for (const auto& el : MapElements) {
         TInfoUnit newIU = el.GetElementName();
-        if (renameMap.contains(el.GetElementName())) {
-            newIU = renameMap.at(el.GetElementName());
+        const auto it = renameMap.find(newIU);
+        if (it != renameMap.end()) {
+            newIU = it->second;
         }
 
         if (el.IsRename()) {
@@ -334,8 +337,12 @@ TString TOpMap::ToString(TExprContext& ctx) {
 /**
  * OpAddDependencies methods
  */
-TOpAddDependencies::TOpAddDependencies(std::shared_ptr<IOperator> input, TPositionHandle pos, const TVector<TInfoUnit>& columns, const TVector<const TTypeAnnotationNode*>& types) :
-    IUnaryOperator(EOperator::AddDependencies, pos, input), Dependencies(columns), Types(types) {}
+TOpAddDependencies::TOpAddDependencies(std::shared_ptr<IOperator> input, TPositionHandle pos, const TVector<TInfoUnit>& columns,
+                                       const TVector<const TTypeAnnotationNode*>& types)
+    : IUnaryOperator(EOperator::AddDependencies, pos, input)
+    , Dependencies(columns)
+    , Types(types) {
+}
 
 TVector<TInfoUnit> TOpAddDependencies::GetOutputIUs() {
     auto ius = GetInput()->GetOutputIUs();
@@ -374,13 +381,15 @@ TVector<TInfoUnit> TOpProject::GetOutputIUs() {
     return res;
 }
 
-void TOpProject::RenameIUs(const THashMap<TInfoUnit, TInfoUnit, TInfoUnit::THashFunction> &renameMap, TExprContext &ctx, const THashSet<TInfoUnit, TInfoUnit::THashFunction> &stopList) {
+void TOpProject::RenameIUs(const THashMap<TInfoUnit, TInfoUnit, TInfoUnit::THashFunction>& renameMap, TExprContext& ctx,
+                           const THashSet<TInfoUnit, TInfoUnit::THashFunction>& stopList) {
     Y_UNUSED(ctx);
     Y_UNUSED(stopList);
 
-    for (auto &projection : ProjectList) {
-        if (renameMap.contains(projection)) {
-            projection = renameMap.at(projection);
+    for (auto& projection : ProjectList) {
+        const auto it = renameMap.find(projection);
+        if (it != renameMap.end()) {
+            projection = it->second;
         }
     }
 }
