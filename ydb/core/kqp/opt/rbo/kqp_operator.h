@@ -62,12 +62,12 @@ public:
 
     virtual ~IOperator() = default;
 
-    const TVector<std::shared_ptr<IOperator>>& GetChildren() {
-        return Children;
+    const TVector<std::shared_ptr<IOperator>>& GetChildrens() {
+        return Childrens;
     }
 
-    bool HasChildren() const {
-        return Children.size() != 0;
+    bool HasChildrens() const {
+        return Childrens.size() != 0;
     }
 
     /**
@@ -122,7 +122,7 @@ public:
     TPhysicalOpProps Props;
     TPositionHandle Pos;
     const TTypeAnnotationNode* Type = nullptr;
-    TVector<std::shared_ptr<IOperator>> Children;
+    TVector<std::shared_ptr<IOperator>> Childrens;
     TVector<std::pair<std::weak_ptr<IOperator>, int>> Parents;
 };
 
@@ -151,13 +151,13 @@ public:
     }
     IUnaryOperator(EOperator kind, TPositionHandle pos, std::shared_ptr<IOperator> input)
         : IOperator(kind, pos) {
-        Children.push_back(input);
+        Childrens.push_back(input);
     }
     std::shared_ptr<IOperator>& GetInput() {
-        return Children[0];
+        return Childrens[0];
     }
     void SetInput(std::shared_ptr<IOperator> newInput) {
-        Children[0] = newInput;
+        Childrens[0] = newInput;
     }
 
     virtual void ComputeMetadata(TRBOContext& ctx, TPlanProps& planProps) override;
@@ -169,24 +169,27 @@ public:
     IBinaryOperator(EOperator kind, TPositionHandle pos)
         : IOperator(kind, pos) {
     }
+
     IBinaryOperator(EOperator kind, TPositionHandle pos, std::shared_ptr<IOperator> leftInput, std::shared_ptr<IOperator> rightInput)
         : IOperator(kind, pos) {
-        Children.push_back(leftInput);
-        Children.push_back(rightInput);
+        Childrens.push_back(leftInput);
+        Childrens.push_back(rightInput);
     }
 
     std::shared_ptr<IOperator>& GetLeftInput() {
-        return Children[0];
+        return Childrens[0];
     }
+
     std::shared_ptr<IOperator>& GetRightInput() {
-        return Children[1];
+        return Childrens[1];
     }
 
     void SetLeftInput(std::shared_ptr<IOperator> newInput) {
-        Children[0] = newInput;
+        Childrens[0] = newInput;
     }
+
     void SetRightInput(std::shared_ptr<IOperator> newInput) {
-        Children[1] = newInput;
+        Childrens[1] = newInput;
     }
 };
 
@@ -520,8 +523,9 @@ public:
     private:
         void BuildDfsList(std::shared_ptr<IOperator> current, std::shared_ptr<IOperator> parent, size_t childIdx,
                           std::unordered_set<std::shared_ptr<IOperator>>& visited, std::shared_ptr<TInfoUnit> subplanIU) {
-            for (size_t idx = 0; idx < current->Children.size(); idx++) {
-                BuildDfsList(current->Children[idx], current, idx, visited, subplanIU);
+            const auto& childrens = current->GetChildrens();
+            for (size_t idx = 0, e = childrens.size(); idx < e; ++idx) {
+                BuildDfsList(childrens[idx], current, idx, visited, subplanIU);
             }
             if (!visited.contains(current)) {
                 DfsList.push_back(IteratorItem(current, parent, childIdx, subplanIU));
