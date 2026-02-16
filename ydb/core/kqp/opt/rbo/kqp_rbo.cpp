@@ -6,7 +6,7 @@
 namespace NKikimr {
 namespace NKqp {
 
-bool ISimplifiedRule::MatchAndApply(std::shared_ptr<IOperator> &input, TRBOContext &ctx, TPlanProps &props) {
+bool ISimplifiedRule::MatchAndApply(TIntrusivePtr<IOperator> &input, TRBOContext &ctx, TPlanProps &props) {
 
     auto output = SimpleMatchAndApply(input, ctx, props);
     if (input != output) {
@@ -76,7 +76,7 @@ void TRuleBasedStage::RunStage(TOpRoot& root, TRBOContext& ctx) {
                     } else if (!iter.SubplanIU) {
                         root.SetInput(op);
                     } else {
-                        root.PlanProps.Subplans.Replace(*iter.SubplanIU, op);
+                        root.PlanProps.Subplans.Replace(*iter.SubplanIU, op.get());
                     }
 
                     if (needToLog && rule->LogRule) {

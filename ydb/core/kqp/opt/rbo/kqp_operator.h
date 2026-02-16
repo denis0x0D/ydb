@@ -17,6 +17,8 @@ namespace NKqp {
 
 using namespace NYql;
 
+struct TPlanProps;
+
 enum EOperator : ui32 { EmptySource, Source, Map, AddDependencies, Project, Filter, Join, Aggregate, Limit, Sort, UnionAll, CBOTree, Root };
 
 /* Represents aggregation phases. */
@@ -62,7 +64,7 @@ public:
 
     virtual ~IOperator() = default;
 
-    const TVector<std::shared_ptr<IOperator>>& GetChildrens() {
+    const TVector<TIntrusivePtr<IOperator>>& GetChildrens() {
         return Childrens;
     }
 
@@ -98,7 +100,7 @@ public:
         Y_UNUSED(ctx);
     }
 
-    virtual void ReplaceChild(const std::shared_ptr<IOperator> oldChild, const std::shared_ptr<IOperator> newChild);
+    virtual void ReplaceChild(const TIntrusivePtr<IOperator> oldChild, const TIntrusivePtr<IOperator> newChild);
 
     /***
      * Rename information units of this operator using a specified mapping
@@ -123,26 +125,18 @@ public:
     TPhysicalOpProps Props;
     TPositionHandle Pos;
     const TTypeAnnotationNode* Type = nullptr;
-    TVector<std::shared_ptr<IOperator>> Childrens;
+    TVector<TIntrusivePtr<IOperator>> Childrens;
     TVector<std::pair<IOperator*, ui32>> Parents;
 };
 
-/***
- * FIXME: This doesn't work correctly
- */
 template <class K>
-bool MatchOperator(const std::shared_ptr<IOperator>& op) {
-    auto dyn = std::dynamic_pointer_cast<K>(op);
-    if (dyn) {
-        return true;
-    } else {
-        return false;
-    }
+bool MatchOperator(const TIntrusivePtr<IOperator>& op) {
+    return dynamic_cast<K*>(op.get());
 }
 
 template <class K>
-std::shared_ptr<K> CastOperator(const std::shared_ptr<IOperator>& op) {
-    return std::static_pointer_cast<K>(op);
+TIntrusivePtr<K> CastOperator(const TIntrusivePtr<IOperator>& op) {
+    return TIntrusivePtr<K>(static_cast<K*>(op.get()));
 }
 
 class IUnaryOperator: public IOperator {
@@ -150,14 +144,14 @@ public:
     IUnaryOperator(EOperator kind, TPositionHandle pos)
         : IOperator(kind, pos) {
     }
-    IUnaryOperator(EOperator kind, TPositionHandle pos, std::shared_ptr<IOperator> input)
+    IUnaryOperator(EOperator kind, TPositionHandle pos, TIntrusivePtr<IOperator> input)
         : IOperator(kind, pos) {
         Childrens.push_back(input);
     }
-    std::shared_ptr<IOperator>& GetInput() {
+    TIntrusivePtr<IOperator>& GetInput() {
         return Childrens[0];
     }
-    void SetInput(std::shared_ptr<IOperator> newInput) {
+    void SetInput(TIntrusivePtr<IOperator> newInput) {
         Childrens[0] = newInput;
     }
 
@@ -171,25 +165,25 @@ public:
         : IOperator(kind, pos) {
     }
 
-    IBinaryOperator(EOperator kind, TPositionHandle pos, std::shared_ptr<IOperator> leftInput, std::shared_ptr<IOperator> rightInput)
+    IBinaryOperator(EOperator kind, TPositionHandle pos, TIntrusivePtr<IOperator> leftInput, TIntrusivePtr<IOperator> rightInput)
         : IOperator(kind, pos) {
         Childrens.push_back(leftInput);
         Childrens.push_back(rightInput);
     }
 
-    std::shared_ptr<IOperator>& GetLeftInput() {
+    TIntrusivePtr<IOperator>& GetLeftInput() {
         return Childrens[0];
     }
 
-    std::shared_ptr<IOperator>& GetRightInput() {
+    TIntrusivePtr<IOperator>& GetRightInput() {
         return Childrens[1];
     }
 
-    void SetLeftInput(std::shared_ptr<IOperator> newInput) {
+    void SetLeftInput(TIntrusivePtr<IOperator> newInput) {
         Childrens[0] = newInput;
     }
 
-    void SetRightInput(std::shared_ptr<IOperator> newInput) {
+    void SetRightInput(TIntrusivePtr<IOperator> newInput) {
         Childrens[1] = newInput;
     }
 };
@@ -253,7 +247,7 @@ private:
 
 class TOpMap: public IUnaryOperator {
 public:
-    TOpMap(std::shared_ptr<IOperator> input, TPositionHandle pos, const TVector<TMapElement>& mapElements, bool project, bool ordered = false);
+    TOpMap(TIntrusivePtr<IOperator> input, TPositionHandle pos, const TVector<TMapElement>& mapElements, bool project, bool ordered = false);
     virtual TVector<TInfoUnit> GetOutputIUs() override;
     virtual TVector<TInfoUnit> GetUsedIUs(TPlanProps& props) override;
     virtual TVector<TInfoUnit> GetSubplanIUs(TPlanProps& props) override;
@@ -285,7 +279,7 @@ public:
  */
 class TOpAddDependencies: public IUnaryOperator {
 public:
-    TOpAddDependencies(std::shared_ptr<IOperator> input, TPositionHandle pos, const TVector<TInfoUnit>& columns,
+    TOpAddDependencies(TIntrusivePtr<IOperator> input, TPositionHandle pos, const TVector<TInfoUnit>& columns,
                        const TVector<const TTypeAnnotationNode*>& types);
     virtual TVector<TInfoUnit> GetOutputIUs() override;
     virtual TString ToString(TExprContext& ctx) override;
@@ -296,7 +290,7 @@ public:
 
 class TOpProject: public IUnaryOperator {
 public:
-    TOpProject(std::shared_ptr<IOperator> input, TPositionHandle pos, const TVector<TInfoUnit>& projectList);
+    TOpProject(TIntrusivePtr<IOperator> input, TPositionHandle pos, const TVector<TInfoUnit>& projectList);
     virtual TVector<TInfoUnit> GetOutputIUs() override;
 
     void RenameIUs(const THashMap<TInfoUnit, TInfoUnit, TInfoUnit::THashFunction>& renameMap, TExprContext& ctx,
@@ -321,7 +315,7 @@ struct TOpAggregationTraits {
 
 class TOpAggregate: public IUnaryOperator {
 public:
-    TOpAggregate(std::shared_ptr<IOperator> input, const TVector<TOpAggregationTraits>& aggFunctions, const TVector<TInfoUnit>& keyColumns,
+    TOpAggregate(TIntrusivePtr<IOperator> input, const TVector<TOpAggregationTraits>& aggFunctions, const TVector<TInfoUnit>& keyColumns,
                  const EAggregationPhase aggPhase, bool distinctAll, TPositionHandle pos);
     virtual TVector<TInfoUnit> GetOutputIUs() override;
     virtual TVector<TInfoUnit> GetUsedIUs(TPlanProps& props) override;
@@ -341,7 +335,7 @@ public:
 
 class TOpFilter: public IUnaryOperator {
 public:
-    TOpFilter(std::shared_ptr<IOperator> input, TPositionHandle pos, const TExpression& filterExpr);
+    TOpFilter(TIntrusivePtr<IOperator> input, TPositionHandle pos, const TExpression& filterExpr);
 
     virtual TVector<TInfoUnit> GetOutputIUs() override;
     virtual TVector<TInfoUnit> GetUsedIUs(TPlanProps& props) override;
@@ -363,7 +357,7 @@ bool TestAndExtractEqualityPredicate(TExprNode::TPtr pred, TExprNode::TPtr& left
 
 class TOpJoin: public IBinaryOperator {
 public:
-    TOpJoin(std::shared_ptr<IOperator> leftArg, std::shared_ptr<IOperator> rightArg, TPositionHandle pos, TString joinKind,
+    TOpJoin(TIntrusivePtr<IOperator> leftArg, TIntrusivePtr<IOperator> rightArg, TPositionHandle pos, TString joinKind,
             const TVector<std::pair<TInfoUnit, TInfoUnit>>& joinKeys);
     virtual TVector<TInfoUnit> GetOutputIUs() override;
     virtual TVector<TInfoUnit> GetUsedIUs(TPlanProps& props) override;
@@ -381,7 +375,7 @@ public:
 
 class TOpUnionAll: public IBinaryOperator {
 public:
-    TOpUnionAll(std::shared_ptr<IOperator> leftArg, std::shared_ptr<IOperator> rightArg, TPositionHandle pos, bool ordered = false);
+    TOpUnionAll(TIntrusivePtr<IOperator> leftArg, TIntrusivePtr<IOperator> rightArg, TPositionHandle pos, bool ordered = false);
     virtual TVector<TInfoUnit> GetOutputIUs() override;
     virtual TString ToString(TExprContext& ctx) override;
 
@@ -393,7 +387,7 @@ public:
 
 class TOpLimit: public IUnaryOperator {
 public:
-    TOpLimit(std::shared_ptr<IOperator> input, TPositionHandle pos, const TExpression& limitCond);
+    TOpLimit(TIntrusivePtr<IOperator> input, TPositionHandle pos, const TExpression& limitCond);
     virtual TVector<TInfoUnit> GetOutputIUs() override;
     void RenameIUs(const THashMap<TInfoUnit, TInfoUnit, TInfoUnit::THashFunction>& renameMap, TExprContext& ctx,
                    const THashSet<TInfoUnit, TInfoUnit::THashFunction>& stopList = {}) override;
@@ -404,7 +398,7 @@ public:
 
 class TOpSort: public IUnaryOperator {
 public:
-    TOpSort(std::shared_ptr<IOperator> input, TPositionHandle pos, const TVector<TSortElement>& sortElements,
+    TOpSort(TIntrusivePtr<IOperator> input, TPositionHandle pos, const TVector<TSortElement>& sortElements,
             std::optional<TExpression> limitCond = std::nullopt);
     virtual TVector<TInfoUnit> GetOutputIUs() override;
     virtual TVector<TInfoUnit> GetUsedIUs(TPlanProps& props) override;
@@ -423,8 +417,8 @@ public:
  */
 class TOpCBOTree: public IOperator {
 public:
-    TOpCBOTree(std::shared_ptr<IOperator> treeRoot, TPositionHandle pos);
-    TOpCBOTree(std::shared_ptr<IOperator> treeRoot, TVector<std::shared_ptr<IOperator>> treeNodes, TPositionHandle pos);
+    TOpCBOTree(TIntrusivePtr<IOperator> treeRoot, TPositionHandle pos);
+    TOpCBOTree(TIntrusivePtr<IOperator> treeRoot, TVector<TIntrusivePtr<IOperator>> treeNodes, TPositionHandle pos);
 
     virtual TVector<TInfoUnit> GetOutputIUs() override {
         return TreeRoot->GetOutputIUs();
@@ -436,20 +430,20 @@ public:
     virtual void ComputeMetadata(TRBOContext& ctx, TPlanProps& planProps) override;
     virtual void ComputeStatistics(TRBOContext& ctx, TPlanProps& planProps) override;
 
-    std::shared_ptr<IOperator> TreeRoot;
-    TVector<std::shared_ptr<IOperator>> TreeNodes;
+    TIntrusivePtr<IOperator> TreeRoot;
+    TVector<TIntrusivePtr<IOperator>> TreeNodes;
 };
 
 class TOpRoot: public IUnaryOperator {
 public:
-    TOpRoot(std::shared_ptr<IOperator> input, TPositionHandle pos, const TVector<TString>& columnOrder);
+    TOpRoot(TIntrusivePtr<IOperator> input, TPositionHandle pos, const TVector<TString>& columnOrder);
     virtual TVector<TInfoUnit> GetOutputIUs() override;
     virtual TString ToString(TExprContext& ctx) override;
     void ComputeParents();
     IGraphTransformer::TStatus ComputeTypes(TRBOContext& ctx);
 
     TString PlanToString(TExprContext& ctx, ui32 printOptions = 0x0);
-    void PlanToStringRec(std::shared_ptr<IOperator> op, TExprContext& ctx, TStringBuilder& builder, int ntabs, ui32 printOptions = 0x0) const;
+    void PlanToStringRec(TIntrusivePtr<IOperator> op, TExprContext& ctx, TStringBuilder& builder, int ntabs, ui32 printOptions = 0x0) const;
 
     void ComputePlanMetadata(TRBOContext& ctx);
     void ComputePlanStatistics(TRBOContext& ctx);
@@ -460,15 +454,15 @@ public:
 
     struct Iterator {
         struct IteratorItem {
-            IteratorItem(std::shared_ptr<IOperator> curr, std::shared_ptr<IOperator> parent, size_t idx, std::shared_ptr<TInfoUnit> subplanIU)
+            IteratorItem(TIntrusivePtr<IOperator> curr, IOperator* parent, size_t idx, std::shared_ptr<TInfoUnit> subplanIU)
                 : Current(curr)
                 , Parent(parent)
                 , ChildIndex(idx)
                 , SubplanIU(subplanIU) {
             }
 
-            std::shared_ptr<IOperator> Current;
-            std::shared_ptr<IOperator> Parent;
+            TIntrusivePtr<IOperator> Current;
+            IOperator* Parent{nullptr};
             size_t ChildIndex;
             std::shared_ptr<TInfoUnit> SubplanIU;
         };
@@ -483,9 +477,9 @@ public:
             }
             Root = ptr;
 
-            std::unordered_set<std::shared_ptr<IOperator>> visited;
+            std::unordered_set<IOperator*> visited;
             for (const auto& subplan : Root->PlanProps.Subplans.Get()) {
-                BuildDfsList(subplan.Plan, {}, size_t(0), visited, std::make_shared<TInfoUnit>(subplan.IU));
+                BuildDfsList(subplan.Plan, nullptr, size_t(0), visited, std::make_shared<TInfoUnit>(subplan.IU));
             }
             auto child = ptr->GetInput();
             BuildDfsList(child, {}, size_t(0), visited, nullptr);
@@ -522,16 +516,16 @@ public:
         };
 
     private:
-        void BuildDfsList(std::shared_ptr<IOperator> current, std::shared_ptr<IOperator> parent, size_t childIdx,
-                          std::unordered_set<std::shared_ptr<IOperator>>& visited, std::shared_ptr<TInfoUnit> subplanIU) {
+        void BuildDfsList(TIntrusivePtr<IOperator> current, IOperator* parent, size_t childIdx, std::unordered_set<IOperator*>& visited,
+                          std::shared_ptr<TInfoUnit> subplanIU) {
             const auto& childrens = current->GetChildrens();
             for (size_t idx = 0, e = childrens.size(); idx < e; ++idx) {
-                BuildDfsList(childrens[idx], current, idx, visited, subplanIU);
+                BuildDfsList(childrens[idx], current.get(), idx, visited, subplanIU);
             }
-            if (!visited.contains(current)) {
+            if (!visited.contains(current.get())) {
                 DfsList.push_back(IteratorItem(current, parent, childIdx, subplanIU));
             }
-            visited.insert(current);
+            visited.insert(current.get());
         }
 
         TVector<IteratorItem> DfsList;
@@ -547,7 +541,7 @@ public:
     }
 
 private:
-    void ComputeParentsRec(std::shared_ptr<IOperator> op, std::shared_ptr<IOperator> parent, ui32 parentChildIndex) const;
+    void ComputeParentsRec(TIntrusivePtr<IOperator> op, TIntrusivePtr<IOperator> parent, ui32 parentChildIndex) const;
 };
 
 } // namespace NKqp

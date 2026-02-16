@@ -1,5 +1,6 @@
 #pragma once
 
+#include "kqp_plan_props.h"
 #include "kqp_info_unit.h"
 #include "kqp_rbo_context.h"
 #include "kqp_plan_props.h"

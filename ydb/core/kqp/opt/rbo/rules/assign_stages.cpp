@@ -5,7 +5,7 @@ namespace {
 using namespace NKikimr;
 using namespace NKikimr::NKqp;
 
-void UpdateNumOfConsumers(std::shared_ptr<IOperator> &input) {
+void UpdateNumOfConsumers(TIntrusivePtr<IOperator> &input) {
     auto &props = input->Props;
     if (props.NumOfConsumers.has_value()) {
         props.NumOfConsumers.value() += 1;
@@ -22,7 +22,7 @@ namespace NKqp {
 /**
  * Assign stages and build stage graph in the process
  */
-bool TAssignStagesRule::MatchAndApply(std::shared_ptr<IOperator> &input, TRBOContext &ctx, TPlanProps &props) {
+bool TAssignStagesRule::MatchAndApply(TIntrusivePtr<IOperator> &input, TRBOContext &ctx, TPlanProps &props) {
     Y_UNUSED(props);
 
     auto nodeName = input->ToString(ctx.ExprCtx);
@@ -128,7 +128,7 @@ bool TAssignStagesRule::MatchAndApply(std::shared_ptr<IOperator> &input, TRBOCon
         auto newStageId = props.StageGraph.AddStage();
         input->Props.StageId = newStageId;
         auto prevStageId = *(sort->GetInput()->Props.StageId);
-        auto conn = std::make_shared<TUnionAllConnection>(props.StageGraph.GetStorageType(prevStageId));
+        auto conn = std::shared_ptr<TUnionAllConnection>(props.StageGraph.GetStorageType(prevStageId));
         props.StageGraph.Connect(prevStageId, newStageId,conn);
     }
     else if (input->Kind == EOperator::Limit) {
@@ -136,7 +136,7 @@ bool TAssignStagesRule::MatchAndApply(std::shared_ptr<IOperator> &input, TRBOCon
         auto newStageId = props.StageGraph.AddStage();
         input->Props.StageId = newStageId;
         auto prevStageId = *(limit->GetInput()->Props.StageId);
-        auto conn = std::make_shared<TUnionAllConnection>(props.StageGraph.GetStorageType(prevStageId));
+        auto conn = std::shared_ptr<TUnionAllConnection>(props.StageGraph.GetStorageType(prevStageId));
         props.StageGraph.Connect(prevStageId, newStageId,conn);
     } else if (input->Kind == EOperator::UnionAll) {
         auto unionAll = CastOperator<TOpUnionAll>(input);
@@ -167,7 +167,7 @@ bool TAssignStagesRule::MatchAndApply(std::shared_ptr<IOperator> &input, TRBOCon
             props.StageGraph.Connect(inputStageId, newStageId,
                                      std::make_shared<TShuffleConnection>(aggregate->KeyColumns, props.StageGraph.GetStorageType(inputStageId)));
         } else {
-            props.StageGraph.Connect(inputStageId, newStageId, std::make_shared<TUnionAllConnection>(props.StageGraph.GetStorageType(inputStageId)));
+            props.StageGraph.Connect(inputStageId, newStageId, MakeIntrusive<TUnionAllConnection>(props.StageGraph.GetStorageType(inputStageId)));
         }
 
         YQL_CLOG(TRACE, CoreDq) << "Assign stage to Aggregation ";

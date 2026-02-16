@@ -1,7 +1,7 @@
 #pragma once
 
-//#include "kqp_operator.h"
-#include "kqp_info_unit.h"
+#include "kqp_operator.h"
+//#include "kqp_info_unit.h"
 #include "kqp_stage_graph.h"
 
 #include <ydb/core/kqp/common/kqp_yql.h>
@@ -11,12 +11,11 @@ namespace NKikimr {
 namespace NKqp {
 
 using namespace NYql;
-class IOperator;// :  public TSimpleRefCount<IOperator>;
 
 enum ESubplanType : ui32 { EXPR, IN_SUBPLAN, EXISTS };
 
 struct TSubplanEntry {
-    IOperator* Plan;
+    TIntrusivePtr<IOperator> Plan;
     TVector<TInfoUnit> Tuple;
     ESubplanType Type;
     TInfoUnit IU;
@@ -29,7 +28,7 @@ struct TSubplans {
         PlanMap.insert({iu, entry});
     }
 
-    void Replace(const TInfoUnit& iu, IOperator* op) {
+    void Replace(const TInfoUnit& iu, TIntrusivePtr<IOperator> op) {
         auto entry = PlanMap.at(iu);
         entry.Plan = op;
         PlanMap.erase(iu);
@@ -51,16 +50,6 @@ struct TSubplans {
 
     THashMap<TInfoUnit, TSubplanEntry, TInfoUnit::THashFunction> PlanMap;
     TVector<TInfoUnit> OrderedList;
-};
-
-/**
- * Global plan properties
- */
-struct TPlanProps {
-    TStageGraph StageGraph;
-    int InternalVarIdx = 1;
-    TSubplans Subplans;
-    bool PgSyntax = false;
 };
 
 }

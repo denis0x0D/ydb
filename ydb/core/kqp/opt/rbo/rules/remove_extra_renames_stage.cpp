@@ -16,7 +16,7 @@ struct Scope {
     bool TopScope = false;
     bool MultipleConsumers = false;
     TVector<TInfoUnit> OutputIUs;
-    TVector<std::shared_ptr<IOperator>> Operators;
+    TVector<TIntrusivePtr<IOperator>> Operators;
 
     TString ToString(TExprContext &ctx) {
         auto res = TStringBuilder() << "{parents: [";
@@ -38,14 +38,14 @@ struct Scope {
 
 class Scopes {
 public:
-    void ComputeScopesRec(std::shared_ptr<IOperator> &op, ui32 &currScope);
-    void ComputeScopes(std::shared_ptr<IOperator> &op);
+    void ComputeScopesRec(TIntrusivePtr<IOperator> &op, ui32 &currScope);
+    void ComputeScopes(TIntrusivePtr<IOperator> &op);
 
     THashMap<ui32, Scope> ScopeMap;
     THashMap<IOperator*, ui32> RevScopeMap;
 };
 
-void Scopes::ComputeScopesRec(std::shared_ptr<IOperator>& op, ui32& currScope) {
+void Scopes::ComputeScopesRec(TIntrusivePtr<IOperator>& op, ui32& currScope) {
     if (RevScopeMap.contains(op.get())) {
         return;
     }
@@ -80,7 +80,7 @@ void Scopes::ComputeScopesRec(std::shared_ptr<IOperator>& op, ui32& currScope) {
     }
 }
 
-void Scopes::ComputeScopes(std::shared_ptr<IOperator>& op) {
+void Scopes::ComputeScopes(TIntrusivePtr<IOperator>& op) {
     ui32 currScope = 0;
     ScopeMap[0] = Scope();
     ComputeScopesRec(op, currScope);

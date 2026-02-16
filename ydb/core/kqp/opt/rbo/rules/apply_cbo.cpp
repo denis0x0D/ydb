@@ -18,9 +18,9 @@ using namespace NKikimr::NKqp;
 // However, the same alias can appear multiple times in a query, but might already be out of scope
 // So we first collect all join conditions and fetch aliases and mappings only for the columns used in join conditions
 
-std::shared_ptr<TJoinOptimizerNode> ConvertJoinTree(std::shared_ptr<TOpCBOTree>& cboTree, TVector<std::shared_ptr<TRelOptimizerNode>>& rels) {
+TIntrusivePtr<TJoinOptimizerNode> ConvertJoinTree(TIntrusivePtr<TOpCBOTree>& cboTree, TVector<TIntrusivePtr<TRelOptimizerNode>>& rels) {
     THashSet<TInfoUnit, TInfoUnit::THashFunction> allJoinColumns;
-    std::shared_ptr<TJoinOptimizerNode> result;
+    TIntrusivePtr<TJoinOptimizerNode> result;
 
     auto lineage = cboTree->TreeRoot->Props.Metadata->ColumnLineage;
     int fakeAliasId = 0;
@@ -33,7 +33,7 @@ std::shared_ptr<TJoinOptimizerNode> ConvertJoinTree(std::shared_ptr<TOpCBOTree>&
         }
     }
 
-    THashMap<IOperator*, std::shared_ptr<IBaseOptimizerNode>> nodeMap;
+    THashMap<IOperator*, TIntrusivePtr<IBaseOptimizerNode>> nodeMap;
 
     // Build rels for CBO. Rel contains a set of aliases and statistics object
     for (auto child : cboTree->Childrens) {
@@ -62,7 +62,7 @@ std::shared_ptr<TJoinOptimizerNode> ConvertJoinTree(std::shared_ptr<TOpCBOTree>&
         }
 
         auto stats = BuildOptimizerStatistics(child->Props, true, mappedKeyColumns);
-        auto relNode = std::make_shared<TRBORelOptimizerNode>(childAliases, stats, child);
+        auto relNode = MakeIntrusive<TRBORelOptimizerNode>(childAliases, stats, child);
         rels.push_back(relNode);
         nodeMap.insert({child.get(), relNode});
     }
@@ -82,7 +82,7 @@ std::shared_ptr<TJoinOptimizerNode> ConvertJoinTree(std::shared_ptr<TOpCBOTree>&
             rightKeys.push_back(TJoinColumn(mappedRightKey.GetAlias(), mappedRightKey.GetColumnName()));
         }
 
-        result = std::make_shared<TJoinOptimizerNode>(leftNode,
+        result = MakeIntrusive<TJoinOptimizerNode>(leftNode,
             rightNode,
             leftKeys,
             rightKeys,
@@ -98,7 +98,7 @@ std::shared_ptr<TJoinOptimizerNode> ConvertJoinTree(std::shared_ptr<TOpCBOTree>&
     return result;
 }
 
-std::shared_ptr<IOperator> ConvertOptimizedTree(std::shared_ptr<IBaseOptimizerNode> tree, const TColumnLineage& lineage, TPositionHandle pos) {
+TIntrusivePtr<IOperator> ConvertOptimizedTree(TIntrusivePtr<IBaseOptimizerNode> tree, const TColumnLineage& lineage, TPositionHandle pos) {
     if (tree->Kind == RelNodeType) {
         auto rel = std::static_pointer_cast<TRBORelOptimizerNode>(tree);
         return rel->Op;
@@ -125,7 +125,7 @@ std::shared_ptr<IOperator> ConvertOptimizedTree(std::shared_ptr<IBaseOptimizerNo
 
         auto joinKind = ConvertToJoinString(join->JoinType);
 
-        auto res = std::make_shared<TOpJoin>(leftArg, rightArg, pos, joinKind, joinKeys);
+        auto res = MakeIntrusive<TOpJoin>(leftArg, rightArg, pos, joinKind, joinKeys);
         res->Props.JoinAlgo = join->JoinAlgo;
         return res;
     }
@@ -143,7 +143,7 @@ namespace NKqp {
  * are transformed into Pg types, we remap the synthenic variables back into original ones
  * to run the CBO, and then map them back
  */
-std::shared_ptr<IOperator> TOptimizeCBOTreeRule::SimpleMatchAndApply(const std::shared_ptr<IOperator> &input, TRBOContext &ctx, TPlanProps &props) {
+TIntrusivePtr<IOperator> TOptimizeCBOTreeRule::SimpleMatchAndApply(const TIntrusivePtr<IOperator> &input, TRBOContext &ctx, TPlanProps &props) {
     Y_UNUSED(props);
 
     if (input->Kind != EOperator::CBOTree) {
@@ -171,13 +171,13 @@ std::shared_ptr<IOperator> TOptimizeCBOTreeRule::SimpleMatchAndApply(const std::
         }
     }
 
-    TVector<std::shared_ptr<TRelOptimizerNode>> rels;
+    TVector<TIntrusivePtr<TRelOptimizerNode>> rels;
     auto joinTree = ConvertJoinTree(cboTree, rels);
 
     bool allRowStorage = std::any_of(
         rels.begin(),
         rels.end(),
-        [](std::shared_ptr<TRelOptimizerNode>& r) {return r->Stats.StorageType==EStorageType::RowStorage; });
+        [](TIntrusivePtr<TRelOptimizerNode>& r) {return r->Stats.StorageType==EStorageType::RowStorage; });
 
     if (optLevel == 2 && allRowStorage) {
         return input;

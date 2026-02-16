@@ -25,7 +25,7 @@ const TTypeAnnotationNode* IOperator::GetIUType(const TInfoUnit& iu) {
     return structType->FindItemType(iu.GetFullName());
 }
 
-void IOperator::ReplaceChild(const std::shared_ptr<IOperator> oldChild, const std::shared_ptr<IOperator> newChild) {
+void IOperator::ReplaceChild(const TIntrusivePtr<IOperator> oldChild, const TIntrusivePtr<IOperator> newChild) {
     for (size_t i = 0; i < Childrens.size(); i++) {
         if (Childrens[i] == oldChild) {
             Childrens[i] = newChild;
@@ -162,7 +162,7 @@ void TMapElement::SetExpression(TExpression expr) {
 /**
  * OpMap operator methods
  */
-TOpMap::TOpMap(std::shared_ptr<IOperator> input, TPositionHandle pos, const TVector<TMapElement>& mapElements, bool project, bool ordered)
+TOpMap::TOpMap(TIntrusivePtr<IOperator> input, TPositionHandle pos, const TVector<TMapElement>& mapElements, bool project, bool ordered)
     : IUnaryOperator(EOperator::Map, pos, input)
     , MapElements(mapElements)
     , Project(project)
@@ -338,7 +338,7 @@ TString TOpMap::ToString(TExprContext& ctx) {
 /**
  * OpAddDependencies methods
  */
-TOpAddDependencies::TOpAddDependencies(std::shared_ptr<IOperator> input, TPositionHandle pos, const TVector<TInfoUnit>& columns,
+TOpAddDependencies::TOpAddDependencies(TIntrusivePtr<IOperator> input, TPositionHandle pos, const TVector<TInfoUnit>& columns,
                                        const TVector<const TTypeAnnotationNode*>& types)
     : IUnaryOperator(EOperator::AddDependencies, pos, input)
     , Dependencies(columns)
@@ -370,7 +370,7 @@ TString TOpAddDependencies::ToString(TExprContext& ctx) {
  * OpProject methods
  */
 
-TOpProject::TOpProject(std::shared_ptr<IOperator> input, TPositionHandle pos, const TVector<TInfoUnit>& projectList)
+TOpProject::TOpProject(TIntrusivePtr<IOperator> input, TPositionHandle pos, const TVector<TInfoUnit>& projectList)
     : IUnaryOperator(EOperator::Project, pos, input), ProjectList(projectList) {}
 
 TVector<TInfoUnit> TOpProject::GetOutputIUs() {
@@ -414,7 +414,7 @@ TString TOpProject::ToString(TExprContext& ctx) {
  * OpFilter operator methods
  */
 
-TOpFilter::TOpFilter(std::shared_ptr<IOperator> input, TPositionHandle pos, const TExpression& filterExpr)
+TOpFilter::TOpFilter(TIntrusivePtr<IOperator> input, TPositionHandle pos, const TExpression& filterExpr)
     : IUnaryOperator(EOperator::Filter, pos, input)
     , FilterExpr(filterExpr) {
 }
@@ -465,7 +465,7 @@ TString TOpFilter::ToString(TExprContext& ctx) {
  * OpJoin operator methods
  */
 
-TOpJoin::TOpJoin(std::shared_ptr<IOperator> leftInput, std::shared_ptr<IOperator> rightInput, TPositionHandle pos, TString joinKind,
+TOpJoin::TOpJoin(TIntrusivePtr<IOperator> leftInput, TIntrusivePtr<IOperator> rightInput, TPositionHandle pos, TString joinKind,
                  const TVector<std::pair<TInfoUnit, TInfoUnit>>& joinKeys)
     : IBinaryOperator(EOperator::Join, pos, leftInput, rightInput), JoinKind(joinKind), JoinKeys(joinKeys) {}
 
@@ -541,7 +541,7 @@ TString TOpJoin::ToString(TExprContext& ctx) {
  * OpUnionAll operator methods
  */
 
-TOpUnionAll::TOpUnionAll(std::shared_ptr<IOperator> leftInput, std::shared_ptr<IOperator> rightInput, TPositionHandle pos, bool ordered)
+TOpUnionAll::TOpUnionAll(TIntrusivePtr<IOperator> leftInput, TIntrusivePtr<IOperator> rightInput, TPositionHandle pos, bool ordered)
     : IBinaryOperator(EOperator::UnionAll, pos, leftInput, rightInput), Ordered(ordered) {}
 
 TVector<TInfoUnit> TOpUnionAll::GetOutputIUs() {
@@ -557,7 +557,7 @@ TString TOpUnionAll::ToString(TExprContext& ctx) {
  * OpLimit operator methods
  */
 
-TOpLimit::TOpLimit(std::shared_ptr<IOperator> input, TPositionHandle pos, const TExpression& limitCond)
+TOpLimit::TOpLimit(TIntrusivePtr<IOperator> input, TPositionHandle pos, const TExpression& limitCond)
     : IUnaryOperator(EOperator::Limit, pos, input), LimitCond(limitCond) {}
 
 TVector<TInfoUnit> TOpLimit::GetOutputIUs() { return GetInput()->GetOutputIUs(); }
@@ -577,7 +577,7 @@ TString TOpLimit::ToString(TExprContext& ctx) {
  * Sort operator
  * FIXME: This is temporary, we want to get enforcers working
  */
-TOpSort::TOpSort(std::shared_ptr<IOperator> input, TPositionHandle pos, const TVector<TSortElement>& sortElements, std::optional<TExpression> limitCond)
+TOpSort::TOpSort(TIntrusivePtr<IOperator> input, TPositionHandle pos, const TVector<TSortElement>& sortElements, std::optional<TExpression> limitCond)
     : IUnaryOperator(EOperator::Sort, pos, input), SortElements(sortElements), LimitCond(limitCond) {}
 
 TVector<TInfoUnit> TOpSort::GetOutputIUs() { return GetInput()->GetOutputIUs(); }
@@ -642,7 +642,7 @@ TString TOpSort::ToString(TExprContext& ctx) {
  * OpAggregate operator methods
  */
 
-TOpAggregate::TOpAggregate(std::shared_ptr<IOperator> input, const TVector<TOpAggregationTraits>& aggTraitsList, const TVector<TInfoUnit>& keyColumns,
+TOpAggregate::TOpAggregate(TIntrusivePtr<IOperator> input, const TVector<TOpAggregationTraits>& aggTraitsList, const TVector<TInfoUnit>& keyColumns,
                            const EAggregationPhase aggPhase, bool distinctAll, TPositionHandle pos)
     : IUnaryOperator(EOperator::Aggregate, pos, input)
     , AggregationTraitsList(aggTraitsList)
@@ -722,7 +722,7 @@ TString TOpAggregate::ToString(TExprContext& ctx) {
 /***
  * OpCBOTree operator methods
  */
-TOpCBOTree::TOpCBOTree(std::shared_ptr<IOperator> treeRoot, TPositionHandle pos) :
+TOpCBOTree::TOpCBOTree(TIntrusivePtr<IOperator> treeRoot, TPositionHandle pos) :
     IOperator(EOperator::CBOTree, pos),
     TreeRoot(treeRoot),
     TreeNodes({treeRoot}) 
@@ -730,7 +730,7 @@ TOpCBOTree::TOpCBOTree(std::shared_ptr<IOperator> treeRoot, TPositionHandle pos)
     Childrens = treeRoot->Childrens;
 }
 
-TOpCBOTree::TOpCBOTree(std::shared_ptr<IOperator> treeRoot, TVector<std::shared_ptr<IOperator>> treeNodes, TPositionHandle pos) :
+TOpCBOTree::TOpCBOTree(TIntrusivePtr<IOperator> treeRoot, TVector<TIntrusivePtr<IOperator>> treeNodes, TPositionHandle pos) :
     IOperator(EOperator::CBOTree, pos),
     TreeRoot(treeRoot),
     TreeNodes({treeNodes}) 
@@ -767,13 +767,13 @@ TString TOpCBOTree::ToString(TExprContext& ctx) {
  * OpRoot operator methods
  */
 
-TOpRoot::TOpRoot(std::shared_ptr<IOperator> input, TPositionHandle pos, const TVector<TString>& columnOrder) : 
+TOpRoot::TOpRoot(TIntrusivePtr<IOperator> input, TPositionHandle pos, const TVector<TString>& columnOrder) : 
     IUnaryOperator(EOperator::Root, pos, input), 
     ColumnOrder(columnOrder) {}
 
 TVector<TInfoUnit> TOpRoot::GetOutputIUs() { return GetInput()->GetOutputIUs(); }
 
-void TOpRoot::ComputeParentsRec(std::shared_ptr<IOperator> op, std::shared_ptr<IOperator> parent, ui32 parentChildIndex) const {
+void TOpRoot::ComputeParentsRec(TIntrusivePtr<IOperator> op, TIntrusivePtr<IOperator> parent, ui32 parentChildIndex) const {
     if (parent) {
         const auto parentEntry = std::make_pair(parent.get(), parentChildIndex);
         const auto it = std::find_if(op->Parents.begin(), op->Parents.end(), [&parentEntry](const std::pair<IOperator*, ui32>& opParent) {
@@ -792,7 +792,7 @@ void TOpRoot::ComputeParents() {
     for (auto it : *this) {
         it.Current->Parents.clear();
     }
-    std::shared_ptr<TOpRoot> noParent = nullptr;
+    TIntrusivePtr<TOpRoot> noParent = nullptr;
     ComputeParentsRec(GetInput(), noParent, 0);
 
     const auto subPlans = PlanProps.Subplans.Get();
@@ -816,7 +816,7 @@ TString TOpRoot::PlanToString(TExprContext& ctx, ui32 printOptions) {
     return builder;
 }
 
-void TOpRoot::PlanToStringRec(std::shared_ptr<IOperator> op, TExprContext& ctx, TStringBuilder &builder, int tabs, ui32 printOptions) const {
+void TOpRoot::PlanToStringRec(TIntrusivePtr<IOperator> op, TExprContext& ctx, TStringBuilder &builder, int tabs, ui32 printOptions) const {
     TStringBuilder tabString;
     for (int i = 0; i < tabs; i++) {
         tabString << "  ";
