@@ -98,7 +98,7 @@ public:
         Y_UNUSED(ctx);
     }
 
-    virtual void ReplaceChild(std::shared_ptr<IOperator> oldChild, std::shared_ptr<IOperator> newChild);
+    virtual void ReplaceChild(const std::shared_ptr<IOperator> oldChild, const std::shared_ptr<IOperator> newChild);
 
     /***
      * Rename information units of this operator using a specified mapping
@@ -124,7 +124,7 @@ public:
     TPositionHandle Pos;
     const TTypeAnnotationNode* Type = nullptr;
     TVector<std::shared_ptr<IOperator>> Childrens;
-    TVector<std::pair<std::weak_ptr<IOperator>, ui32>> Parents;
+    TVector<std::pair<IOperator*, ui32>> Parents;
 };
 
 /***
@@ -547,7 +547,7 @@ public:
     }
 
 private:
-    void ComputeParentsRec(std::shared_ptr<IOperator> op, std::shared_ptr<IOperator> parent, int parentChildIndex) const;
+    void ComputeParentsRec(std::shared_ptr<IOperator> op, std::shared_ptr<IOperator> parent, ui32 parentChildIndex) const;
 };
 
 } // namespace NKqp

@@ -25,7 +25,7 @@ const TTypeAnnotationNode* IOperator::GetIUType(const TInfoUnit& iu) {
     return structType->FindItemType(iu.GetFullName());
 }
 
-void IOperator::ReplaceChild(std::shared_ptr<IOperator> oldChild, std::shared_ptr<IOperator> newChild) {
+void IOperator::ReplaceChild(const std::shared_ptr<IOperator> oldChild, const std::shared_ptr<IOperator> newChild) {
     for (size_t i = 0; i < Childrens.size(); i++) {
         if (Childrens[i] == oldChild) {
             Childrens[i] = newChild;
@@ -773,11 +773,11 @@ TOpRoot::TOpRoot(std::shared_ptr<IOperator> input, TPositionHandle pos, const TV
 
 TVector<TInfoUnit> TOpRoot::GetOutputIUs() { return GetInput()->GetOutputIUs(); }
 
-void TOpRoot::ComputeParentsRec(std::shared_ptr<IOperator> op, std::shared_ptr<IOperator> parent, int parentChildIndex) const {
+void TOpRoot::ComputeParentsRec(std::shared_ptr<IOperator> op, std::shared_ptr<IOperator> parent, ui32 parentChildIndex) const {
     if (parent) {
-        const auto parentEntry = std::make_pair(std::weak_ptr<IOperator>(parent), parentChildIndex);
-        const auto it = std::find_if(op->Parents.begin(), op->Parents.end(), [&parentEntry](const std::pair<std::weak_ptr<IOperator>, int>& opParent) {
-            return opParent.first.lock() == parentEntry.first.lock() && opParent.second == parentEntry.second;
+        const auto parentEntry = std::make_pair(parent.get(), parentChildIndex);
+        const auto it = std::find_if(op->Parents.begin(), op->Parents.end(), [&parentEntry](const std::pair<IOperator*, ui32>& opParent) {
+            return opParent.first == parentEntry.first && opParent.second == parentEntry.second;
         });
         if (it == op->Parents.end()) {
             op->Parents.push_back(parentEntry);
@@ -792,7 +792,7 @@ void TOpRoot::ComputeParents() {
     for (auto it : *this) {
         it.Current->Parents.clear();
     }
-    std::shared_ptr<TOpRoot> noParent;
+    std::shared_ptr<TOpRoot> noParent = nullptr;
     ComputeParentsRec(GetInput(), noParent, 0);
 
     const auto subPlans = PlanProps.Subplans.Get();
