@@ -79,7 +79,7 @@ void Scopes::ComputeScopesRec(std::shared_ptr<IOperator> &op, int &currScope) {
 
     ScopeMap.at(currScope).Operators.push_back(op);
     RevScopeMap[op] = currScope;
-    for (auto c : op->Children) {
+    for (auto c : op->Childrens) {
         ComputeScopesRec(c, currScope);
     }
 }

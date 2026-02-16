@@ -70,7 +70,7 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
             auto filter = CastOperator<TOpFilter>(op);
 
             if (!currentStageBody) {
-                auto [stageArg, stageInput] = graph.GenerateStageInput(stageInputCounter, root.Node, ctx, *op->Children[0]->Props.StageId);
+                auto [stageArg, stageInput] = graph.GenerateStageInput(stageInputCounter, root.Node, ctx, *op->Childrens[0]->Props.StageId);
                 stageArgs[opStageId].push_back(stageArg);
                 currentStageBody = stageInput;
             }
@@ -84,7 +84,7 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
             auto map = CastOperator<TOpMap>(op);
 
             if (!currentStageBody) {
-                auto [stageArg, stageInput] = graph.GenerateStageInput(stageInputCounter, root.Node, ctx, *op->Children[0]->Props.StageId);
+                auto [stageArg, stageInput] = graph.GenerateStageInput(stageInputCounter, root.Node, ctx, *op->Childrens[0]->Props.StageId);
                 stageArgs[opStageId].push_back(stageArg);
                 currentStageBody = stageInput;
             }
@@ -100,7 +100,7 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
             YQL_CLOG(TRACE, CoreDq) << "Converted Map " << opStageId;
         } else if (op->Kind == EOperator::Limit) {
             if (!currentStageBody) {
-                auto [stageArg, stageInput] = graph.GenerateStageInput(stageInputCounter, root.Node, ctx, *op->Children[0]->Props.StageId);
+                auto [stageArg, stageInput] = graph.GenerateStageInput(stageInputCounter, root.Node, ctx, *op->Childrens[0]->Props.StageId);
                 stageArgs[opStageId].push_back(stageArg);
                 currentStageBody = stageInput;
             }
@@ -120,7 +120,7 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
         } else if (op->Kind == EOperator::Sort) {
             auto sort = CastOperator<TOpSort>(op);
             if (!currentStageBody) {
-                auto [stageArg, stageInput] = graph.GenerateStageInput(stageInputCounter, root.Node, ctx, *op->Children[0]->Props.StageId);
+                auto [stageArg, stageInput] = graph.GenerateStageInput(stageInputCounter, root.Node, ctx, *op->Childrens[0]->Props.StageId);
                 stageArgs[opStageId].push_back(stageArg);
                 currentStageBody = stageInput;
             }

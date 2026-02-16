@@ -727,7 +727,7 @@ TOpCBOTree::TOpCBOTree(std::shared_ptr<IOperator> treeRoot, TPositionHandle pos)
     TreeRoot(treeRoot),
     TreeNodes({treeRoot}) 
 {
-    Childrenss = treeRoot->Childrenss;
+    Childrens = treeRoot->Childrens;
 }
 
 TOpCBOTree::TOpCBOTree(std::shared_ptr<IOperator> treeRoot, TVector<std::shared_ptr<IOperator>> treeNodes, TPositionHandle pos) :
@@ -736,9 +736,9 @@ TOpCBOTree::TOpCBOTree(std::shared_ptr<IOperator> treeRoot, TVector<std::shared_
     TreeNodes({treeNodes}) 
 {
     for (const auto& n : treeNodes) {
-        for (const auto& c : n->Childrenss) {
+        for (const auto& c : n->Childrens) {
             if (std::find(treeNodes.begin(), treeNodes.end(), c) == treeNodes.end()) {
-                Childrenss.push_back(c);
+                Childrens.push_back(c);
             }
         }
     }
@@ -783,8 +783,8 @@ void TOpRoot::ComputeParentsRec(std::shared_ptr<IOperator> op, std::shared_ptr<I
             op->Parents.push_back(parentEntry);
         }
     }
-    for (size_t childIndex = 0; childIndex < op->Childrenss.size(); ++childIndex) {
-        ComputeParentsRec(op->Childrenss[childIndex], op, childIndex);
+    for (size_t childIndex = 0; childIndex < op->Childrens.size(); ++childIndex) {
+        ComputeParentsRec(op->Childrens[childIndex], op, childIndex);
     }
 }
 
@@ -795,8 +795,9 @@ void TOpRoot::ComputeParents() {
     std::shared_ptr<TOpRoot> noParent;
     ComputeParentsRec(GetInput(), noParent, 0);
 
-    for (auto subplan : PlanProps.Subplans.Get()) {
-        ComputeParentsRec(subplan.Plan, noParent, 0);
+    const auto subPlans = PlanProps.Subplans.Get();
+    for (const auto& subPlan : subPlans) {
+        ComputeParentsRec(subPlan.Plan, noParent, 0);
     }
 }
 
@@ -835,7 +836,7 @@ void TOpRoot::PlanToStringRec(std::shared_ptr<IOperator> op, TExprContext& ctx, 
         builder << ", Cost: " << (op->Props.Cost.has_value() ? std::to_string(*op->Props.Cost) : "None") << "\n";
     }
     
-    for (auto c : op->Childrenss) {
+    for (auto c : op->Childrens) {
         PlanToStringRec(c, ctx, builder, tabs + 1, printOptions);
     }
 }

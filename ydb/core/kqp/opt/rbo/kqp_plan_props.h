@@ -23,12 +23,12 @@ struct TSubplanEntry {
 
 struct TSubplans {
 
-    void Add(TInfoUnit iu, TSubplanEntry entry) {
+    void Add(const TInfoUnit& iu, const TSubplanEntry& entry) {
         OrderedList.push_back(iu);
         PlanMap.insert({iu, entry});
     }
 
-    void Replace(TInfoUnit iu, std::shared_ptr<IOperator> op) {
+    void Replace(const TInfoUnit& iu, std::shared_ptr<IOperator> op) {
         auto entry = PlanMap.at(iu);
         entry.Plan = op;
         PlanMap.erase(iu);
@@ -37,13 +37,13 @@ struct TSubplans {
 
     TVector<TSubplanEntry> Get() {
         TVector<TSubplanEntry> result;
-        for (auto iu : OrderedList) {
+        for (const auto& iu : OrderedList) {
             result.push_back(PlanMap.at(iu));
         }
         return result;
     }
 
-    void Remove(TInfoUnit iu) {
+    void Remove(const TInfoUnit& iu) {
         std::erase(OrderedList, iu);
         PlanMap.erase(iu);
     }

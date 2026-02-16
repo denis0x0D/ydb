@@ -33,7 +33,7 @@ bool TAssignStagesRule::MatchAndApply(std::shared_ptr<IOperator> &input, TRBOCon
         return false;
     }
 
-    for (const auto& child : input->Children) {
+    for (const auto& child : input->Childrens) {
         if (!child->Props.StageId.has_value()) {
             YQL_CLOG(TRACE, CoreDq) << "Assign stages: " << nodeName << " child with unassigned stage";
             return false;

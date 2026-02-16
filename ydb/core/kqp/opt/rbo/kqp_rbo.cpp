@@ -72,7 +72,7 @@ void TRuleBasedStage::RunStage(TOpRoot& root, TRBOContext& ctx) {
                     YQL_CLOG(TRACE, CoreDq) << "Applied rule:" << rule->RuleName;
 
                     if (iter.Parent) {
-                        iter.Parent->Children[iter.ChildIndex] = op;
+                        iter.Parent->Childrens[iter.ChildIndex] = op;
                     } else if (!iter.SubplanIU) {
                         root.SetInput(op);
                     } else {

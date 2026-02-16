@@ -36,7 +36,7 @@ std::shared_ptr<TJoinOptimizerNode> ConvertJoinTree(std::shared_ptr<TOpCBOTree>&
     THashMap<IOperator*, std::shared_ptr<IBaseOptimizerNode>> nodeMap;
 
     // Build rels for CBO. Rel contains a set of aliases and statistics object
-    for (auto child : cboTree->Children) {
+    for (auto child : cboTree->Childrens) {
 
         TVector<TString> childAliases;
         auto childIUs = child->GetOutputIUs();
@@ -160,7 +160,7 @@ std::shared_ptr<IOperator> TOptimizeCBOTreeRule::SimpleMatchAndApply(const std::
     auto cboTree = CastOperator<TOpCBOTree>(input);
 
     // Check that all inputs have statistics
-    for (auto c : cboTree->Children) {
+    for (auto c : cboTree->Childrens) {
         if (!c->Props.Statistics.has_value()) {
             ctx.ExprCtx.AddWarning(
                 YqlIssue(ctx.ExprCtx.GetPosition(cboTree->Pos), TIssuesIds::CBO_MISSING_TABLE_STATS,

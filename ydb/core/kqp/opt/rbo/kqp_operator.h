@@ -114,6 +114,7 @@ public:
     bool IsSingleConsumer() {
         return Parents.size() <= 1;
     }
+
     const TTypeAnnotationNode* GetTypeAnn() {
         return Type;
     }
@@ -123,7 +124,7 @@ public:
     TPositionHandle Pos;
     const TTypeAnnotationNode* Type = nullptr;
     TVector<std::shared_ptr<IOperator>> Childrens;
-    TVector<std::pair<std::weak_ptr<IOperator>, int>> Parents;
+    TVector<std::pair<std::weak_ptr<IOperator>, ui32>> Parents;
 };
 
 /***
