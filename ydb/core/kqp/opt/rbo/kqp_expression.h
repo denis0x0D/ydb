@@ -103,10 +103,10 @@ class TJoinCondition {
 };
 
 // Create an expression that accesses a single column
-TExpression MakeColumnAccess(TInfoUnit column, TPositionHandle pos, TExprContext* ctx, TPlanProps* props = nullptr);
+TExpression MakeColumnAccess(const TInfoUnit& column, TPositionHandle pos, TExprContext* ctx, TPlanProps* props = nullptr);
 
 // Create a constant expression. Constant expressions don't need plan properties
-TExpression MakeConstant(TString type, TString value, TPositionHandle pos, TExprContext* ctx);
+TExpression MakeConstant(const TString& type, const TString& value, TPositionHandle pos, TExprContext* ctx);
 
 // Create. a null expression of a specific type, also doesn't need plan properties
 TExpression MakeNothing(TPositionHandle pos, const TTypeAnnotationNode* type, TExprContext* ctx);
@@ -116,7 +116,7 @@ TExpression MakeNothing(TPositionHandle pos, const TTypeAnnotationNode* type, TE
 TExpression MakeConjunction(const TVector<TExpression>& vec, bool pgSyntax = false);
 
 // Make a binary predicate with an arbitrary callable, extract context and properties from one of the arguments
-TExpression MakeBinaryPredicate(TString callable, const TExpression& left, const TExpression& right);
+TExpression MakeBinaryPredicate(const TString& callable, const TExpression& left, const TExpression& right);
 
 // Get all members from a expression node
 void GetAllMembers(TExprNode::TPtr node, TVector<TInfoUnit>& IUs);

@@ -18,9 +18,9 @@ using namespace NKikimr::NKqp;
 // However, the same alias can appear multiple times in a query, but might already be out of scope
 // So we first collect all join conditions and fetch aliases and mappings only for the columns used in join conditions
 
-TIntrusivePtr<TJoinOptimizerNode> ConvertJoinTree(TIntrusivePtr<TOpCBOTree>& cboTree, TVector<TIntrusivePtr<TRelOptimizerNode>>& rels) {
+std::shared_ptr<TJoinOptimizerNode> ConvertJoinTree(TIntrusivePtr<TOpCBOTree>& cboTree, TVector<std::shared_ptr<TRelOptimizerNode>>& rels) {
     THashSet<TInfoUnit, TInfoUnit::THashFunction> allJoinColumns;
-    TIntrusivePtr<TJoinOptimizerNode> result;
+    std::shared_ptr<TJoinOptimizerNode> result;
 
     auto lineage = cboTree->TreeRoot->Props.Metadata->ColumnLineage;
     int fakeAliasId = 0;
@@ -33,7 +33,7 @@ TIntrusivePtr<TJoinOptimizerNode> ConvertJoinTree(TIntrusivePtr<TOpCBOTree>& cbo
         }
     }
 
-    THashMap<IOperator*, TIntrusivePtr<IBaseOptimizerNode>> nodeMap;
+    THashMap<IOperator*, std::shared_ptr<IBaseOptimizerNode>> nodeMap;
 
     // Build rels for CBO. Rel contains a set of aliases and statistics object
     for (auto child : cboTree->Childrens) {
@@ -62,7 +62,7 @@ TIntrusivePtr<TJoinOptimizerNode> ConvertJoinTree(TIntrusivePtr<TOpCBOTree>& cbo
         }
 
         auto stats = BuildOptimizerStatistics(child->Props, true, mappedKeyColumns);
-        auto relNode = MakeIntrusive<TRBORelOptimizerNode>(childAliases, stats, child);
+        auto relNode = std::make_shared<TRBORelOptimizerNode>(childAliases, stats, child);
         rels.push_back(relNode);
         nodeMap.insert({child.get(), relNode});
     }
@@ -82,7 +82,7 @@ TIntrusivePtr<TJoinOptimizerNode> ConvertJoinTree(TIntrusivePtr<TOpCBOTree>& cbo
             rightKeys.push_back(TJoinColumn(mappedRightKey.GetAlias(), mappedRightKey.GetColumnName()));
         }
 
-        result = MakeIntrusive<TJoinOptimizerNode>(leftNode,
+        result = std::make_shared<TJoinOptimizerNode>(leftNode,
             rightNode,
             leftKeys,
             rightKeys,
@@ -150,8 +150,8 @@ TIntrusivePtr<IOperator> TOptimizeCBOTreeRule::SimpleMatchAndApply(const TIntrus
         return input;
     }
 
-    auto& config = ctx.KqpCtx.Config;
-    auto optLevel = Config->CostBasedOptimizationLevel.Get().GetOrElse(config->GetDefaultCostBasedOptimizationLevel());
+    auto& Config = ctx.KqpCtx.Config;
+    auto optLevel = Config->CostBasedOptimizationLevel.Get().GetOrElse(Config->GetDefaultCostBasedOptimizationLevel());
 
     if (optLevel <= 1) {
         return input;

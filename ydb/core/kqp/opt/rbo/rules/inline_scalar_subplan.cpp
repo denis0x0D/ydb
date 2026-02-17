@@ -27,8 +27,8 @@ bool TInlineScalarSubplanRule::MatchAndApply(TIntrusivePtr<IOperator> &input, TR
     auto subplanResIU = subplan->GetOutputIUs()[0];
     auto subplanResType = subplan->GetIUType(subplanResIU);
 
-    auto unaryOp = std::dynamic_pointer_cast<IUnaryOperator>(input);
-    Y_ENSURE(unaryOp);
+    Y_ENSURE(MatchOperator<IUnaryOperator>(input));
+    auto unaryOp = CastOperator<IUnaryOperator>(input);
 
     auto child = unaryOp->GetInput();
 
