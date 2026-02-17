@@ -128,7 +128,7 @@ bool TAssignStagesRule::MatchAndApply(TIntrusivePtr<IOperator> &input, TRBOConte
         auto newStageId = props.StageGraph.AddStage();
         input->Props.StageId = newStageId;
         auto prevStageId = *(sort->GetInput()->Props.StageId);
-        auto conn = std::shared_ptr<TUnionAllConnection>(props.StageGraph.GetStorageType(prevStageId));
+        auto conn = std::make_shared<TUnionAllConnection>(props.StageGraph.GetStorageType(prevStageId));
         props.StageGraph.Connect(prevStageId, newStageId,conn);
     }
     else if (input->Kind == EOperator::Limit) {
@@ -136,7 +136,7 @@ bool TAssignStagesRule::MatchAndApply(TIntrusivePtr<IOperator> &input, TRBOConte
         auto newStageId = props.StageGraph.AddStage();
         input->Props.StageId = newStageId;
         auto prevStageId = *(limit->GetInput()->Props.StageId);
-        auto conn = std::shared_ptr<TUnionAllConnection>(props.StageGraph.GetStorageType(prevStageId));
+        auto conn = std::make_shared<TUnionAllConnection>(props.StageGraph.GetStorageType(prevStageId));
         props.StageGraph.Connect(prevStageId, newStageId,conn);
     } else if (input->Kind == EOperator::UnionAll) {
         auto unionAll = CastOperator<TOpUnionAll>(input);

@@ -21,11 +21,13 @@ TExprNode::TPtr PlanConverter::RemoveSubplans(TExprNode::TPtr node) {
 
         for (auto link : sublinks) {
             auto sublinkVar = TInfoUnit("_rbo_arg_" + std::to_string(PlanProps.InternalVarIdx++), true);
+            // clang-format off
             auto member = Build<TCoMember>(Ctx, lambda.Pos())
                     .Struct(lambda.Args().Arg(0).Ptr())
                     .Name<TCoAtom>().Value(sublinkVar.GetFullName()).Build()
                     .Done().Ptr();
             replaceMap[link.Get()] = member;
+            // clang-format on
             auto subplan = ExprNodeToOperator(TKqpSublinkBase(link).Subquery().Ptr());
             TSubplanEntry entry;
             if (TKqpExprSublink::Match(link.Get())) {
@@ -49,10 +51,12 @@ TExprNode::TPtr PlanConverter::RemoveSubplans(TExprNode::TPtr node) {
         TExprNode::TPtr newLambdaBody;
         RemapExpr(lambdaBody, newLambdaBody, replaceMap, Ctx, settings);
 
+        // clang-format off
         return Build<TCoLambda>(Ctx, lambda.Pos())
             .Args(lambda.Args())
             .Body(newLambdaBody)
             .Done().Ptr();
+        // clang-format on
     }
 }
 

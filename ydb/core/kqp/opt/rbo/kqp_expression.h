@@ -37,7 +37,7 @@ class TExpression {
     bool IsColumnAccess() const;
 
     // Check if the expression is a just a single callable on top of a column expression
-    bool IsSingleCallable(THashSet<TString> allowedCallables) const;
+    bool IsSingleCallable(const THashSet<TString>& allowedCallables) const;
 
     // Check if the expression is a cast
     bool IsCast() const;
@@ -119,13 +119,13 @@ TExpression MakeConjunction(const TVector<TExpression>& vec, bool pgSyntax = fal
 TExpression MakeBinaryPredicate(TString callable, const TExpression& left, const TExpression& right);
 
 // Get all members from a expression node
-void GetAllMembers(TExprNode::TPtr node, TVector<TInfoUnit> &IUs);
+void GetAllMembers(TExprNode::TPtr node, TVector<TInfoUnit>& IUs);
 
 // Get all members from an expression node, but also mark subplan context separately and optionally include 
 // dependencies in correlated subqueries
-void GetAllMembers(TExprNode::TPtr node, TVector<TInfoUnit> &IUs, const TPlanProps& props, bool withSubplanContext, bool withDependencies);
+void GetAllMembers(TExprNode::TPtr node, TVector<TInfoUnit>& IUs, const TPlanProps& props, bool withSubplanContext, bool withDependencies);
 
-TString PrintRBOExpression(TExprNode::TPtr expr, TExprContext & ctx);
+TString PrintRBOExpression(TExprNode::TPtr expr, TExprContext& ctx);
 
 }
 }

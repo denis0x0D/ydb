@@ -37,7 +37,7 @@ TIntrusivePtr<TOpFilter> FuseFilters(const TIntrusivePtr<TOpFilter>& top, const 
     TVector<TExpression> bottomConjuncts = bottom->FilterExpr.SplitConjunct();
     conjuncts.insert(conjuncts.begin(), bottomConjuncts.begin(), bottomConjuncts.end());
 
-    return make_shared<TOpFilter>(bottom->GetInput(), top->Pos, MakeConjunction(conjuncts, pgSyntax));
+    return MakeIntrusive<TOpFilter>(bottom->GetInput(), top->Pos, MakeConjunction(conjuncts, pgSyntax));
 }
 
 } // namespace

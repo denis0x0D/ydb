@@ -98,7 +98,7 @@ TIntrusivePtr<TJoinOptimizerNode> ConvertJoinTree(TIntrusivePtr<TOpCBOTree>& cbo
     return result;
 }
 
-TIntrusivePtr<IOperator> ConvertOptimizedTree(TIntrusivePtr<IBaseOptimizerNode> tree, const TColumnLineage& lineage, TPositionHandle pos) {
+TIntrusivePtr<IOperator> ConvertOptimizedTree(std::shared_ptr<IBaseOptimizerNode> tree, const TColumnLineage& lineage, TPositionHandle pos) {
     if (tree->Kind == RelNodeType) {
         auto rel = std::static_pointer_cast<TRBORelOptimizerNode>(tree);
         return rel->Op;
@@ -150,8 +150,8 @@ TIntrusivePtr<IOperator> TOptimizeCBOTreeRule::SimpleMatchAndApply(const TIntrus
         return input;
     }
 
-    auto & Config = ctx.KqpCtx.Config;
-    auto optLevel = Config->CostBasedOptimizationLevel.Get().GetOrElse(Config->GetDefaultCostBasedOptimizationLevel());
+    auto& config = ctx.KqpCtx.Config;
+    auto optLevel = Config->CostBasedOptimizationLevel.Get().GetOrElse(config->GetDefaultCostBasedOptimizationLevel());
 
     if (optLevel <= 1) {
         return input;
@@ -171,13 +171,13 @@ TIntrusivePtr<IOperator> TOptimizeCBOTreeRule::SimpleMatchAndApply(const TIntrus
         }
     }
 
-    TVector<TIntrusivePtr<TRelOptimizerNode>> rels;
+    TVector<std::shared_ptr<TRelOptimizerNode>> rels;
     auto joinTree = ConvertJoinTree(cboTree, rels);
 
     bool allRowStorage = std::any_of(
         rels.begin(),
         rels.end(),
-        [](TIntrusivePtr<TRelOptimizerNode>& r) {return r->Stats.StorageType==EStorageType::RowStorage; });
+        [](std::shared_ptr<TRelOptimizerNode>& r) {return r->Stats.StorageType==EStorageType::RowStorage; });
 
     if (optLevel == 2 && allRowStorage) {
         return input;
