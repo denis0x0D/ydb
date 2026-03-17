@@ -49,7 +49,7 @@ bool TInlineScalarSubplanRule::MatchAndApply(TIntrusivePtr<IOperator> &input, TR
 
         auto conjuncts = filter->FilterExpr.SplitConjunct();
 
-        for (const auto & conj : conjuncts) {
+        for (const auto& conj : conjuncts) {
             if (!conj.MaybeJoinCondition()) {
                 continue;
             }
