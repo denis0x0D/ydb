@@ -1062,21 +1062,26 @@ void ProcessAggregationsInResultItems(TExprNode::TPtr result, const TStructExprT
 }
 
 TExprNode::TPtr BuildLimit(TExprNode::TPtr input, TExprNode::TPtr limit, TExprContext& ctx, bool pgSyntax, TPositionHandle pos) {
-    if (limit->ChildrenSize() < 2 || pgSyntax) {
+    if (pgSyntax) {
         return input;
     }
+    Y_ENSURE(input->ChildrenSize() > 1);
 
     auto count = limit->ChildPtr(1);
     if (count->IsCallable("Just")) {
         count = count->ChildPtr(0);
     }
 
+    if (count->IsCallable("Convert")) {
+        count = count->ChildPtr(0);
+    }
+
+    auto maybeData = TExprBase(count).Maybe<TCoDataCtor>();
+    Y_ENSURE(maybeData.IsValid(), "Invalid format for limit condition.");
+
     // clang-format off
-    count = Build<TCoConvert>(ctx, pos)
-        .Input(count)
-        .Type<TCoAtom>()
-            .Value("Uint64")
-        .Build()
+    count = Build<TCoUint64>(ctx, pos)
+        .Literal(maybeData.Cast().Literal())
     .Done().Ptr();
 
     return Build<TKqpOpLimit>(ctx, pos)
