@@ -9,7 +9,6 @@ const THashSet<TString> AllowedAggFunction{"sum", "min", "max"};
 bool CanPushAggregateToStage(const TIntrusivePtr<TOpAggregate>& aggregate, const TIntrusivePtr<IOperator>& input) {
     const auto aggregateStageId = *aggregate->Props.StageId;
     const auto inputStageId = *input->Props.StageId;
-    // FIXME: Currently we cannot push to source stage.
     return aggregateStageId != inputStageId && input->IsSingleConsumer() && input->GetKind() != EOperator::Source;
 }
 
@@ -58,6 +57,31 @@ TIntrusivePtr<TOpAggregate> EmitFinalAndIntermediateAggregates(const TIntrusiveP
     return MakeIntrusive<TOpAggregate>(intermediate, finalTraits, aggKeys, EOpPhase::Final, distinctAll, props, pos);
 }
 
+bool CanEliminateMapAndPushToReadStage(const TIntrusivePtr<TOpAggregate>& aggregate, const TIntrusivePtr<IOperator>& input, const TPlanProps& props) {
+    const auto mapStageId = *input->Props.StageId;
+    const auto aggregateStageId = *aggregate->Props.StageId;
+    if (mapStageId != aggregateStageId) {
+        return false;
+    }
+    if (input->GetKind() != EOperator::Map || !input->IsSingleConsumer()) {
+        return false;
+    }
+    const auto map = CastOperator<TOpMap>(input);
+    const auto mapInput = map->GetInput();
+    if (mapInput->GetKind() != EOperator::Source || !mapInput->IsSingleConsumer()) {
+        return false;
+    }
+
+    for (const auto& element : map->GetMapElements()) {
+        if (!element.IsRename() || (element.GetRename().GetFullName() != element.GetElementName().GetFullName())) {
+            return false;
+        }
+    }
+
+    const auto read = CastOperator<TOpRead>(mapInput);
+    return read->GetTableStorageType() == NYql::EStorageType::ColumnStorage && props.StageGraph.IsPossibleToEraseStage(mapStageId);
+}
+
 } // namespace
 
 TIntrusivePtr<IOperator> TPropagateAggregateThroughStageRule::SimpleMatchAndApply(const TIntrusivePtr<IOperator>& input, TRBOContext& ctx, TPlanProps& props) {
@@ -79,8 +103,19 @@ TIntrusivePtr<IOperator> TPropagateAggregateThroughStageRule::SimpleMatchAndAppl
         props.StageId = aggInput->Props.StageId;
         return MakeIntrusive<TOpAggregate>(aggInput, aggregate->GetAggregationTraits(), aggregate->GetKeyColumns(), EOpPhase::Intermediate,
                                            aggregate->IsDistinctAll(), props, aggregate->Pos);
+    } else if (CanEliminateMapAndPushToReadStage(aggregate, aggInput, props)) {
+        const auto read = CastOperator<TOpRead>(CastOperator<TOpMap>(aggInput)->GetInput());
+        //const auto aggregateStageId = aggregate->Props.StageId;
+        const auto readStageId = read->Props.StageId;
+        const auto newRead = MakeIntrusive<TOpRead>(read->Alias, read->Columns, read->OutputIUs, read->StorageType, read->TableCallable, read->OlapFilterLambda,
+                                                    read->Limit, read->GetRanges(), read->OriginalPredicate, read->SortDir, read->Props, read->Pos);
+        const auto newAggregate = MakeIntrusive<TOpAggregate>(read, aggregate->GetAggregationTraits(), aggregate->GetKeyColumns(), EOpPhase::Intermediate,
+                                                              aggregate->IsDistinctAll(), aggregate->Props, aggregate->Pos);
+        newAggregate->Props.StageId = readStageId;
+        const auto newConnection = MakeIntrusive<TShuffleConnection>(newAggregate->GetKeyColumns(), /*ouputIndex=*/0U);
+        props.StageGraph.EraseStage(*aggInput->Props.StageId, newConnection);
+        return newAggregate;
     }
-
     return input;
 }
 } // namespace NKqp

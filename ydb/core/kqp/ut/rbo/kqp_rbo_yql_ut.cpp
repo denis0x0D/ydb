@@ -190,7 +190,7 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
     }
 
     Y_UNIT_TEST_TWIN(Filter, ColumnStore) {
-        TestFilter(true);
+        TestFilter(ColumnStore);
     }
 
     Y_UNIT_TEST(Explain) {

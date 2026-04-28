@@ -116,5 +116,58 @@ void TStageGraph::TopologicalSort() {
 
     StageIds.swap(sortedStages);
 }
+
+bool TStageGraph::IsPossibleToEraseStage(ui32 stageId) const {
+    const auto it = std::find(StageIds.begin(), StageIds.end(), stageId);
+    if (it == StageIds.end()) {
+        return false;
+    }
+    const auto inputsIt = StageInputs.find(stageId);
+    if (inputsIt == StageInputs.end() || inputsIt->second.size() != 1) {
+        return false;
+    }
+    const auto inputOutputIt = StageOutputs.find(inputsIt->second.front());
+    if (inputOutputIt == StageOutputs.end() || inputOutputIt->second.size() != 1) {
+        return false;
+    }
+
+    const auto outputsIt = StageOutputs.find(stageId);
+    if (outputsIt == StageOutputs.end() || outputsIt->second.size() != 1) {
+        return false;
+    }
+    const auto outputInputIt = StageInputs.find(outputsIt->second.front());
+    if (outputInputIt == StageInputs.end() || outputInputIt->second.size() != 1) {
+        return false;
+    }
+    return true;
+}
+
+void TStageGraph::EraseStage(ui32 stageId, TIntrusivePtr<TConnection> newConnection) {
+    const auto stageIdIt = std::find(StageIds.begin(), StageIds.end(), stageId);
+    Y_ENSURE(stageIdIt != StageIds.end());
+    const auto inputsIt = StageInputs.find(stageId);
+    Y_ENSURE(inputsIt != StageInputs.end() && inputsIt->second.size() == 1);
+    const auto outputsIt = StageOutputs.find(stageId);
+    Y_ENSURE(outputsIt != StageOutputs.end() && outputsIt->second.size() == 1);
+
+    const auto inputStageId = inputsIt->second.front();
+    const auto outputStageId = outputsIt->second.front();
+
+    const auto inputConnections = Connections.find(std::make_pair(inputStageId, stageId));
+    Y_ENSURE(inputConnections != Connections.end() && inputConnections->second.size() == 1);
+
+    const auto outputConnections = Connections.find(std::make_pair(stageId, outputStageId));
+    Y_ENSURE(outputConnections != Connections.end() && outputConnections->second.size() == 1);
+
+    StageIds.erase(stageIdIt);
+    StageInputs.erase(stageId);
+    StageOutputs.erase(stageId);
+    Connections.erase(std::make_pair(inputStageId, stageId));
+    Connections.erase(std::make_pair(stageId, outputStageId));
+
+    StageOutputs[inputStageId] = {outputStageId};
+    StageInputs[outputStageId] = {inputStageId};
+    Connections[std::make_pair(inputStageId, outputStageId)] = {newConnection};
+}
 }
 }

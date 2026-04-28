@@ -189,7 +189,12 @@ struct TStageGraph {
         connections.push_back(connection);
     }
 
-    TVector<TIntrusivePtr<TConnection>> GetConnections(ui32 from, ui32 to) { return Connections.at(std::make_pair(from, to)); }
+    bool IsPossibleToEraseStage(ui32 stageId) const;
+    void EraseStage(ui32 stageId, TIntrusivePtr<TConnection> newConnection);
+
+    TVector<TIntrusivePtr<TConnection>> GetConnections(ui32 from, ui32 to) {
+        return Connections.at(std::make_pair(from, to));
+    }
 
     /**
      * Generate an expression for stage inputs
