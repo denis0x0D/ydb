@@ -81,6 +81,7 @@ TVector<TExprNode::TPtr> TPhysicalQueryBuilder::BuildPhysicalStageGraph() {
                     .Done().Ptr();
                     // clang-format on
                     stage = ctx.ReplaceNode(std::move(stage), read.Ref(), newRead);
+                    phyStages.back() = stage;
                 }
             }
         }
@@ -154,12 +155,18 @@ bool TPhysicalQueryBuilder::IsSingleTaskConnection(const TExprBase& input) const
 TExprNode::TPtr TPhysicalQueryBuilder::GetFinalStage(const TExprNode::TPtr& stage) const {
     auto& ctx = RBOCtx.ExprCtx;
     TExprNode::TPtr finalStage;
-    bool needFinalUnionStage = false;
+
     // Final stage, which is input for DqCnResult, should have only one 1 task.
-    for (const auto& input : TDqPhyStage(stage).Inputs()) {
-        if (!IsSingleTaskConnection(input)) {
-            needFinalUnionStage = true;
-            break;
+    bool needFinalUnionStage = false;
+    const auto inputs = TDqPhyStage(stage).Inputs();
+    if (inputs.Empty()) {
+        needFinalUnionStage = true;
+    } else {
+        for (const auto& input : TDqPhyStage(stage).Inputs()) {
+            if (!IsSingleTaskConnection(input)) {
+                needFinalUnionStage = true;
+                break;
+            }
         }
     }
 
