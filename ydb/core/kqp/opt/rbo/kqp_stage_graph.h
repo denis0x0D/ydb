@@ -11,12 +11,18 @@
 namespace NKikimr::NKqp {
 
 struct TSortElement {
-    TSortElement(const TInfoUnit& column, bool asc, bool nullsFirst) : SortColumn(column), Ascending(asc), NullsFirst(nullsFirst) {}
+    TSortElement(const TInfoUnit& column, bool asc, bool nullsFirst, bool isOptional = false)
+        : SortColumn(column)
+        , Ascending(asc)
+        , NullsFirst(nullsFirst)
+        , IsOptional(isOptional) {
+    }
     TString ToString() const;
 
     TInfoUnit SortColumn;
     bool Ascending = true;
     bool NullsFirst = true;
+    bool IsOptional = false;
 };
 
 /**

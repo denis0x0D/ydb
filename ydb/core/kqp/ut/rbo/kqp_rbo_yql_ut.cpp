@@ -2155,8 +2155,6 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
         }
     }
 
-
-
     void RunTPC_YqlTest(const EBenchType type, ui32 queryId, const bool columnStore, const bool newRbo) {
         NKikimrConfig::TAppConfig appConfig;
         appConfig.MutableTableServiceConfig()->SetEnableNewRBO(newRbo);
@@ -2183,6 +2181,10 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                                 .ExtractValueSync();
             Y_ENSURE(result.IsSuccess());
         }
+    }
+
+    Y_UNIT_TEST(TPCDS_YQL_Q5) {
+       RunTPC_YqlTest(EBenchType::TPCDS, 5, true, true);
     }
 
     Y_UNIT_TEST(TPCH_YQL) {

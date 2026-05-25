@@ -420,17 +420,24 @@ TIntrusivePtr<IOperator> PlanConverter::ConvertTKqpOpSort(TExprNode::TPtr node) 
     TVector<TSortElement> sortElements;
     TVector<TMapElement> mapElements;
 
-    for (const auto& el : opSort.SortExpressions()) {
+    for (const auto& element : opSort.SortExpressions()) {
         TInfoUnit column;
+        TExprNode::TPtr body = element.Lambda().Body().Ptr();
 
-        if (auto member = el.Lambda().Body().Maybe<TCoMember>()) {
+        bool isOptional = false;
+        if (TMaybeNode<TCoJust>(body)) {
+            body = body->ChildPtr(0);
+            isOptional = true;
+        }
+
+        if (auto member = TExprBase(body).Maybe<TCoMember>()) {
             column = TInfoUnit(member.Cast().Name().StringValue());
         } else {
             TString newName = "_rbo_arg_" + std::to_string(PlanProps.InternalVarIdx++);
             column = TInfoUnit(newName);
-            mapElements.emplace_back(column, TExpression(el.Lambda().Ptr(), &Ctx));
+            mapElements.emplace_back(column, TExpression(element.Lambda().Ptr(), &Ctx));
         }
-        sortElements.push_back(TSortElement(column, el.Direction().StringValue() == "asc", el.NullsFirst().StringValue() == "first"));
+        sortElements.push_back(TSortElement(column, element.Direction().StringValue() == "asc", element.NullsFirst().StringValue() == "first", isOptional));
     }
 
     if (mapElements.size()) {

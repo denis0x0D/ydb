@@ -2981,6 +2981,7 @@ TStatus AnnotateOpLimit(const TExprNode::TPtr& input, TExprContext& ctx) {
 TStatus AnnotateOpSortElement(const TExprNode::TPtr& input, TExprContext& ctx) {
     const TTypeAnnotationNode* inputType = input->ChildPtr(TKqpOpSortElement::idx_Input)->GetTypeAnn();
     const TTypeAnnotationNode* itemType = inputType->Cast<TListExprType>()->GetItemType();
+    Cout << itemType->Cast<TStructExprType>()->ToString() << Endl;
 
     auto& lambda = input->ChildRef(TKqpOpSortElement::idx_Lambda);
     if (!UpdateLambdaAllArgumentsTypes(lambda, {itemType}, ctx)) {
@@ -2997,9 +2998,33 @@ TStatus AnnotateOpSortElement(const TExprNode::TPtr& input, TExprContext& ctx) {
 }
 
 TStatus AnnotateOpSort(const TExprNode::TPtr& input, TExprContext& ctx) {
-    Y_UNUSED(ctx);
-    const TTypeAnnotationNode* inputType = input->ChildPtr(TKqpOpSort::idx_Input)->GetTypeAnn();
-    input->SetTypeAnn(inputType);
+    auto inputType = input->ChildPtr(TKqpOpSort::idx_Input)->GetTypeAnn()->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
+    THashMap<TString, const TTypeAnnotationNode*> sortElementTypes;
+    for (const auto& sortElement : TExprBase(input).Cast<TKqpOpSort>().SortExpressions()) {
+        const auto members =
+            FindNodes(sortElement.Cast<TKqpOpSortElement>().Lambda().Body().Ptr(), [](const TExprNode::TPtr& input) { return !!TMaybeNode<TCoMember>(input); });
+        Y_ENSURE(members.size() <= 1, "Invalid number of sort elements.");
+        if (members.size() == 1) {
+            const TString name = TExprBase(members.front()).Cast<TCoMember>().Name().StringValue();
+            sortElementTypes.emplace(name, sortElement.Ptr()->GetTypeAnn());
+        }
+    }
+
+    TVector<const TItemExprType*> newItems;
+    for (const auto inputItemType : inputType->GetItems()) {
+        const auto itemType = inputItemType->GetItemType();
+        const auto itemName = inputItemType->GetName();
+        const auto it = sortElementTypes.find(itemName);
+        if (it != sortElementTypes.end() && it->second->IsOptionalOrNull() && !itemType->IsOptionalOrNull()) {
+            newItems.emplace_back(ctx.MakeType<TItemExprType>(itemName, ctx.MakeType<TOptionalExprType>(itemType)));
+        } else {
+            newItems.emplace_back(inputItemType);
+        }
+    }
+
+    auto newType = ctx.MakeType<TListExprType>(ctx.MakeType<TStructExprType>(newItems));
+    input->SetTypeAnn(newType);
+
     return TStatus::Ok;
 }
 

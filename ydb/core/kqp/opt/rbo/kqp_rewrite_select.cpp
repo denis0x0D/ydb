@@ -373,6 +373,7 @@ TExprNode::TPtr BuildSort(TExprNode::TPtr input, TExprNode::TPtr sort,
 
     for (auto sortItem : sort->Child(1)->Children()) {
         Y_ENSURE(sortItem->ChildPtr(1)->IsLambda());
+        auto sortType = sortItem->ChildPtr(0);
         auto sortLambda = TCoLambda(sortItem->ChildPtr(1));
         auto direction = sortItem->Child(2);
         auto nullsFirst = sortItem->Child(3);
@@ -388,6 +389,22 @@ TExprNode::TPtr BuildSort(TExprNode::TPtr input, TExprNode::TPtr sort,
                     .Name<TCoAtom>()
                         .Value(aggColName)
                     .Build()
+                .Build()
+            .Done();
+            // clang-format on
+        }
+
+        if (TMaybeNode<TCoStructType>(sortType) && sortType->ChildrenSize() > 0 && sortType->ChildPtr(0)->ChildrenSize() > 1) {
+            // clang-format off
+            auto body = Build<TCoJust>(ctx, input->Pos())
+                .Input(sortLambda.Body())
+            .Done();
+
+            sortLambda = Build<TCoLambda>(ctx, input->Pos())
+                .Args({"new_arg"})
+                .Body<TExprApplier>()
+                    .Apply(body)
+                    .With(sortLambda.Args().Arg(0), "new_arg")
                 .Build()
             .Done();
             // clang-format on

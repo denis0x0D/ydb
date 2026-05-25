@@ -139,6 +139,7 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
             stagePos[opStageId] = op->Pos;
             YQL_CLOG(TRACE, CoreDq) << "Converted Limit " << opStageId;
         } else if (op->Kind == EOperator::Sort) {
+            Y_ENSURE(false);
             auto sort = CastOperator<TOpSort>(op);
             if (!currentStageBody) {
                 auto [stageArg, stageInput] = graph.GenerateStageInput(stageInputCounter, op->Pos, ctx);
