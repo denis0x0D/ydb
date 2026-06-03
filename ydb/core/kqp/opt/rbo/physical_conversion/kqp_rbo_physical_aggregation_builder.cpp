@@ -113,6 +113,24 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildAvgAggregationInitialStateForO
     // clang-format on
 }
 
+TExprNode::TPtr TPhysicalAggregationBuilder::BuildVarianceAggregationInitialState(TExprNode::TPtr lambdaArg, const TTypeAnnotationNode* typeNode) {
+    Y_ENSURE(false);
+
+    TExprNode::TPtr dataTypeForAccumulator = GetDataTypeForAccumulator(typeNode);
+    // clang-format off
+    return Ctx.Builder(Pos)
+        .List()
+            .Callable(0, "SafeCast")
+                .Add(0, lambdaArg)
+                .Add(1, dataTypeForAccumulator)
+            .Seal()
+            .Callable(1, "Uint64")
+                .Atom(0, "1")
+            .Seal()
+        .Seal().Build();
+    // clang-format on
+}
+
 TExprNode::TPtr TPhysicalAggregationBuilder::GetDataTypeForSumAggregation(const TTypeAnnotationNode* itemType) const {
     Y_ENSURE(itemType);
     const auto* type = itemType;
@@ -264,6 +282,8 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildAvgAggregationUpdateStateForOp
     // clang-format on
 }
 
+
+
 TExprNode::TPtr TPhysicalAggregationBuilder::BuildAvgAggregationUpdateState(TExprNode::TPtr lambdaArgState, TExprNode::TPtr lambdaArgField,
                                                                             const TTypeAnnotationNode* typeNode) {
     TExprNode::TPtr dataTypeForAccumulator = GetDataTypeForAccumulator(typeNode);
@@ -320,6 +340,14 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildAvgAggregationUpdateState(TExp
             .Seal().Build();
         // clang-format on
     }
+}
+
+TExprNode::TPtr TPhysicalAggregationBuilder::BuildVarianceAggregationUpdateState(TExprNode::TPtr lambdaArgState, TExprNode::TPtr lambdaArgField,
+                                                                                 const TTypeAnnotationNode* typeNode) {
+    (void) lambdaArgField;
+    (void) lambdaArgState;
+    TExprNode::TPtr dataTypeForAccumulator = GetDataTypeForAccumulator(typeNode);
+    return lambdaArgState;
 }
 
 TExprNode::TPtr TPhysicalAggregationBuilder::BuildSumAggregationUpdateState(TExprNode::TPtr lambdaArgState, TExprNode::TPtr lambdaArgField,
@@ -402,6 +430,14 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildAvgAggregationFinishStateForOp
             .Seal()
         .Seal().Build();
     // clang-format on
+}
+
+TExprNode::TPtr TPhysicalAggregationBuilder::BuildVarianceAggregationFinishState(TExprNode::TPtr lambdaArgState, const TTypeAnnotationNode* typeNode) {
+    if (Aggregate->GetAggregationPhase() == EOpPhase::Intermediate) {
+        return lambdaArgState;
+    }
+    (void) typeNode;
+    return lambdaArgState;
 }
 
 TExprNode::TPtr TPhysicalAggregationBuilder::BuildAvgAggregationFinishState(TExprNode::TPtr lambdaArgState, const TTypeAnnotationNode* typeNode) {
@@ -503,6 +539,8 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildInitHandlerLambda(const TVecto
             initState = BuildSumAggregationInitialState(initState, itemType);
         } else if (aggFunction == "distinct") {
             continue;
+        } else if (aggFunction == "variance_1_1") {
+            initState = BuildVarianceAggregationInitialState(initState, itemType);
         }
         lambdaResults.push_back(initState);
     }
@@ -561,6 +599,8 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildUpdateHandlerLambda(const TVec
             updateState = BuildSumAggregationUpdateState(lambdaArgState, lambdaArgField, aggTraits.InputItemType);
         } else if (aggFunction == "distinct") {
             continue;
+        } else if (aggFunction == "variance_1_1") {
+            updateState = BuildVarianceAggregationUpdateState(lambdaArgState, lambdaArgField, aggTraits.InputItemType);
         } else {
             auto it = AggregationFunctionToAggregationCallable.find(aggFunction);
             Y_ENSURE(it != AggregationFunctionToAggregationCallable.end());
@@ -605,7 +645,7 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildFinishHandlerLambda(const TVec
         }
 
         for (const auto& aggTraits : aggTraitsList) {
-            const auto& aggFuncName = aggTraits.AggFunc;
+            const auto& aggFunction = aggTraits.AggFunc;
             const auto& stateName = aggTraits.StateFieldName;
             const bool inputIsOptional = aggTraits.InputItemType->IsOptionalOrNull();
             const bool outputIsOptional = aggTraits.OutputItemType->IsOptionalOrNull();
@@ -613,9 +653,11 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildFinishHandlerLambda(const TVec
             auto it = lambdaArgsMap.find(stateName);
             TExprNode::TPtr finishState = lambdaArgs[it->second];
 
-            if (aggFuncName == "avg") {
+            if (aggFunction == "avg") {
                 finishState = inputIsOptional ? BuildAvgAggregationFinishStateForOptionalType(finishState, typeNode)
                                               : BuildAvgAggregationFinishState(finishState, typeNode);
+            } else if (aggFunction == "variance_1_1") {
+                finishState = BuildVarianceAggregationFinishState(finishState, typeNode);
             }
 
             // Input is not optional, but output is optional - wraph with just.
