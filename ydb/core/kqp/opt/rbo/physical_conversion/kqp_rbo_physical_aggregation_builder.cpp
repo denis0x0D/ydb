@@ -801,18 +801,9 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildAvgAggregationFinishStateForOp
     // clang-format on
 }
 
-TExprNode::TPtr TPhysicalAggregationBuilder::BuildVarianceAggregationFinishState(TExprNode::TPtr lambdaArgState, const TTypeAnnotationNode* typeNode) {
-    Y_ENSURE(!IsDecimalType(typeNode), "Variance for decimals is not supported.");
-    Y_ENSURE(Aggregate->GetAggregationPhase() != EOpPhase::Undefined);
-
-    if (Aggregate->GetAggregationPhase() == EOpPhase::Intermediate) {
-        return lambdaArgState;
-    }
-    auto counter = GetNth(lambdaArgState, "1");
-    auto aggState = GetNth(lambdaArgState, "2");
-
+TExprNode::TPtr TPhysicalAggregationBuilder::BuildVarianceFinishCompute(TExprNode::TPtr counter, TExprNode::TPtr aggState) {
     // clang-format off
-    TExprNode::TPtr sqrtUDF = Ctx.Builder(Pos)
+    TExprNode::TPtr sqrt = Ctx.Builder(Pos)
         .Callable("Udf")
             .Atom(0, "Math.Sqrt")
             .Callable(1, "Void").Seal()
@@ -837,10 +828,9 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildVarianceAggregationFinishState
             .Atom(6, "")
         .Seal().Build();
     
-
-    return  Ctx.Builder(Pos)
+    return Ctx.Builder(Pos)
         .Callable("Apply")
-            .Add(0, sqrtUDF)
+            .Add(0, sqrt)
             .Callable(1, "/")
                 .Add(0, aggState)
                 .Callable(1, "Dec")
@@ -849,6 +839,19 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildVarianceAggregationFinishState
             .Seal()
         .Seal().Build();
     // clang-format on
+}
+
+TExprNode::TPtr TPhysicalAggregationBuilder::BuildVarianceAggregationFinishState(TExprNode::TPtr lambdaArgState, const TTypeAnnotationNode* typeNode) {
+    Y_ENSURE(!IsDecimalType(typeNode), "Variance for decimals is not supported.");
+    Y_ENSURE(Aggregate->GetAggregationPhase() != EOpPhase::Undefined);
+
+    if (Aggregate->GetAggregationPhase() == EOpPhase::Intermediate) {
+        return lambdaArgState;
+    }
+
+    auto counter = GetNth(lambdaArgState, "1");
+    auto aggState = GetNth(lambdaArgState, "2");
+    return BuildVarianceFinishCompute(counter, aggState);
 }
 
 TExprNode::TPtr TPhysicalAggregationBuilder::BuildVarianceAggregationFinishStateOptionalType(TExprNode::TPtr lambdaArgState,
@@ -863,44 +866,9 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildVarianceAggregationFinishState
     auto stateArg = Ctx.NewArgument(Pos, "state_arg");
     auto counter = GetNth(stateArg, "1");
     auto aggState = GetNth(stateArg, "2");
+    auto apply = BuildVarianceFinishCompute(counter, aggState);
 
     // clang-format off
-    TExprNode::TPtr sqrtUDF = Ctx.Builder(Pos)
-        .Callable("Udf")
-            .Atom(0, "Math.Sqrt")
-            .Callable(1, "Void").Seal()
-            .Callable(2, "VoidType").Seal()
-            .Atom(3, "")
-            .Callable(4, "CallableType")
-                .List(0).Seal()
-                .List(1)
-                    .Callable(0, "DataType")
-                        .Atom(0, "Double")
-                    .Seal()
-                .Seal()
-                .List(2)
-                    .Callable(0, "DataType")
-                        .Atom(0, "Double")
-                    .Seal()
-                    .Atom(1, "")
-                    .Atom(2, "1")
-                .Seal()
-            .Seal()
-            .Callable(5, "VoidType").Seal()
-            .Atom(6, "")
-        .Seal().Build();
-    
-    auto apply = Ctx.Builder(Pos)
-        .Callable("Apply")
-            .Add(0, sqrtUDF)
-            .Callable(1, "/")
-                .Add(0, aggState)
-                .Callable(1, "Dec")
-                    .Add(0, counter)
-                .Seal()
-            .Seal()
-        .Seal().Build();
-
     auto body = Ctx.Builder(Pos)
         .Callable("Just")
             .Add(0, apply)

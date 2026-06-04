@@ -87,6 +87,7 @@ private:
                                                                    const THashMap<TString, TString>& projectionMap, const TTypeAnnotationNode* type,
                                                                    EOpPhase aggregationPhase);
     // Helpers.
+    TExprNode::TPtr BuildVarianceFinishCompute(TExprNode::TPtr counter, TExprNode::TPtr aggState);
     TExprNode::TPtr GetNth(TExprNode::TPtr input, TString&& offset);
     TExprNode::TPtr GetDataTypeForSumAggregation(const TTypeAnnotationNode* itemType) const;
     TVector<TString> GetInputColumns() const;
