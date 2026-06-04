@@ -86,8 +86,12 @@ private:
     TExprNode::TPtr BuildCondenseForAggregationOutputWithEmptyKeys(TExprNode::TPtr input, const TVector<TPhysicalAggregationTraits>& traits,
                                                                    const THashMap<TString, TString>& projectionMap, const TTypeAnnotationNode* type,
                                                                    EOpPhase aggregationPhase);
-    // Helpers.
+    // Compute helpers.
+    TExprNode::TPtr BuildVarianceUpdateComputeIntermediate(TExprNode::TPtr lambdaArgField, TExprNode::TPtr prevCounter, TExprNode::TPtr mean,
+                                                           TExprNode::TPtr aggState, const TTypeAnnotationNode* typeNode);
     TExprNode::TPtr BuildVarianceFinishCompute(TExprNode::TPtr counter, TExprNode::TPtr aggState);
+
+    // Heplers.
     TExprNode::TPtr GetNth(TExprNode::TPtr input, TString&& offset);
     TExprNode::TPtr GetDataTypeForSumAggregation(const TTypeAnnotationNode* itemType) const;
     TVector<TString> GetInputColumns() const;

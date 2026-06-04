@@ -402,6 +402,56 @@ TExprNode::TPtr TPhysicalAggregationBuilder::GetNth(TExprNode::TPtr input, TStri
     // clang-format on
 }
 
+TExprNode::TPtr TPhysicalAggregationBuilder::BuildVarianceUpdateComputeIntermediate(TExprNode::TPtr fieldArg, TExprNode::TPtr prevCounter, TExprNode::TPtr mean,
+                                                                                    TExprNode::TPtr aggState, const TTypeAnnotationNode* typeNode) {
+    // clang-format off
+    auto delta = Ctx.Builder(Pos)
+        .Callable("-")
+            .Callable(0, "SafeCast")
+                .Add(0, fieldArg)
+                .Add(1, GetDataTypeForAccumulator(typeNode))
+            .Seal()
+            .Add(1, mean)
+        .Seal().Build();
+
+    auto currentCounter = Ctx.Builder(Pos)
+        .Callable("Inc")
+            .Add(0, prevCounter)
+        .Seal().Build();
+
+    auto newMean = Ctx.Builder(Pos)
+        .Callable("AggrAdd")
+            .Add(0, mean)
+            .Callable(1, "/")
+                .Add(0, delta)
+                .Add(1, currentCounter)
+            .Seal()
+        .Seal().Build();
+
+    auto newAggState = Ctx.Builder(Pos)
+        .Callable("AggrAdd")
+            .Add(0, aggState)
+            .Callable(1, "/")
+                .Callable(0, "*")
+                    .Callable(0, "*")
+                        .Add(0, delta)
+                        .Add(1, delta)
+                    .Seal()
+                    .Add(1, prevCounter)
+                .Seal()
+                .Add(1, currentCounter)
+            .Seal()
+        .Seal().Build();
+
+    return Ctx.Builder(Pos)
+        .List()
+            .Add(0, newMean)
+            .Add(1, currentCounter)
+            .Add(2, newAggState)
+        .Seal().Build();
+    // clang-format on
+}
+
 TExprNode::TPtr TPhysicalAggregationBuilder::BuildVarianceAggregationUpdateState(TExprNode::TPtr lambdaArgState, TExprNode::TPtr lambdaArgField,
                                                                                  const TTypeAnnotationNode* typeNode) {
     Y_ENSURE(!IsDecimalType(typeNode), "Decimals not supported for variance.");
@@ -411,53 +461,7 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildVarianceAggregationUpdateState
         auto mean = GetNth(lambdaArgState, "0");
         auto prevCounter = GetNth(lambdaArgState, "1");
         auto aggState = GetNth(lambdaArgState, "2");
-
-        // clang-format off
-        auto delta = Ctx.Builder(Pos)
-            .Callable("-")
-                .Callable(0, "SafeCast")
-                    .Add(0, lambdaArgField)
-                    .Add(1, GetDataTypeForAccumulator(typeNode))
-                .Seal()
-                .Add(1, mean)
-            .Seal().Build();
-
-        auto currentCounter = Ctx.Builder(Pos)
-            .Callable("Inc")
-                .Add(0, prevCounter)
-            .Seal().Build();
-
-        auto newMean = Ctx.Builder(Pos)
-            .Callable("AggrAdd")
-                .Add(0, mean)
-                .Callable(1, "/")
-                    .Add(0, delta)
-                    .Add(1, currentCounter)
-                .Seal()
-            .Seal().Build();
-
-        auto newAggState = Ctx.Builder(Pos)
-            .Callable("AggrAdd")
-                .Add(0, aggState)
-                .Callable(1, "/")
-                    .Callable(0, "*")
-                        .Callable(0, "*")
-                            .Add(0, delta)
-                            .Add(1, delta)
-                        .Seal()
-                        .Add(1, prevCounter)
-                    .Seal()
-                    .Add(1, currentCounter)
-                .Seal()
-            .Seal().Build();
-
-        return Ctx.Builder(Pos)
-            .List()
-                .Add(0, newMean)
-                .Add(1, currentCounter)
-                .Add(2, newAggState)
-            .Seal().Build();
-        // clang-format on
+        return BuildVarianceUpdateComputeIntermediate(lambdaArgField, prevCounter, mean, aggState, typeNode);
     }
 
     auto meanState = GetNth(lambdaArgState, "0");
@@ -539,52 +543,12 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildVarianceAggregationUpdateState
     auto stateAggState = GetNth(stateArg, "2");
 
     if (Aggregate->GetAggregationPhase() == EOpPhase::Intermediate) {
+        auto tuple = BuildVarianceUpdateComputeIntermediate(fieldArg, statePrevCounter, stateMean, stateAggState, typeNode);
+
         // clang-format off
-        auto delta = Ctx.Builder(Pos)
-            .Callable("-")
-                .Callable(0, "SafeCast")
-                    .Add(0, fieldArg)
-                    .Add(1, GetDataTypeForAccumulator(typeNode))
-                .Seal()
-                .Add(1, stateMean)
-            .Seal().Build();
-
-        auto currentCounter = Ctx.Builder(Pos)
-            .Callable("Inc")
-                .Add(0, statePrevCounter)
-            .Seal().Build();
-
-        auto newMean = Ctx.Builder(Pos)
-            .Callable("AggrAdd")
-                .Add(0, stateMean)
-                .Callable(1, "/")
-                    .Add(0, delta)
-                    .Add(1, currentCounter)
-                .Seal()
-            .Seal().Build();
-
-        auto newAggState = Ctx.Builder(Pos)
-            .Callable("AggrAdd")
-                .Add(0, stateAggState)
-                .Callable(1, "/")
-                    .Callable(0, "*")
-                        .Callable(0, "*")
-                            .Add(0, delta)
-                            .Add(1, delta)
-                        .Seal()
-                        .Add(1, statePrevCounter)
-                    .Seal()
-                    .Add(1, currentCounter)
-                .Seal()
-            .Seal().Build();
-
         auto innerBody = Ctx.Builder(Pos)
             .Callable("Just")
-                .List(0)
-                    .Add(0, newMean)
-                    .Add(1, currentCounter)
-                    .Add(2, newAggState)
-                .Seal()
+                .Add(0, tuple)
             .Seal().Build();
 
         auto innerLambda = Ctx.NewLambda(Pos, Ctx.NewArguments(Pos, {fieldArg}), std::move(innerBody));
