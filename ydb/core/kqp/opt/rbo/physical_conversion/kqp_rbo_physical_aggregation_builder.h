@@ -89,6 +89,8 @@ private:
     // Compute helpers.
     TExprNode::TPtr BuildVarianceUpdateComputeIntermediate(TExprNode::TPtr lambdaArgField, TExprNode::TPtr prevCounter, TExprNode::TPtr mean,
                                                            TExprNode::TPtr aggState, const TTypeAnnotationNode* typeNode);
+    TExprNode::TPtr BuildVarianceUpdateComputeFinal(TExprNode::TPtr fieldMean, TExprNode::TPtr fieldPrevCounter, TExprNode::TPtr fieldAggState,
+                                                    TExprNode::TPtr stateMean, TExprNode::TPtr statePrevCounter, TExprNode::TPtr stateAggState);
     TExprNode::TPtr BuildVarianceFinishCompute(TExprNode::TPtr counter, TExprNode::TPtr aggState);
 
     // Heplers.

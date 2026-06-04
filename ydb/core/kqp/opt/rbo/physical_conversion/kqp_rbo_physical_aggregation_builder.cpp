@@ -452,49 +452,32 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildVarianceUpdateComputeIntermedi
     // clang-format on
 }
 
-TExprNode::TPtr TPhysicalAggregationBuilder::BuildVarianceAggregationUpdateState(TExprNode::TPtr lambdaArgState, TExprNode::TPtr lambdaArgField,
-                                                                                 const TTypeAnnotationNode* typeNode) {
-    Y_ENSURE(!IsDecimalType(typeNode), "Decimals not supported for variance.");
-    Y_ENSURE(Aggregate->GetAggregationPhase() != EOpPhase::Undefined);
-
-    if (Aggregate->GetAggregationPhase() == EOpPhase::Intermediate) {
-        auto mean = GetNth(lambdaArgState, "0");
-        auto prevCounter = GetNth(lambdaArgState, "1");
-        auto aggState = GetNth(lambdaArgState, "2");
-        return BuildVarianceUpdateComputeIntermediate(lambdaArgField, prevCounter, mean, aggState, typeNode);
-    }
-
-    auto meanState = GetNth(lambdaArgState, "0");
-    auto prevCounterState = GetNth(lambdaArgState, "1");
-    auto aggStateState = GetNth(lambdaArgState, "2");
-
-    auto meanField = GetNth(lambdaArgField, "0");
-    auto prevCounterField = GetNth(lambdaArgField, "1");
-    auto aggStateField = GetNth(lambdaArgField, "2");
-
-    // clang-format on
+TExprNode::TPtr TPhysicalAggregationBuilder::BuildVarianceUpdateComputeFinal(TExprNode::TPtr fieldMean, TExprNode::TPtr fieldPrevCounter,
+                                                                             TExprNode::TPtr fieldAggState, TExprNode::TPtr stateMean,
+                                                                             TExprNode::TPtr statePrevCounter, TExprNode::TPtr stateAggState) {
+    // clang-format off
     auto counter = Ctx.Builder(Pos)
         .Callable("AggrAdd")
-            .Add(0, prevCounterField)
-            .Add(1, prevCounterState)
+            .Add(0, fieldPrevCounter)
+            .Add(1, statePrevCounter)
         .Seal().Build();
     
     auto mean = Ctx.Builder(Pos)
         .Callable("-")
-            .Add(0, meanField)
-            .Add(1, meanState)
+            .Add(0, fieldMean)
+            .Add(1, stateMean)
         .Seal().Build();
 
     auto newMean = Ctx.Builder(Pos)
         .Callable("/")
             .Callable(0, "AggrAdd")
                 .Callable(0, "*")
-                    .Add(0, meanField)
-                    .Add(1, prevCounterField)
+                    .Add(0, fieldMean)
+                    .Add(1, fieldPrevCounter)
                 .Seal()
                 .Callable(1, "*")
-                    .Add(0, meanState)
-                    .Add(1, prevCounterState)
+                    .Add(0, stateMean)
+                    .Add(1, statePrevCounter)
                 .Seal()
             .Seal()
             .Add(1, counter)
@@ -503,8 +486,8 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildVarianceAggregationUpdateState
     auto newState = Ctx.Builder(Pos)
         .Callable("AggrAdd")
             .Callable(0, "AggrAdd")
-                .Add(0, aggStateField)
-                .Add(1, aggStateState)
+                .Add(0, fieldAggState)
+                .Add(1, stateAggState)
             .Seal()
             .Callable(1, "/")
                 .Callable(0, "*")
@@ -513,9 +496,9 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildVarianceAggregationUpdateState
                             .Add(0, mean)
                             .Add(1, mean)
                         .Seal()
-                        .Add(1, prevCounterField)
+                        .Add(1, fieldPrevCounter)
                     .Seal()
-                    .Add(1, prevCounterState)
+                    .Add(1, statePrevCounter)
                 .Seal()
                 .Add(1, counter)
             .Seal()
@@ -528,6 +511,28 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildVarianceAggregationUpdateState
             .Add(2, newState)
         .Seal().Build();
     // clang-format on
+}
+
+TExprNode::TPtr TPhysicalAggregationBuilder::BuildVarianceAggregationUpdateState(TExprNode::TPtr lambdaArgState, TExprNode::TPtr lambdaArgField,
+                                                                                 const TTypeAnnotationNode* typeNode) {
+    Y_ENSURE(!IsDecimalType(typeNode), "Decimals not supported for variance.");
+    Y_ENSURE(Aggregate->GetAggregationPhase() != EOpPhase::Undefined);
+
+    if (Aggregate->GetAggregationPhase() == EOpPhase::Intermediate) {
+        auto mean = GetNth(lambdaArgState, "0");
+        auto prevCounter = GetNth(lambdaArgState, "1");
+        auto aggState = GetNth(lambdaArgState, "2");
+        return BuildVarianceUpdateComputeIntermediate(lambdaArgField, prevCounter, mean, aggState, typeNode);
+    }
+
+    auto fieldMean = GetNth(lambdaArgField, "0");
+    auto fieldPrevCounter = GetNth(lambdaArgField, "1");
+    auto fieldAggState = GetNth(lambdaArgField, "2");
+    auto stateMean = GetNth(lambdaArgState, "0");
+    auto statePrevCounter = GetNth(lambdaArgState, "1");
+    auto stateAggState = GetNth(lambdaArgState, "2");
+
+   return BuildVarianceUpdateComputeFinal(fieldMean, fieldPrevCounter, fieldAggState, stateMean, statePrevCounter, stateAggState);
 }
 
 TExprNode::TPtr TPhysicalAggregationBuilder::BuildVarianceAggregationUpdateStateOptionalType(TExprNode::TPtr lambdaArgState, TExprNode::TPtr lambdaArgField,
@@ -543,12 +548,10 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildVarianceAggregationUpdateState
     auto stateAggState = GetNth(stateArg, "2");
 
     if (Aggregate->GetAggregationPhase() == EOpPhase::Intermediate) {
-        auto tuple = BuildVarianceUpdateComputeIntermediate(fieldArg, statePrevCounter, stateMean, stateAggState, typeNode);
-
         // clang-format off
         auto innerBody = Ctx.Builder(Pos)
             .Callable("Just")
-                .Add(0, tuple)
+                .Add(0, BuildVarianceUpdateComputeIntermediate(fieldArg, statePrevCounter, stateMean, stateAggState, typeNode))
             .Seal().Build();
 
         auto innerLambda = Ctx.NewLambda(Pos, Ctx.NewArguments(Pos, {fieldArg}), std::move(innerBody));
@@ -606,62 +609,9 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildVarianceAggregationUpdateState
     auto fieldPrevCounter = GetNth(fieldArg, "1");
     auto fieldAggState = GetNth(fieldArg, "2");
 
-    // clang-format off
-    auto counter = Ctx.Builder(Pos)
-        .Callable("AggrAdd")
-            .Add(0, fieldPrevCounter)
-            .Add(1, statePrevCounter)
-        .Seal().Build();
-    
-    auto mean = Ctx.Builder(Pos)
-        .Callable("-")
-            .Add(0, fieldMean)
-            .Add(1, stateMean)
-        .Seal().Build();
-
-    auto newMean = Ctx.Builder(Pos)
-        .Callable("/")
-            .Callable(0, "AggrAdd")
-                .Callable(0, "*")
-                    .Add(0, fieldMean)
-                    .Add(1, fieldPrevCounter)
-                .Seal()
-                .Callable(1, "*")
-                    .Add(0, stateMean)
-                    .Add(1, statePrevCounter)
-                .Seal()
-            .Seal()
-            .Add(1, counter)
-        .Seal().Build();
-
-    auto newState = Ctx.Builder(Pos)
-        .Callable("AggrAdd")
-            .Callable(0, "AggrAdd")
-                .Add(0, fieldAggState)
-                .Add(1, stateAggState)
-            .Seal()
-            .Callable(1, "/")
-                .Callable(0, "*")
-                    .Callable(0, "*")
-                        .Callable(0, "*")
-                            .Add(0, mean)
-                            .Add(1, mean)
-                        .Seal()
-                        .Add(1, fieldPrevCounter)
-                    .Seal()
-                    .Add(1, statePrevCounter)
-                .Seal()
-                .Add(1, counter)
-            .Seal()
-        .Seal().Build();
-
     auto innerBody = Ctx.Builder(Pos)
         .Callable("Just")
-            .List(0)
-                .Add(0, newMean)
-                .Add(1, counter)
-                .Add(2, newState)
-            .Seal()
+            .Add(0, BuildVarianceUpdateComputeFinal(fieldMean, fieldPrevCounter, fieldAggState, stateMean, statePrevCounter, stateAggState))
         .Seal().Build();
 
     auto innerLambda = Ctx.NewLambda(Pos, Ctx.NewArguments(Pos, {fieldArg}), std::move(innerBody));
