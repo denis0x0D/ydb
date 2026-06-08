@@ -688,6 +688,19 @@ bool IsMultipleAggregation(const TAggregationTraits& aggregationTraits) {
     return aggregationTraits.AggTraitsList.size() > 1;
 }
 
+TVector<std::pair<TInfoUnit, TExprNode::TPtr>> GetNullMapElementsExcept(const TString& skipColName, TAggregationTraits& aggregationTraits, TExprContext& ctx, TPositionHandle pos) {
+    TVector<std::pair<TInfoUnit, TEpxrNode::TPtr>> map;
+    for (const auto& aggTrait: aggregationTraits.AggTraitsList) {
+        auto kqpOpAggTraits = TKqpOpAggregationTraits(aggTraits);
+        const auto resultColName = kqpOpAggTraits.ResultColName().StringValue();
+        if (skipColName == resultColName) {
+            // Member
+        } else {
+            map.emplace_back(std::make_pair(resultColName, Build<TCoNothing>(ctx, pos)))
+        }
+    }
+}
+
 TExprNode::TPtr BuildAggregationPipeline(TExprNode::TPtr resultExpr, TVector<std::tuple<TInfoUnit, TExprNode::TPtr, bool>>&& expressionsMapPreAgg,
                                          TVector<std::pair<TInfoUnit, TExprNode::TPtr>>&& groupByKeysExpressionsMap,
                                          TAggregationTraits&& distinctAggregationTraitsPreAggregate, TAggregationTraits&& aggTraits,
@@ -757,6 +770,10 @@ TExprNode::TPtr BuildAggregationPipeline(TExprNode::TPtr resultExpr, TVector<std
             // At second, we build an early aggregation.
             partResultExpr = BuildAggregate(partResultExpr, {intermediateAggTraits}, aggTraits.KeyColumns,
                                             /*distinct=*/false, ctx, pos, "intermediate");
+
+            auto mapWithNulls = GetNullMapElementsExcept(resultColName, aggTraits);
+            partResultExpr = BuildAggregateExpressionMap(partResultExpr, mapWithNulls, {}, ctx, pos);
+
             if (unionAllResultExpr) {
                 // clang-format off
                 unionAllResultExpr = Build<TKqpOpUnionAll>(ctx, pos)
