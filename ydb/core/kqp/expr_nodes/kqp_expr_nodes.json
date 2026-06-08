@@ -1032,7 +1032,8 @@
                 {"Index": 0, "Name": "Input", "Type": "TExprBase"},
                 {"Index": 1, "Name": "AggregationTraitsList", "Type": "TKqpOpAggregationTraitsList"},
                 {"Index": 2, "Name": "KeyColumns", "Type": "TCoAtomList"},
-                {"Index": 3, "Name": "DistinctAll", "Type" : "TCoAtom"}
+                {"Index": 3, "Name": "DistinctAll", "Type" : "TCoAtom"},
+                {"Index": 4, "Name": "Phase", "Type" : "TCoAtom"}
             ]
         },
         {

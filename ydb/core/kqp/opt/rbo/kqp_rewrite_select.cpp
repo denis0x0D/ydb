@@ -19,6 +19,17 @@ struct TAggregationTraits {
     TVector<TInfoUnit> KeyColumns;
 };
 
+// This is this the same as in propagate aggregation rule.
+std::pair<TString, TString> GetAggFunctions(const TString& aggFunc) {
+    if (aggFunc == "min" || aggFunc == "max" || aggFunc == "sum" || aggFunc == "avg" || aggFunc == "variance_1_1") {
+        return std::make_pair(aggFunc, aggFunc);
+    }
+    if (aggFunc == "count") {
+        return std::make_pair("count", "sum");
+    }
+    Y_ENSURE(false, "Aggregation function is not supported for splitting.");
+}
+
 const THashSet<TString> SupportedAggregationFunctions{"sum", "min", "max", "count", "avg", "variance_1_1"};
 
 TString GetColumnNameFromGroupRef(TExprNode::TPtr groupRef,
@@ -142,9 +153,8 @@ TExprNode::TPtr BuildAggregationTraits(const TString& originalColName, const TSt
     // clang-format on
 }
 
-TExprNode::TPtr BuildAggregate(TExprNode::TPtr resultExpr, const TVector<TExprNode::TPtr>& aggTraitsList, const TVector<TInfoUnit> &keys,
-                               bool distinctAll,
-                               TExprContext& ctx, TPositionHandle pos) {
+TExprNode::TPtr BuildAggregate(TExprNode::TPtr resultExpr, const TVector<TExprNode::TPtr>& aggTraitsList, const TVector<TInfoUnit>& keys, bool distinctAll,
+                               TExprContext& ctx, TPositionHandle pos, TString&& phase = "final") {
     TVector<TCoAtom> keyColumns;
     for (const auto& column : keys) {
         // clang-format off
@@ -166,6 +176,9 @@ TExprNode::TPtr BuildAggregate(TExprNode::TPtr resultExpr, const TVector<TExprNo
         .Build()
         .DistinctAll<TCoAtom>()
             .Value(distinctAll ? "True" : "False")
+        .Build()
+        .Phase<TCoAtom>()
+            .Value(phase)
         .Build()
     .Done().Ptr();
     // clang-format on
@@ -671,6 +684,10 @@ void EliminateDuplicateAggregations(TVector<std::tuple<TInfoUnit, TExprNode::TPt
     // clang-format on
 }
 
+bool IsMultipleAggregation(const TAggregationTraits& aggregationTraits) {
+    return aggregationTraits.AggTraitsList.size() > 1;
+}
+
 TExprNode::TPtr BuildAggregationPipeline(TExprNode::TPtr resultExpr, TVector<std::tuple<TInfoUnit, TExprNode::TPtr, bool>>&& expressionsMapPreAgg,
                                          TVector<std::pair<TInfoUnit, TExprNode::TPtr>>&& groupByKeysExpressionsMap,
                                          TAggregationTraits&& distinctAggregationTraitsPreAggregate, TAggregationTraits&& aggTraits,
@@ -683,28 +700,89 @@ TExprNode::TPtr BuildAggregationPipeline(TExprNode::TPtr resultExpr, TVector<std
     if (distinctAggregationTraitsPreAggregate.AggTraitsList.empty() && distinctAggregationTraitsPostAggregate.AggTraitsList.empty()) {
         EliminateDuplicateAggregations(expressionsMapPreAgg, aggTraits, expressionsMapPostAgg, havingFilterLambda, ctx, pos);
     }
+
     // In case we have an expression for aggregation - f(a + b ...) or group by.
     if (!expressionsMapPreAgg.empty() || !groupByKeysExpressionsMap.empty()) {
         resultExpr = BuildAggregateExpressionMap(resultExpr, expressionsMapPreAgg, groupByKeysExpressionsMap, ctx, pos);
     }
-    // Build distinct aggregate pre aggregate.
-    if (!distinctAggregationTraitsPreAggregate.AggTraitsList.empty()) {
-        resultExpr = BuildAggregate(resultExpr, distinctAggregationTraitsPreAggregate.AggTraitsList, distinctAggregationTraitsPreAggregate.KeyColumns,
-                                    /*distinct=*/true, ctx, pos);
+
+    if (!IsMultipleAggregation(distinctAggregationTraitsPreAggregate)) {
+        // Build distinct aggregate pre aggregate.
+        if (!distinctAggregationTraitsPreAggregate.AggTraitsList.empty()) {
+            resultExpr = BuildAggregate(resultExpr, distinctAggregationTraitsPreAggregate.AggTraitsList, distinctAggregationTraitsPreAggregate.KeyColumns,
+                                        /*distinct=*/true, ctx, pos);
+        }
+        // Build Aggreegate.
+        if (!aggTraits.AggTraitsList.empty()) {
+            resultExpr = BuildAggregate(resultExpr, aggTraits.AggTraitsList, aggTraits.KeyColumns, /*distinct=*/false, ctx, pos);
+        }
+    } else {
+        TVector<std::tuple<TString, TString, TString, const TTypeAnnotationNode*>> aggTraitsPhysicalList;
+        for (const auto& aggTraitsExpr : aggTraits.AggTraitsList) {
+            const auto aggTraits = TKqpOpAggregationTraits(aggTraitsExpr);
+            aggTraitsPhysicalList.emplace_back(std::make_tuple(aggTraits.OriginalColName().StringValue(), aggTraits.AggregationFunction().StringValue(),
+                                                               aggTraits.ResultColName().StringValue(), aggTraitsExpr->GetTypeAnn()));
+        }
+        TVector<TInfoUnit> keyColumns = aggTraits.KeyColumns;
+
+        TExprNode::TPtr unionAllResultExpr;
+        TVector<TExprNode::TPtr> finalAggTraitsList;
+        for (const auto& aggTraitsPhy : aggTraitsPhysicalList) {
+            TVector<TExprNode::TPtr> distAggTraitsList;
+            TVector<TInfoUnit> distKeys = keyColumns;
+            for (const auto& key : keyColumns) {
+                const auto colName = key.GetFullName();
+                distAggTraitsList.emplace_back(BuildAggregationTraits(colName, "distinct", colName, ctx, pos));
+            }
+            const auto& originalColName = std::get<0>(aggTraitsPhy);
+            const auto& aggFunction = std::get<1>(aggTraitsPhy);
+            const auto& resultColName = std::get<2>(aggTraitsPhy);
+            const TTypeAnnotationNode* aggType = std::get<3>(aggTraitsPhy);
+            Y_ENSURE(aggType, "Cannot get type for multiple distinct.");
+
+            const auto distAggTraits = BuildAggregationTraits(originalColName, "distinct", originalColName, ctx, pos);
+            distAggTraitsList.emplace_back(distAggTraits);
+            distKeys.emplace_back(TInfoUnit(originalColName));
+
+            // At first, we build distinct aggregation.
+            TExprNode::TPtr partResultExpr = BuildAggregate(resultExpr, {distAggTraitsList}, distKeys,
+                                                            /*distinct=*/true, ctx, pos);
+
+            const auto intermediateColName = "__intermediate_" + originalColName;
+            const auto functions = GetAggFunctions(aggFunction);
+            const auto intermediateAggTraits = BuildAggregationTraits(originalColName, functions.first, intermediateColName, ctx, pos);
+            const auto finalAggTraits = BuildAggregationTraits(intermediateColName, functions.second, resultColName, ctx, pos);
+            finalAggTraitsList.emplace_back(finalAggTraits);
+
+            // At second, we build an early aggregation.
+            partResultExpr = BuildAggregate(partResultExpr, {intermediateAggTraits}, aggTraits.KeyColumns,
+                                            /*distinct=*/false, ctx, pos, "intermediate");
+            if (unionAllResultExpr) {
+                // clang-format off
+                unionAllResultExpr = Build<TKqpOpUnionAll>(ctx, pos)
+                    .LeftInput(unionAllResultExpr)
+                    .RightInput(partResultExpr)
+                .Done().Ptr();
+                // clang-format on
+            } else {
+                unionAllResultExpr = partResultExpr;
+            }
+        }
+
+        // Finally, we build a final aggregation.
+        resultExpr = BuildAggregate(unionAllResultExpr, finalAggTraitsList, aggTraits.KeyColumns, /*distinct=*/false, ctx, pos);
     }
-    // Build Aggreegate.
-    if (!aggTraits.AggTraitsList.empty()) {
-        resultExpr = BuildAggregate(resultExpr, aggTraits.AggTraitsList, aggTraits.KeyColumns, /*distinct=*/false, ctx, pos);
-    }
-     // Build a having filter for aggregation result.
+
+    // Build a having filter for aggregation result.
     if (havingFilterLambda) {
         // clang-format off
-        resultExpr = Build<TKqpOpFilter>(ctx, pos)
-            .Input(resultExpr)
-            .Lambda(havingFilterLambda)
-        .Done().Ptr();
+            resultExpr = Build<TKqpOpFilter>(ctx, pos)
+                .Input(resultExpr)
+                .Lambda(havingFilterLambda)
+            .Done().Ptr();
         // clang-format on
     }
+
     // In case we have an expression on aggregation - f(...) x b.
     if (!expressionsMapPostAgg.empty()) {
         resultExpr = BuildAggregateExpressionMap(resultExpr, expressionsMapPostAgg, BuildExpressionsFromColumns(aggTraits.KeyColumns, ctx, pos), ctx, pos);
@@ -801,9 +879,9 @@ void ProcessAggregations(TExprNode::TPtr lambdaToProcess, TString&& resultColNam
             // Distinct for column or expression f(distinct a) => (distinct a) as b -> f(b).
             if (!!GetSetting(*aggregation->Child(1), "distinct")) {
                 const auto colName = aggColName.GetFullName();
-                auto distinctAggTraits = BuildAggregationTraits(colName, "distinct", colName, ctx, pos);
-                distinctAggregationTraitsPreAggregate.AggTraitsList.push_back(distinctAggTraits);
-                distinctAggregationTraitsPreAggregate.KeyColumns.push_back(aggColName);
+                const auto distinctAggTraits = BuildAggregationTraits(colName, "distinct", colName, ctx, pos);
+                distinctAggregationTraitsPreAggregate.AggTraitsList.emplace_back(std::move(distinctAggTraits));
+                distinctAggregationTraitsPreAggregate.KeyColumns.emplace_back(aggColName);
                 distinctPreAggregate = true;
             }
 
@@ -811,6 +889,7 @@ void ProcessAggregations(TExprNode::TPtr lambdaToProcess, TString&& resultColNam
             const auto aggResultColName = TInfoUnit(GenerateUniqueColumnName(uniqueAggColumnId, "agg_result", "agg_col"));
             // Build an aggregation traits.
             auto aggregationTraits = BuildAggregationTraits(aggColName.GetFullName(), aggFuncName, aggResultColName.GetFullName(), ctx, pos);
+            aggregationTraits->SetTypeAnn(lambdaToProcess->GetTypeAnn());
             aggTraits.AggTraitsList.push_back(aggregationTraits);
             aggregationsForReplacement[aggregation] = aggResultColName.GetFullName();
         }
@@ -912,9 +991,8 @@ void ProcessAggregationsInResultItems(TExprNode::TPtr result, THashSet<TString>&
                             expressionsMapPostAgg, uniqueAggColumnId, distinctPreAggregate, distinctAll, ctx, pos);
     }
 
-    // Distinct pre aggregate fro group by keys.
+    // Distinct pre aggregate for group by keys.
     if (distinctPreAggregate) {
-        Y_ENSURE(distinctAggregationTraitsPreAggregate.AggTraitsList.size() == 1 && aggTraits.AggTraitsList.size() == 1, "Multiple distinct is not supported");
         for (const auto& key : aggTraits.KeyColumns) {
             const auto colName = key.GetFullName();
             const auto distinctAggTraits = BuildAggregationTraits(colName, "distinct", colName, ctx, pos);
@@ -1383,8 +1461,8 @@ TExprNode::TPtr RewriteSelect(const TExprNode::TPtr& input, TExprContext& ctx, c
         if (groupExprsExpr) {
             const auto groupByList = groupExprsExpr->TailPtr();
             for (ui32 i = 0; i < groupByList->ChildrenSize(); ++i) {
-                auto pgGroup = groupByList->ChildPtr(i);
-                auto lambda = TCoLambda(ctx.DeepCopyLambda(*(pgGroup->Child(1))));
+                auto yqlGroup = groupByList->ChildPtr(i);
+                auto lambda = TCoLambda(ctx.DeepCopyLambda(*(yqlGroup->Child(1))));
                 auto body = lambda.Body().Ptr();
                 TInfoUnit groupByKeyName;
                 TExprNode::TPtr newBody;
@@ -1414,7 +1492,7 @@ TExprNode::TPtr RewriteSelect(const TExprNode::TPtr& input, TExprContext& ctx, c
                 .Done().Ptr();
                 // clang-format on
 
-                groupExprLambda->SetTypeAnn(pgGroup->GetTypeAnn());
+                groupExprLambda->SetTypeAnn(yqlGroup->GetTypeAnn());
                 groupByKeysExpressionsMap.push_back(std::make_pair(groupByKeyName, groupExprLambda));
                 aggregationTraits.KeyColumns.emplace_back(groupByKeyName);
             }
@@ -1468,7 +1546,7 @@ TExprNode::TPtr RewriteSelect(const TExprNode::TPtr& input, TExprContext& ctx, c
                         groupByKeysExpressionsMapForSet.emplace_back(std::move(groupByKeyPair));
                     } else {
                         const TTypeAnnotationNode* groupByKeyType = groupByKeyPair.second->GetTypeAnn();
-                        Y_ENSURE(groupByKeyType, "No type for group by key with rollup");
+                        Y_ENSURE(groupByKeyType, "No type for group by key with rollup.");
 
                         if (groupByKeyType->IsOptionalOrNull()) {
                             groupByKeyType = groupByKeyType->Cast<TOptionalExprType>()->GetItemType();

@@ -3045,8 +3045,8 @@ TStatus AnnotateOpAggregate(const TExprNode::TPtr& input, TExprContext& ctx) {
     }
 
     for (const auto& keyColumn : opAggregate.KeyColumns()) {
-        auto it = aggTraitsMap.find(TString(keyColumn));
-        Y_ENSURE(it != aggTraitsMap.end());
+        const auto it = aggTraitsMap.find(TString(keyColumn));
+        Y_ENSURE(it != aggTraitsMap.end(), TStringBuilder() << "Group by key not found: " << TString(keyColumn));
         newItemTypes.push_back(ctx.MakeType<TItemExprType>(it->first, it->second));
     }
 
@@ -3054,8 +3054,8 @@ TStatus AnnotateOpAggregate(const TExprNode::TPtr& input, TExprContext& ctx) {
         const auto originalColName = TString(traits.OriginalColName());
         const auto aggFunction = TString(traits.AggregationFunction());
         const auto resultColName = TString(traits.ResultColName());
-        auto it = aggTraitsMap.find(originalColName);
-        Y_ENSURE(it != aggTraitsMap.end());
+        const auto it = aggTraitsMap.find(originalColName);
+        Y_ENSURE(it != aggTraitsMap.end(), TStringBuilder() << "Aggregation column not found: " << originalColName);
         auto aggFieldType = it->second;
 
         if (aggFunction == "count") {

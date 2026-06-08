@@ -736,6 +736,16 @@ TIntrusivePtr<IOperator> PlanConverter::ConvertTKqpOpSort(TExprNode::TPtr node) 
     return output;
 }
 
+EOpPhase GetOpPhase(TExprBase opPhase) {
+    const auto phase = opPhase.Cast<TCoAtom>().StringValue();
+    if (phase == "Intermediate") {
+        return EOpPhase::Intermediate;
+    } else if (phase == "Final") {
+        return EOpPhase::Final;
+    }
+    return EOpPhase::Undefined;
+}
+
 TIntrusivePtr<IOperator> PlanConverter::ConvertTKqpOpAggregate(TExprNode::TPtr node) {
     const auto opAggregate = TKqpOpAggregate(node);
     const auto input = ExprNodeToOperator(opAggregate.Input().Ptr());
@@ -755,7 +765,7 @@ TIntrusivePtr<IOperator> PlanConverter::ConvertTKqpOpAggregate(TExprNode::TPtr n
     }
 
     const bool distinctAll = opAggregate.DistinctAll() == "True" ? true : false;
-    return MakeIntrusive<TOpAggregate>(input, opAggTraitsList, keyColumns, EOpPhase::Undefined, distinctAll, node->Pos());
+    return MakeIntrusive<TOpAggregate>(input, opAggTraitsList, keyColumns, GetOpPhase(opAggregate.Phase()), distinctAll, node->Pos());
 }
 
 TIntrusivePtr<IOperator> PlanConverter::ConvertTKqpOpReplaceAlias(TExprNode::TPtr node) {
