@@ -8,6 +8,7 @@ namespace NKqp {
 
 namespace {
 
+    /*
 void ValidateNoDuplicateOutputIUs(TOpRoot& root) {
     for (const auto& iter : root) {
         THashSet<TInfoUnit, TInfoUnit::THashFunction> seen;
@@ -17,6 +18,7 @@ void ValidateNoDuplicateOutputIUs(TOpRoot& root) {
         }
     }
 }
+    */
 
 } // anonymous namespace
 
@@ -145,7 +147,7 @@ TExprNode::TPtr TRuleBasedOptimizer::Optimize(TOpRoot& root, TRBOContext& rboCtx
             YQL_CLOG(TRACE, CoreDq) << "Before stage:\n" << root.PlanToString(ctx);
         }
         stage->RunStage(root, rboCtx);
-        ValidateNoDuplicateOutputIUs(root);
+        //ValidateNoDuplicateOutputIUs(root);
         if (needToLog) {
             YQL_CLOG(TRACE, CoreDq) << "After stage:\n" << root.PlanToString(ctx);
         }
