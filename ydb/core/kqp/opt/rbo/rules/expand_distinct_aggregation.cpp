@@ -56,18 +56,23 @@ TIntrusivePtr<IOperator> BuildDistinct(const TIntrusivePtr<IOperator>& input, TV
 }
 
 TIntrusivePtr<IOperator> BuildNullMapElementsExceptOneColumn(const TIntrusivePtr<IOperator>& input, const TTypeAnnotationNode* inputType,
-                                                             const TVector<std::pair<TString, TString>>& nullColumns, TString&& exceptColumn, const TString& prefix,
-                                                             TPlanProps& props, TExprContext& ctx) {
+                                                             TVector<TAggregationTraits>& aggTraitsList, TAggregationTraits& realAggTraits, TPlanProps& props,
+                                                             TExprContext& ctx) {
     Y_ENSURE(inputType);
     auto inputStructType = inputType->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
+
+    auto aggTraitsCmp = [](const TOpAggregationTraits& left, const TOpAggregationTraits& right) {
+        return left.OriginalColName.GetFullName() == right.OriginalColname.GetFullName() && left.AggFunction == right.AggFunction &&
+               left.ResultColName.GetFullName() == right.ResultColName.GetFullName();
+    };
+
     TVector<TMapElement> mapElements;
-    for (const auto& nullColumnPair : nullColumns) {
-        const auto& originalColName = nullColumnPair.first;
-        const auto& resultColName = nullColumnPair.second;
+    for (const auto& aggTraits: aggTraitsList) {
+        const auto resultColName = aggTraits.ResultColName.GetFullName();
         const auto mapColName = TInfoUnit(prefix + resultColName);
         TMapElement mapElement;
         TExprNode::TPtr columnExpr;
-        if (resultColName == exceptColumn) {
+        if (aggTraitsCmp(aggTraits, realAggTraits)) {
             // clang-format on
             columnExpr = Build<TCoLambda>(ctx, input->Pos)
                 .Args({"arg"})
@@ -82,8 +87,11 @@ TIntrusivePtr<IOperator> BuildNullMapElementsExceptOneColumn(const TIntrusivePtr
             .Done().Ptr();
             // clang-format off
         } else {
-            auto fieldType = inputStructType->FindItemType(originalColName);
+            auto fieldType = inputStructType->FindItemType(resultColName);
             Y_ENSURE(fieldType, "Aggregation column not found in input type:" << originalColName;);
+            if (fieldType->IsOptionalOrNull()) {
+                fieldType = filedType->Cast<TOptionalExprType>();
+            }
             // clang-format off
             columnExpr = Build<TCoLambda>(ctx, input->Pos)
                 .Args({"arg"})
@@ -110,18 +118,7 @@ TIntrusivePtr<IOperator> ExpandMultiDistinct(const TIntrusivePtr<TOpAggregate>& 
     const auto& aggTraitsList = aggregate->GetAggregationTraits();
     const auto pos = aggregate->Pos;
     const auto intermediateColumnPrefix = "__intermediate_";
-    TVector<std::pair<TString, TString>> nullColumns;
-    for (const auto& key : aggregate->GetKeyColumns()) {
-        const auto keyName = key.GetFullName();
-        nullColumns.emplace_back(std::make_pair(keyName, keyName));
-    }
-
-    for (const auto& aggTraits : aggTraitsList) {
-        const auto originalColName = aggTraits.OriginalColName.GetFullName();
-        const auto resultColName = aggTraits.ResultColName.GetFullName();
-        nullColumns.emplace_back(std::make_pair(originalColName, resultColName));
-    }
-
+   
     TIntrusivePtr<IOperator> unionAllResult;
     TVector<TOpAggregationTraits> finalAggTraitsList;
     for (const auto& aggTraits : aggTraitsList) {
@@ -143,8 +140,7 @@ TIntrusivePtr<IOperator> ExpandMultiDistinct(const TIntrusivePtr<TOpAggregate>& 
         partialResult = MakeIntrusive<TOpAggregate>(partialResult, partialAggregationTraitsList, aggregate->GetKeyColumns(), EOpPhase::Intermediate,
                                                     /*distinctAll=*/false, pos);
 
-        partialResult = BuildNullMapElementsExceptOneColumn(partialResult, aggregate->GetInput()->Type, nullColumns, aggTraits.ResultColName.GetFullName(),
-                                                            intermediateColumnPrefix, props, ctx);
+        partialResult = BuildNullMapElementsExceptOneColumn(partialResult, aggregate->Type, aggTraitsList, aggTraits, intermediateColumnPrefix, props, ctx);
 
         if (unionAllResult) {
             unionAllResult = MakeIntrusive<TOpUnionAll>(unionAllResult, partialResult, aggregate->Pos);
