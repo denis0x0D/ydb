@@ -55,9 +55,27 @@ TIntrusivePtr<IOperator> BuildDistinct(const TIntrusivePtr<IOperator>& input, TV
     return MakeIntrusive<TOpAggregate>(input, distAggTraitsList, distColumns, EOpPhase::Undefined, /*distinctAll=*/true, input->Pos);
 }
 
+const TTypeAnnotationNode* GetAggregationType(const TTypeAnnotationNode* inputType, const TString& aggFunction, TExprContext& ctx) {
+    Y_ENSURE(inputType);
+    const TTypeAnnotationNode* resultType = inputType;
+    TPositionHandle pos;
+
+    if (aggFunction == "count") {
+        resultType = ctx.MakeType<TDataExprType>(EDataSlot::Uint64);
+    } else if (aggFunction == "sum") {
+        Y_ENSURE(GetSumResultType(pos, *inputType, resultType, ctx), "Unsupported type for sum aggregation function");
+    } else if (aggFunction == "avg") {
+        Y_ENSURE(GetAvgResultType(pos, *inputType, resultType, ctx), "Unsupported type for avg aggregation function");
+    } else if (aggFunction == "variance_1_1") {
+        Y_ENSURE(GetAvgResultType(pos, *inputType, resultType, ctx), "Unsupported type for variance aggregation function");
+    }
+
+    return resultType;
+}
+
 TIntrusivePtr<IOperator> BuildNullMapElementsExceptOneColumn(const TIntrusivePtr<IOperator>& input, const TTypeAnnotationNode* inputType,
-                                                             const TVector<TOpAggregationTraits>& aggTraitsList, const TOpAggregationTraits& realAggTraits, const TString& prefix, TPlanProps& props,
-                                                             TExprContext& ctx) {
+                                                             const TVector<TOpAggregationTraits>& aggTraitsList, const TOpAggregationTraits& realAggTraits,
+                                                             const TString& prefix, TPlanProps& props, TExprContext& ctx) {
     Y_ENSURE(inputType);
     auto inputStructType = inputType->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
 
@@ -84,7 +102,8 @@ TIntrusivePtr<IOperator> BuildNullMapElementsExceptOneColumn(const TIntrusivePtr
                 .Struct(arg)
                 .Name<TCoAtom>()
                     .Value(mapColName.GetFullName())
-                .Build().Done().Ptr();
+                .Build()
+            .Done().Ptr();
             // clang-format on
 
             if (!fieldType->IsOptionalOrNull()) {
@@ -101,6 +120,7 @@ TIntrusivePtr<IOperator> BuildNullMapElementsExceptOneColumn(const TIntrusivePtr
                 .Body(body)
             .Done().Ptr();
             // clang-format off
+
             const auto newName = mapColName.GetFullName() + "_" + ToString(i++);
             fakeColumns.emplace_back(newName, mapColName.GetFullName());
         } else {

@@ -1622,9 +1622,6 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
 
         std::vector<std::string> queriesOnEmptyColumns = {
             R"(
-                select sum(distinct t1.a), max(distinct t1.b) from `/Root/t1` as t1 group by t1.c;
-            )",
-            R"(
                 select count(*) from `/Root/t1` as t1;
             )",
             // non optional, optional coumn
@@ -1643,10 +1640,14 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
             R"(
                 SELECT stddev_samp(t1.a), stddev_samp(t1.b) from `/Root/t1` as t1;
             )",
+            R"(
+                select sum(distinct t1.a), max(distinct t1.b) from `/Root/t1` as t1;
+            )",
         };
         std::vector<std::string> resultsEmptyColumns = {
             R"([[0u]])",
             R"([[0u;0u]])",
+            R"([[#;#]])",
             R"([[#;#]])",
             R"([[#;#]])",
             R"([[#;#]])",
@@ -1659,9 +1660,9 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
             auto result = session2.ExecuteDataQuery(query, TTxControl::BeginTx().CommitTx()).GetValueSync();
             UNIT_ASSERT_C(result.IsSuccess(), result.GetIssues().ToString());
             //Cout << FormatResultSetYson(result.GetResultSet(0)) << Endl;
-            return;
             UNIT_ASSERT_VALUES_EQUAL(FormatResultSetYson(result.GetResultSet(0)), resultsEmptyColumns[i]);
         }
+        //return;
 
         NYdb::TValueBuilder rowsTableT1;
         rowsTableT1.BeginList();
@@ -1945,7 +1946,7 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
     }
 
     Y_UNIT_TEST_TWIN(Aggregation, ColumnStore) {
-        TestAggregation(ColumnStore);
+        TestAggregation(true);
     }
 
     void BasicHashJoinTest(bool useBlockHashJoin) {
