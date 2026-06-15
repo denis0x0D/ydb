@@ -56,41 +56,56 @@ TIntrusivePtr<IOperator> BuildDistinct(const TIntrusivePtr<IOperator>& input, TV
 }
 
 TIntrusivePtr<IOperator> BuildNullMapElementsExceptOneColumn(const TIntrusivePtr<IOperator>& input, const TTypeAnnotationNode* inputType,
-                                                             TVector<TAggregationTraits>& aggTraitsList, TAggregationTraits& realAggTraits, TPlanProps& props,
+                                                             const TVector<TOpAggregationTraits>& aggTraitsList, const TOpAggregationTraits& realAggTraits, const TString& prefix, TPlanProps& props,
                                                              TExprContext& ctx) {
     Y_ENSURE(inputType);
     auto inputStructType = inputType->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
 
-    auto aggTraitsCmp = [](const TOpAggregationTraits& left, const TOpAggregationTraits& right) {
-        return left.OriginalColName.GetFullName() == right.OriginalColname.GetFullName() && left.AggFunction == right.AggFunction &&
+    auto aggTraitsComparator = [](const TOpAggregationTraits& left, const TOpAggregationTraits& right) {
+        return left.OriginalColName.GetFullName() == right.OriginalColName.GetFullName() && left.AggFunction == right.AggFunction &&
                left.ResultColName.GetFullName() == right.ResultColName.GetFullName();
     };
 
     TVector<TMapElement> mapElements;
+    TVector<std::pair<TString, TString>> fakeColumns;
+    ui32 i = 0;
     for (const auto& aggTraits: aggTraitsList) {
+        const auto originalColName = aggTraits.OriginalColName.GetFullName();
         const auto resultColName = aggTraits.ResultColName.GetFullName();
         const auto mapColName = TInfoUnit(prefix + resultColName);
         TMapElement mapElement;
         TExprNode::TPtr columnExpr;
-        if (aggTraitsCmp(aggTraits, realAggTraits)) {
+        auto fieldType = inputStructType->FindItemType(originalColName);
+        Y_ENSURE(fieldType, "Aggregation column not found in input type:" << resultColName;);
+        if (aggTraitsComparator(aggTraits, realAggTraits)) {
+            auto arg = ctx.NewArgument(input->Pos, "arg");
+            // clang-format off
+            auto body = Build<TCoMember>(ctx, input->Pos)
+                .Struct(arg)
+                .Name<TCoAtom>()
+                    .Value(mapColName.GetFullName())
+                .Build().Done().Ptr();
+            // clang-format on
+
+            if (!fieldType->IsOptionalOrNull()) {
+                // clang-format off
+                body = Build<TCoJust>(ctx, input->Pos)
+                    .Input(body)
+                .Done().Ptr();
+                // clang-format on
+            }
+
             // clang-format on
             columnExpr = Build<TCoLambda>(ctx, input->Pos)
-                .Args({"arg"})
-                .Body<TCoJust>()
-                    .Input<TCoMember>()
-                        .Struct("arg")
-                        .Name<TCoAtom>()
-                            .Value(mapColName.GetFullName())
-                        .Build()
-                    .Build()
-                .Build()
+                .Args({arg})
+                .Body(body)
             .Done().Ptr();
             // clang-format off
+            const auto newName = mapColName.GetFullName() + "_" + ToString(i++);
+            fakeColumns.emplace_back(newName, mapColName.GetFullName());
         } else {
-            auto fieldType = inputStructType->FindItemType(resultColName);
-            Y_ENSURE(fieldType, "Aggregation column not found in input type:" << originalColName;);
             if (fieldType->IsOptionalOrNull()) {
-                fieldType = filedType->Cast<TOptionalExprType>();
+                fieldType = fieldType->Cast<TOptionalExprType>()->GetItemType();
             }
             // clang-format off
             columnExpr = Build<TCoLambda>(ctx, input->Pos)
@@ -105,6 +120,10 @@ TIntrusivePtr<IOperator> BuildNullMapElementsExceptOneColumn(const TIntrusivePtr
         }
         mapElement = TMapElement(mapColName, TExpression(columnExpr, &ctx, &props));
         mapElements.emplace_back(mapElement);
+    }
+
+    for (const auto& fakeColumn : fakeColumns) {
+        mapElements.emplace_back(TMapElement(TInfoUnit(fakeColumn.first), TInfoUnit(fakeColumn.second), input->Pos, &ctx, &props, true));
     }
 
     if (mapElements.empty()) {
@@ -139,8 +158,7 @@ TIntrusivePtr<IOperator> ExpandMultiDistinct(const TIntrusivePtr<TOpAggregate>& 
 
         partialResult = MakeIntrusive<TOpAggregate>(partialResult, partialAggregationTraitsList, aggregate->GetKeyColumns(), EOpPhase::Intermediate,
                                                     /*distinctAll=*/false, pos);
-
-        partialResult = BuildNullMapElementsExceptOneColumn(partialResult, aggregate->Type, aggTraitsList, aggTraits, intermediateColumnPrefix, props, ctx);
+        partialResult = BuildNullMapElementsExceptOneColumn(partialResult, aggregate->GetInput()->Type, aggTraitsList, aggTraits, intermediateColumnPrefix, props, ctx);
 
         if (unionAllResult) {
             unionAllResult = MakeIntrusive<TOpUnionAll>(unionAllResult, partialResult, aggregate->Pos);
