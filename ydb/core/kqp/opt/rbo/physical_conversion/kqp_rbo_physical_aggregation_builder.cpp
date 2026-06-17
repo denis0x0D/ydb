@@ -1223,10 +1223,25 @@ TVector<TString> TPhysicalAggregationBuilder::GetKeyFields() const {
 TExprNode::TPtr TPhysicalAggregationBuilder::CreateNothingForEmptyInput(const TTypeAnnotationNode* aggType) {
     Y_ENSURE(aggType);
     const auto* aggStructType = aggType->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
+    TVector<const TItemExprType*> newItems;
+    for (const auto& item : aggStructType->GetItems()) {
+        auto itemType = item->Cast<TItemExprType>();
+        auto originalFieldType = itemType->GetItemType();
+        if (auto fieldType = &RemoveOptionality(*originalFieldType); fieldType->GetKind() == ETypeAnnotationKind::Tuple) {
+            auto tupleType = fieldType->Cast<TTupleExprType>()->GetItems();
+            Y_ENSURE(tupleType.size() == 2);
+            auto newFieldType = originalFieldType->IsOptionalOrNull() ? Ctx.MakeType<TOptionalExprType>(tupleType[0]) : tupleType[1];
+            newItems.emplace_back(Ctx.MakeType<TItemExprType>(itemType->GetName(), newFieldType));
+        } else {
+            newItems.emplace_back(item->Cast<TItemExprType>());
+        }
+    }
+    auto newAggStructType = Ctx.MakeType<TStructExprType>(newItems);
+
     // clang-format off
     return Build<TCoNothing>(Ctx, Pos)
         .OptionalType<TCoOptionalType>()
-            .ItemType(ExpandType(Pos, *aggStructType, Ctx))
+            .ItemType(ExpandType(Pos, *newAggStructType, Ctx))
         .Build()
     .Done().Ptr();
     // clang-format on
@@ -1374,7 +1389,13 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildPhysicalOp(TExprNode::TPtr inp
 }
 
 bool TPhysicalAggregationBuilder::IsDecimalType(const TTypeAnnotationNode* typeNode) const {
-    const auto features = NUdf::GetDataTypeInfo(RemoveOptionality(*typeNode).Cast<TDataExprType>()->GetSlot()).Features;
+    auto type = &RemoveOptionality(*typeNode);
+    if (type->GetKind() == ETypeAnnotationKind::Tuple) {
+        auto items = type->Cast<TTupleExprType>()->GetItems();
+        Y_ENSURE(items.size() == 2);
+        type = items.front();
+    }
+    const auto features = NUdf::GetDataTypeInfo(type->Cast<TDataExprType>()->GetSlot()).Features;
     bool isdecimal = (features & NUdf::EDataTypeFeatures::DecimalType);
     return isdecimal;
 }

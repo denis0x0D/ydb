@@ -356,7 +356,9 @@ TStatus ComputeTypes(TIntrusivePtr<TOpAggregate> aggregate, TRBOContext& ctx) {
         } else if (aggFunction == "sum") {
             Y_ENSURE(GetSumResultType(pos, *it->second, aggFieldType, ctx.ExprCtx), "Unsupported type for sum aggregation function");
         } else if (aggFunction == "avg") {
-            Y_ENSURE(GetAvgResultType(pos, *it->second, aggFieldType, ctx.ExprCtx), "Unsupported type for avg aggregation function");
+            if (auto unwrappedType = &RemoveOptionality(*aggFieldType); unwrappedType->GetKind() != ETypeAnnotationKind::Tuple) {
+                Y_ENSURE(GetAvgResultType(pos, *it->second, aggFieldType, ctx.ExprCtx), "Unsupported type for avg aggregation function");
+            }
         } else if (aggFunction == "variance_1_1") {
             Y_ENSURE(GetAvgResultType(pos, *it->second, aggFieldType, ctx.ExprCtx), "Unsupported type for variance aggregation function");
         }
