@@ -1405,6 +1405,11 @@ TPhysicalAggregationBuilder::TDecimalType TPhysicalAggregationBuilder::GetDecima
     if (itemType->IsOptionalOrNull()) {
         itemType = itemType->Cast<TOptionalExprType>()->GetItemType();
     }
+
+    if (itemType->GetKind() == ETypeAnnotationKind::Tuple) {
+        itemType = itemType->Cast<TTupleExprType>()->GetItems().front();
+    }
+
     auto dataExprParams = dynamic_cast<const TDataExprParamsType*>(itemType);
     Y_ENSURE(dataExprParams);
     return TDecimalType(TString(dataExprParams->GetParamOne()), TString(dataExprParams->GetParamTwo()));
