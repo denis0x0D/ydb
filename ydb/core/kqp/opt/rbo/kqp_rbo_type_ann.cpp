@@ -300,6 +300,7 @@ TStatus ComputeTypes(TIntrusivePtr<TOpAddDependencies> addDeps, TRBOContext& ctx
 TStatus ComputeTypes(TIntrusivePtr<TOpUnionAll> unionAll, TRBOContext& ctx) {
     Y_UNUSED(ctx);
     auto leftInputType = unionAll->GetLeftInput()->Type;
+
     // TODO: Add sanity checks.
     unionAll->Type = leftInputType;
     return TStatus::Ok;
@@ -356,7 +357,15 @@ TStatus ComputeTypes(TIntrusivePtr<TOpAggregate> aggregate, TRBOContext& ctx) {
         } else if (aggFunction == "sum") {
             Y_ENSURE(GetSumResultType(pos, *it->second, aggFieldType, ctx.ExprCtx), "Unsupported type for sum aggregation function");
         } else if (aggFunction == "avg") {
-            if (auto unwrappedType = &RemoveOptionality(*aggFieldType); unwrappedType->GetKind() != ETypeAnnotationKind::Tuple) {
+            if (auto unwrappedType = &RemoveOptionality(*aggFieldType); unwrappedType->GetKind() == ETypeAnnotationKind::Tuple) {
+                auto tupleType = unwrappedType->Cast<TTupleExprType>()->GetItems();
+                Y_ENSURE(tupleType.size() == 2);
+                const bool isOptional = aggFieldType->IsOptionalOrNull();
+                Y_ENSURE(GetAvgResultType(pos, *tupleType.front(), aggFieldType, ctx.ExprCtx), "Unsupported type for avg aggregation function");
+                if (isOptional) {
+                    aggFieldType = ctx.ExprCtx.MakeType<TOptionalExprType>(aggFieldType);
+                }
+            } else {
                 Y_ENSURE(GetAvgResultType(pos, *it->second, aggFieldType, ctx.ExprCtx), "Unsupported type for avg aggregation function");
             }
         } else if (aggFunction == "variance_1_1") {

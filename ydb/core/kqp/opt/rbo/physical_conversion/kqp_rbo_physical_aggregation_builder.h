@@ -94,7 +94,7 @@ private:
     TExprNode::TPtr BuildVarianceUpdateComputeFinal(TExprNode::TPtr fieldMean, TExprNode::TPtr fieldPrevCounter, TExprNode::TPtr fieldAggState,
                                                     TExprNode::TPtr stateMean, TExprNode::TPtr statePrevCounter, TExprNode::TPtr stateAggState);
     TExprNode::TPtr BuildVarianceFinishCompute(TExprNode::TPtr counter, TExprNode::TPtr aggState);
-
+   
     // Heplers.
     TExprNode::TPtr GetNth(TExprNode::TPtr input, TString&& offset);
     TExprNode::TPtr GetDataTypeForSumAggregation(const TTypeAnnotationNode* itemType) const;
@@ -104,6 +104,7 @@ private:
                                         const TTypeAnnotationNode* inputType, const TTypeAnnotationNode* outputType);
     bool NeedToWrapWithCoalesce(const TPhysicalAggregationTraits& traits, EOpPhase aggregationPhase) const;
     TVector<TString> GetKeyFields() const;
+    const TTypeAnnotationNode* GetAggregateInputType() const;
 
     // Helpers for scalar aggregation.
     TExprNode::TPtr CreateNothingForEmptyInput(const TTypeAnnotationNode* aggType);

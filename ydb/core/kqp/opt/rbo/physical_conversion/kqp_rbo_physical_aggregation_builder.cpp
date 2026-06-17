@@ -1159,7 +1159,8 @@ void TPhysicalAggregationBuilder::BuildPhysicalAggregationTraits(const TVector<T
         const TTypeAnnotationNode* inputItemType = inputStructType->FindItemType(originalColName);
         const TTypeAnnotationNode* outputItemType = outputStructType->FindItemType(resultColName);
         Y_ENSURE(inputItemType && outputItemType, "Cannot find type for item");
-        aggColumns[originalColName].push_back(std::make_tuple(aggregationTraits.AggFunction, resultColName, inputItemType, outputItemType, aggregationTraits.Unwrap));
+        aggColumns[originalColName].push_back(
+            std::make_tuple(aggregationTraits.AggFunction, resultColName, inputItemType, outputItemType, aggregationTraits.Unwrap));
     }
 
     THashMap<TString, TString> aggFieldsMap;
@@ -1328,12 +1329,43 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildCondenseForAggregationOutputWi
     return MapCondenseOutput(input, traits, renameMap, aggregationPhase);
 }
 
+const TTypeAnnotationNode* TPhysicalAggregationBuilder::GetAggregateInputType() const {
+    /*
+    if (Aggregate->GetInput()->GetKind() == EOperator::Aggregate) {
+        auto inputAggregate = CastOperator<TOpAggregate>(Aggregate->GetInput());
+        if (inputAggregate->GetInput()->GetKind() == EOperator::UnionAll) {
+            auto unionAll = CastOperator<TOpUnionAll>(inputAggregate->GetInput());
+            auto leftInput = unionAll->GetLeftInput();
+            auto rightInput = unionAll->GetRightInput();
+            if (leftInput->GetKind() == EOperator::Map && rightInput->GetKind() == EOperaotr::Map) {
+                auto leftMap = CastOperator<TOpMap>(leftInput);
+                auto rightMap = CastOperator<TOpMap>(rightInput);
+                if (leftMap->GetInput()->GetKind() == EOperator::Aggregate && rightMap->GetInput()->GetKind() == EOperator::Aggregate) {
+                    TVector<const TItemExprType*> items;
+                    auto leftStructType = CastOperator<TOpAggregate>(leftMap->GetInput())->Type->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
+                    auto rightStructType = CastOperator<TOpAggregate>(rightMap->GetInput())->Type->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
+                    THashSet<TString> taken;
+                    for (const auto& item : leftStructType->GetItems()) {
+                        const auto fieldName = item->GetName();
+                        if (!taken.contains(fieldName)) {
+                            newItems.insert(item);
+                            taken.insert(fieldName);
+                        }
+                    }
+                }
+            }
+        }
+    }
+        */
+    return Aggregate->GetInput()->Type;
+}
+
 TExprNode::TPtr TPhysicalAggregationBuilder::BuildPhysicalOp(TExprNode::TPtr input, std::optional<i64> memLimit) {
     // We get input columns based on key columns and aggregation traits.
     const TVector<TString> inputColumns = GetInputColumns();
     // Just a full names of key columns.
     const TVector<TString> keyFields = GetKeyFields();
-    const auto* inputType = Aggregate->GetInput()->Type;
+    const auto* inputType = GetAggregateInputType();
     const auto* outputType = Aggregate->Type;
     const bool isDistinct = Aggregate->IsDistinctAll();
     const auto aggregationPhase = Aggregate->AggregationPhase;
@@ -1391,6 +1423,7 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildPhysicalOp(TExprNode::TPtr inp
 bool TPhysicalAggregationBuilder::IsDecimalType(const TTypeAnnotationNode* typeNode) const {
     auto type = &RemoveOptionality(*typeNode);
     if (type->GetKind() == ETypeAnnotationKind::Tuple) {
+        Y_ENSURE(false);
         auto items = type->Cast<TTupleExprType>()->GetItems();
         Y_ENSURE(items.size() == 2);
         type = items.front();
