@@ -992,14 +992,13 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildUpdateHandlerLambda(const TVec
 // This lambda returns aggregation result.
 // It has arguments in the following order - keys, states.
 TExprNode::TPtr TPhysicalAggregationBuilder::BuildFinishHandlerLambda(const TVector<TString>& keyFields,
-                                                                      const TVector<TPhysicalAggregationTraits>& aggTraitsList,
-                                                                      bool isDistinct) {
+                                                                      const TVector<TPhysicalAggregationTraits>& aggTraitsList, bool isDistinct) {
     ui32 lambdaArgsCounter = 0;
     TVector<TExprNode::TPtr> lambdaArgs;
     THashMap<TString, ui32> lambdaArgsMap;
     for (ui32 i = 0; i < keyFields.size(); ++i) {
         lambdaArgs.push_back(Ctx.NewArgument(Pos, "param" + ToString(lambdaArgsCounter)));
-        lambdaArgsMap.insert({keyFields[i],  lambdaArgsCounter++});
+        lambdaArgsMap.insert({keyFields[i], lambdaArgsCounter++});
     }
 
     TVector<TExprNode::TPtr> lambdaResults;
@@ -1009,19 +1008,38 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildFinishHandlerLambda(const TVec
     }
 
     if (!isDistinct) {
+        bool needOriginalDecimalType = false;
         for (ui32 i = 0; i < aggTraitsList.size(); ++i) {
             lambdaArgs.push_back(Ctx.NewArgument(Pos, "param" + ToString(lambdaArgsCounter)));
             lambdaArgsMap.insert({aggTraitsList[i].StateFieldName, lambdaArgsCounter++});
+            const auto& traits = aggTraitsList[i];
+            if (!needOriginalDecimalType && traits.AggFunc == "avg") {
+                auto typeNode = traits.InputItemType;
+                needOriginalDecimalType = RemoveOptionality(*typeNode).GetKind() == ETypeAnnotationKind::Tuple;
+            }
+        }
+
+        THashMap<TString, const TTypeAnnotationNode*> colTypeMap;
+        if (Aggregate->GetAggregationPhase() == EOpPhase::Final && needOriginalDecimalType) {
+            colTypeMap = GetIntermediateAggregationInputType();
         }
 
         for (const auto& aggTraits : aggTraitsList) {
             const auto& aggFunction = aggTraits.AggFunc;
             const auto& stateName = aggTraits.StateFieldName;
+            const auto& originalColName = aggTraits.OriginalColName;
             const bool inputIsOptional = aggTraits.InputItemType->IsOptionalOrNull();
             const bool outputIsOptional = aggTraits.OutputItemType->IsOptionalOrNull();
             const bool unwrap = aggTraits.Unwrap;
-            const TTypeAnnotationNode* typeNode = aggTraits.InputItemType;
-            auto it = lambdaArgsMap.find(stateName);
+            auto typeNode = aggTraits.InputItemType;
+            if (needOriginalDecimalType) {
+                const auto it = colTypeMap.find(originalColName);
+                Y_ENSURE(it != colTypeMap.end());
+                typeNode = it->second;
+                Cout << "ORIGINAL TYPE OPT " <<  typeNode->Cast<TOptionalExprType>()->GetItemType()->GetKind() << Endl;
+            }
+
+            const auto it = lambdaArgsMap.find(stateName);
             TExprNode::TPtr finishState = lambdaArgs[it->second];
 
             if (aggFunction == "avg") {
@@ -1193,7 +1211,7 @@ void TPhysicalAggregationBuilder::BuildPhysicalAggregationTraits(const TVector<T
                     inputField = aggFieldsMap[originalColName];
                 }
 
-                TPhysicalAggregationTraits phyTraits(inputField, stateName, aggFunction, inputType, outputType, unwrap);
+                TPhysicalAggregationTraits phyTraits(inputField, stateName, originalColName, aggFunction, inputType, outputType, unwrap);
                 if (inputColumnsToAggFunction.contains(originalColName)) {
                     phyTraits.InputAggFunc = inputColumnsToAggFunction[originalColName];
                 }
@@ -1335,30 +1353,27 @@ void TPhysicalAggregationBuilder::PopulateAggregateColTypeMap(const TIntrusivePt
         const auto resultColName = traits.ResultColName.GetFullName();
         const auto originalColName = traits.OriginalColName.GetFullName();
         auto fieldType = structType->FindItemType(originalColName);
-        Y_ENSURE(fieldType);
+        Y_ENSURE(fieldType, TStringBuilder() << "Caanot find column in input type: " << originalColName);
         colTypeMap.insert({resultColName, fieldType});
     }
 }
 
 THashMap<TString, const TTypeAnnotationNode*> TPhysicalAggregationBuilder::GetIntermediateAggregationInputType() const {
     THashMap<TString, const TTypeAnnotationNode*> colTypeMap;
-    if (Aggregate->GetInput()->GetKind() == EOperator::Aggregate) {
-        auto inputAggregate = CastOperator<TOpAggregate>(Aggregate->GetInput());
-        if (inputAggregate->GetInput()->GetKind() == EOperator::UnionAll) {
-            auto unionAll = CastOperator<TOpUnionAll>(inputAggregate->GetInput());
-            auto leftInput = unionAll->GetLeftInput();
-            auto rightInput = unionAll->GetRightInput();
-            if (leftInput->GetKind() == EOperator::Map && rightInput->GetKind() == EOperator::Map) {
-                auto leftMap = CastOperator<TOpMap>(leftInput);
-                auto rightMap = CastOperator<TOpMap>(rightInput);
-                if (leftMap->GetInput()->GetKind() == EOperator::Aggregate && rightMap->GetInput()->GetKind() == EOperator::Aggregate) {
-                    const auto leftAggregate = CastOperator<TOpAggregate>(leftMap->GetInput());
-                    const auto rightAggregate = CastOperator<TOpAggregate>(rightMap->GetInput());
-                    auto leftStructType = leftAggregate->Type->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
-                    auto rightStructType = rightAggregate->Type->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
-                    PopulateAggregateColTypeMap(leftAggregate, leftStructType, colTypeMap);
-                    PopulateAggregateColTypeMap(rightAggregate, rightStructType, colTypeMap);
-               }
+    if (Aggregate->GetInput()->GetKind() == EOperator::UnionAll) {
+        const auto unionAll = CastOperator<TOpUnionAll>(Aggregate->GetInput());
+        const auto leftInput = unionAll->GetLeftInput();
+        const auto rightInput = unionAll->GetRightInput();
+        if (leftInput->GetKind() == EOperator::Map && rightInput->GetKind() == EOperator::Map) {
+            const auto leftMap = CastOperator<TOpMap>(leftInput);
+            const auto rightMap = CastOperator<TOpMap>(rightInput);
+            if (leftMap->GetInput()->GetKind() == EOperator::Aggregate && rightMap->GetInput()->GetKind() == EOperator::Aggregate) {
+                const auto leftAggregate = CastOperator<TOpAggregate>(leftMap->GetInput());
+                const auto rightAggregate = CastOperator<TOpAggregate>(rightMap->GetInput());
+                auto leftStructType = leftAggregate->GetInput()->Type->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
+                auto rightStructType = rightAggregate->GetInput()->Type->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
+                PopulateAggregateColTypeMap(leftAggregate, leftStructType, colTypeMap);
+                PopulateAggregateColTypeMap(rightAggregate, rightStructType, colTypeMap);
             }
         }
     }
@@ -1428,7 +1443,6 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildPhysicalOp(TExprNode::TPtr inp
 bool TPhysicalAggregationBuilder::IsDecimalType(const TTypeAnnotationNode* typeNode) const {
     auto type = &RemoveOptionality(*typeNode);
     if (type->GetKind() == ETypeAnnotationKind::Tuple) {
-        Y_ENSURE(false);
         auto items = type->Cast<TTupleExprType>()->GetItems();
         Y_ENSURE(items.size() == 2);
         type = items.front();
@@ -1449,6 +1463,8 @@ TPhysicalAggregationBuilder::TDecimalType TPhysicalAggregationBuilder::GetDecima
     }
 
     auto dataExprParams = dynamic_cast<const TDataExprParamsType*>(itemType);
+    Cout << TString(dataExprParams->GetParamOne()) << " " <<  TString(dataExprParams->GetParamTwo()) << Endl;
+
     Y_ENSURE(dataExprParams);
     return TDecimalType(TString(dataExprParams->GetParamOne()), TString(dataExprParams->GetParamTwo()));
 }

@@ -11,10 +11,11 @@ using namespace NKikimr::NKqp;
 class TPhysicalAggregationBuilder: public TPhysicalUnaryOpBuilderWithMemLimit {
     // Internal representation of physical aggregation traits.
     struct TPhysicalAggregationTraits {
-        TPhysicalAggregationTraits(const TString& aggFieldName, const TString stateFieldName, const TString& aggFunc, const TTypeAnnotationNode* inputItemType,
-                                   const TTypeAnnotationNode* outputItemType, bool unwrap = false)
+        TPhysicalAggregationTraits(const TString& aggFieldName, const TString& stateFieldName, const TString& originalColName, const TString& aggFunc,
+                                   const TTypeAnnotationNode* inputItemType, const TTypeAnnotationNode* outputItemType, bool unwrap = false)
             : AggFieldName(aggFieldName)
             , StateFieldName(stateFieldName)
+            , OriginalColName(originalColName)
             , AggFunc(aggFunc)
             , InputItemType(inputItemType)
             , OutputItemType(outputItemType)
@@ -23,6 +24,7 @@ class TPhysicalAggregationBuilder: public TPhysicalUnaryOpBuilderWithMemLimit {
 
         TString AggFieldName;
         TString StateFieldName;
+        TString OriginalColName;
         TString AggFunc;
         const TTypeAnnotationNode* InputItemType;
         const TTypeAnnotationNode* OutputItemType;
