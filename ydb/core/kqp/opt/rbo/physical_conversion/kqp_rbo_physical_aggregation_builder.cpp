@@ -1329,35 +1329,40 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildCondenseForAggregationOutputWi
     return MapCondenseOutput(input, traits, renameMap, aggregationPhase);
 }
 
-const TTypeAnnotationNode* TPhysicalAggregationBuilder::GetAggregateInputType() const {
-    /*
+void TPhysicalAggregationBuilder::PopulateAggregateColTypeMap(const TIntrusivePtr<TOpAggregate>& aggregate, const TStructExprType* structType,
+                                                              THashMap<TString, const TTypeAnnotationNode*>& colTypeMap) const {
+    for (const auto& traits : aggregate->GetAggregationTraits()) {
+        const auto resultColName = traits.ResultColName.GetFullName();
+        const auto originalColName = traits.OriginalColName.GetFullName();
+        auto fieldType = structType->FindItemType(originalColName);
+        Y_ENSURE(fieldType);
+        colTypeMap.insert({resultColName, fieldType});
+    }
+}
+
+THashMap<TString, const TTypeAnnotationNode*> TPhysicalAggregationBuilder::GetIntermediateAggregationInputType() const {
+    THashMap<TString, const TTypeAnnotationNode*> colTypeMap;
     if (Aggregate->GetInput()->GetKind() == EOperator::Aggregate) {
         auto inputAggregate = CastOperator<TOpAggregate>(Aggregate->GetInput());
         if (inputAggregate->GetInput()->GetKind() == EOperator::UnionAll) {
             auto unionAll = CastOperator<TOpUnionAll>(inputAggregate->GetInput());
             auto leftInput = unionAll->GetLeftInput();
             auto rightInput = unionAll->GetRightInput();
-            if (leftInput->GetKind() == EOperator::Map && rightInput->GetKind() == EOperaotr::Map) {
+            if (leftInput->GetKind() == EOperator::Map && rightInput->GetKind() == EOperator::Map) {
                 auto leftMap = CastOperator<TOpMap>(leftInput);
                 auto rightMap = CastOperator<TOpMap>(rightInput);
                 if (leftMap->GetInput()->GetKind() == EOperator::Aggregate && rightMap->GetInput()->GetKind() == EOperator::Aggregate) {
-                    TVector<const TItemExprType*> items;
-                    auto leftStructType = CastOperator<TOpAggregate>(leftMap->GetInput())->Type->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
-                    auto rightStructType = CastOperator<TOpAggregate>(rightMap->GetInput())->Type->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
-                    THashSet<TString> taken;
-                    for (const auto& item : leftStructType->GetItems()) {
-                        const auto fieldName = item->GetName();
-                        if (!taken.contains(fieldName)) {
-                            newItems.insert(item);
-                            taken.insert(fieldName);
-                        }
-                    }
-                }
+                    const auto leftAggregate = CastOperator<TOpAggregate>(leftMap->GetInput());
+                    const auto rightAggregate = CastOperator<TOpAggregate>(rightMap->GetInput());
+                    auto leftStructType = leftAggregate->Type->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
+                    auto rightStructType = rightAggregate->Type->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
+                    PopulateAggregateColTypeMap(leftAggregate, leftStructType, colTypeMap);
+                    PopulateAggregateColTypeMap(rightAggregate, rightStructType, colTypeMap);
+               }
             }
         }
     }
-        */
-    return Aggregate->GetInput()->Type;
+    return colTypeMap;
 }
 
 TExprNode::TPtr TPhysicalAggregationBuilder::BuildPhysicalOp(TExprNode::TPtr input, std::optional<i64> memLimit) {
@@ -1365,7 +1370,7 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildPhysicalOp(TExprNode::TPtr inp
     const TVector<TString> inputColumns = GetInputColumns();
     // Just a full names of key columns.
     const TVector<TString> keyFields = GetKeyFields();
-    const auto* inputType = GetAggregateInputType();
+    const auto* inputType = Aggregate->GetInput()->Type;
     const auto* outputType = Aggregate->Type;
     const bool isDistinct = Aggregate->IsDistinctAll();
     const auto aggregationPhase = Aggregate->AggregationPhase;

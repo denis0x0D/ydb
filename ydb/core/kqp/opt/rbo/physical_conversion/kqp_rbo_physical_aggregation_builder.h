@@ -105,6 +105,9 @@ private:
     bool NeedToWrapWithCoalesce(const TPhysicalAggregationTraits& traits, EOpPhase aggregationPhase) const;
     TVector<TString> GetKeyFields() const;
     const TTypeAnnotationNode* GetAggregateInputType() const;
+    void PopulateAggregateColTypeMap(const TIntrusivePtr<TOpAggregate>& aggregate, const TStructExprType* structType,
+                                     THashMap<TString, const TTypeAnnotationNode*>& colTypeMap) const;
+    THashMap<TString, const TTypeAnnotationNode*> GetIntermediateAggregationInputType() const;
 
     // Helpers for scalar aggregation.
     TExprNode::TPtr CreateNothingForEmptyInput(const TTypeAnnotationNode* aggType);
