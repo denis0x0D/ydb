@@ -1032,11 +1032,11 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildFinishHandlerLambda(const TVec
             const bool outputIsOptional = aggTraits.OutputItemType->IsOptionalOrNull();
             const bool unwrap = aggTraits.Unwrap;
             auto typeNode = aggTraits.InputItemType;
+
             if (needOriginalDecimalType) {
                 const auto it = colTypeMap.find(originalColName);
                 Y_ENSURE(it != colTypeMap.end());
                 typeNode = it->second;
-                Cout << "ORIGINAL TYPE OPT " <<  typeNode->Cast<TOptionalExprType>()->GetItemType()->GetKind() << Endl;
             }
 
             const auto it = lambdaArgsMap.find(stateName);
@@ -1241,15 +1241,39 @@ TVector<TString> TPhysicalAggregationBuilder::GetKeyFields() const {
 
 TExprNode::TPtr TPhysicalAggregationBuilder::CreateNothingForEmptyInput(const TTypeAnnotationNode* aggType) {
     Y_ENSURE(aggType);
-    const auto* aggStructType = aggType->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
+    const auto aggStructType = aggType->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
+
+    bool needOriginalDecimalType = false;
+    if (Aggregate->GetAggregationPhase() == EOpPhase::Final) {
+        for (const auto& item : aggStructType->GetItems()) {
+            auto itemType = item->Cast<TItemExprType>();
+            auto originalFieldType = itemType->GetItemType();
+            if (auto fieldType = &RemoveOptionality(*originalFieldType); fieldType->GetKind() == ETypeAnnotationKind::Tuple) {
+                needOriginalDecimalType = true;
+                break;
+            }
+        }
+    }
+
+    THashMap<TString, const TTypeAnnotationNode*> colTypeMap;
+    const auto inputStructType = Aggregate->GetInput()->Type;
+    if (needOriginalDecimalType) {
+        colTypeMap = GetIntermediateAggregationInputType();
+    }
+
     TVector<const TItemExprType*> newItems;
     for (const auto& item : aggStructType->GetItems()) {
         auto itemType = item->Cast<TItemExprType>();
         auto originalFieldType = itemType->GetItemType();
+        Cout << aggStructType->ToString() << Endl;
         if (auto fieldType = &RemoveOptionality(*originalFieldType); fieldType->GetKind() == ETypeAnnotationKind::Tuple) {
-            auto tupleType = fieldType->Cast<TTupleExprType>()->GetItems();
-            Y_ENSURE(tupleType.size() == 2);
-            auto newFieldType = originalFieldType->IsOptionalOrNull() ? Ctx.MakeType<TOptionalExprType>(tupleType[0]) : tupleType[1];
+            const auto& colName = itemType->GetName();
+            const auto it = colTypeMap.find(colName);
+            Y_ENSURE(it != colTypeMap.end(), TStringBuilder() << "Cannot find a col name: " << colName;);
+            auto newFieldType = it->second;
+            if (originalFieldType->IsOptionalOrNull()) {
+                newFieldType = Ctx.MakeType<TOptionalExprType>(newFieldType);
+            }
             newItems.emplace_back(Ctx.MakeType<TItemExprType>(itemType->GetName(), newFieldType));
         } else {
             newItems.emplace_back(item->Cast<TItemExprType>());
@@ -1354,6 +1378,7 @@ void TPhysicalAggregationBuilder::PopulateAggregateColTypeMap(const TIntrusivePt
         const auto originalColName = traits.OriginalColName.GetFullName();
         auto fieldType = structType->FindItemType(originalColName);
         Y_ENSURE(fieldType, TStringBuilder() << "Caanot find column in input type: " << originalColName);
+        fieldType = &RemoveOptionality(*fieldType);
         colTypeMap.insert({resultColName, fieldType});
     }
 }
