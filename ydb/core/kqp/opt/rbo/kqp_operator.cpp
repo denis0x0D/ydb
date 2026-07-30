@@ -1031,7 +1031,8 @@ TOpTableLookup::TOpTableLookup(TIntrusivePtr<IOperator> input, TPositionHandle p
 TOpTableLookup::TOpTableLookup(TIntrusivePtr<IOperator> input, TPositionHandle pos, const TExprNode::TPtr& table,
                                const TVector<TString>& fetchColumns, const TVector<TInfoUnit>& outputIUs,
                                const TVector<TInfoUnit>& lookupKeys, const TVector<TString>& lookupKeyColumns,
-                               const TString& joinKind, const std::optional<TExpression>& fetchedRowFilter)
+                               const TString& joinKind, const std::optional<TExpression>& fetchedRowFilter,
+                               const std::optional<TLookupKeyPrefix>& prefix)
     : IUnaryOperator(EOperator::TableLookup, pos, input)
     , Table(table)
     , FetchColumns(fetchColumns)
@@ -1040,10 +1041,18 @@ TOpTableLookup::TOpTableLookup(TIntrusivePtr<IOperator> input, TPositionHandle p
     , LookupKeyColumns(lookupKeyColumns)
     , JoinKind(joinKind)
     , FetchedRowFilter(fetchedRowFilter)
+    , Prefix(prefix)
     , Strategy(ELookupStrategy::LookupJoinRows) {
     Y_ENSURE(LookupKeys.size() == LookupKeyColumns.size(), "Lookup join keys must be paired with table key columns");
+    // A lookup key driven only by constants is a broadcast rather than a join, and it would also make
+    // AllowNullKeysPrefixSize cover the whole key, allowing NULL keys to match.
     Y_ENSURE(!LookupKeys.empty(), "Lookup join needs at least one key");
     Y_ENSURE(JoinOutputsLeft(JoinKind) && JoinOutputsRight(JoinKind), "Lookup join must output both sides");
+    if (Prefix) {
+        Y_ENSURE(Prefix->Points, "Lookup key prefix needs a points expression");
+        Y_ENSURE(Prefix->PointsItemType, "Lookup key prefix needs a typed points expression");
+        Y_ENSURE(!Prefix->Columns.empty(), "Lookup key prefix needs at least one column");
+    }
 }
 
 void TOpTableLookup::ComputeOutputIUs() {
@@ -1059,7 +1068,14 @@ void TOpTableLookup::ComputeOutputIUs() {
 
 TVector<TInfoUnit> TOpTableLookup::GetUsedIUs(TPlanProps& props) {
     Y_UNUSED(props);
-    return LookupKeys;
+    auto res = LookupKeys;
+    if (Prefix) {
+        for (const auto& [column, iu] : Prefix->Equalities) {
+            Y_UNUSED(column);
+            res.push_back(iu);
+        }
+    }
+    return res;
 }
 
 TVector<std::reference_wrapper<TExpression>> TOpTableLookup::GetExpressions() {
@@ -1094,6 +1110,12 @@ TString TOpTableLookup::ToString(TExprContext& ctx) {
         }
     }
     res << "]";
+    if (Prefix) {
+        res << ", key prefix: [" << JoinSeq(", ", Prefix->Columns) << "]";
+        for (const auto& [column, iu] : Prefix->Equalities) {
+            res << ", " << column << " = " << iu.GetFullName();
+        }
+    }
     if (FetchedRowFilter) {
         res << ", filter: " << FetchedRowFilter->ToString();
     }
@@ -1111,6 +1133,12 @@ NJson::TJsonValue TOpTableLookup::ToJson(ui32 explainFlags) {
                 condition << ", ";
             }
             condition << LookupKeys[i].GetFullName() << " = " << LookupKeyColumns[i];
+        }
+        if (Prefix) {
+            for (const auto& [column, iu] : Prefix->Equalities) {
+                condition << ", " << iu.GetFullName() << " = " << column;
+            }
+            res["LookupKeyPrefix"] = JoinSeq(", ", Prefix->Columns);
         }
         res["Condition"] = TString(condition);
     }

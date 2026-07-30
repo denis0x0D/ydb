@@ -48,8 +48,39 @@ TLookupKeysResult BuildLookupKeys(TOpTableLookup& lookup, TExprNode::TPtr inputS
         leftItems.push_back(ctx.MakeType<TItemExprType>(name, type));
     }
 
+    const auto point = Build<TCoArgument>(ctx, pos).Name("lookup_join_key_point").Done();
+
+    // The lookup key is built from the constant cells of the point prefix followed by the cells taken
+    // from the left row.
     TVector<TExprBase> keyMembers;
     TVector<const TItemExprType*> keyItems;
+    TVector<TExprBase> equalities;
+    if (lookup.Prefix) {
+        Y_ENSURE(lookup.Prefix->PointsItemType);
+        for (const auto& column : lookup.Prefix->Columns) {
+            const auto* type = lookup.Prefix->PointsItemType->FindItemType(column);
+            Y_ENSURE(type, "Type of the lookup key prefix column " << column << " is not available");
+            keyMembers.push_back(BuildMemberTuple(column, column, point, ctx, pos));
+            keyItems.push_back(ctx.MakeType<TItemExprType>(column, type));
+        }
+
+        // A join key covered by a constant cell is not checked by the lookup itself.
+        for (const auto& [column, key] : lookup.Prefix->Equalities) {
+            // clang-format off
+            equalities.push_back(Build<TCoCmpEqual>(ctx, pos)
+                .Left<TCoMember>()
+                    .Struct(point)
+                    .Name().Build(column)
+                .Build()
+                .Right<TCoMember>()
+                    .Struct(row)
+                    .Name().Build(key.GetFullName())
+                .Build()
+            .Done());
+            // clang-format on
+        }
+    }
+
     for (size_t i = 0; i < lookup.LookupKeys.size(); ++i) {
         const auto& key = lookup.LookupKeys[i];
         const auto& column = lookup.LookupKeyColumns[i];
@@ -59,24 +90,85 @@ TLookupKeysResult BuildLookupKeys(TOpTableLookup& lookup, TExprNode::TPtr inputS
         keyItems.push_back(ctx.MakeType<TItemExprType>(column, type));
     }
 
+    const auto leftStruct = Build<TCoAsStruct>(ctx, pos).Add(leftMembers).Done();
+    const auto keyStruct = Build<TCoAsStruct>(ctx, pos).Add(keyMembers).Done();
+    const auto* keyType = ctx.MakeType<TOptionalExprType>(ctx.MakeType<TStructExprType>(keyItems));
+
+    TExprNode::TPtr lambdaBody;
+    if (!lookup.Prefix) {
+        // clang-format off
+        lambdaBody = Build<TExprList>(ctx, pos)
+            .Add(leftStruct)
+            .Add<TCoJust>()
+                .Input(keyStruct)
+            .Build()
+        .Done().Ptr();
+        // clang-format on
+    } else {
+        TExprBase maybeKey = Build<TCoJust>(ctx, pos).Input(keyStruct).Done();
+        if (!equalities.empty()) {
+            const auto predicate = equalities.size() == 1
+                ? equalities.front()
+                : TExprBase(Build<TCoAnd>(ctx, pos).Add(equalities).Done());
+            // clang-format off
+            maybeKey = Build<TCoOptionalIf>(ctx, pos)
+                .Predicate<TCoCoalesce>()
+                    .Predicate(predicate)
+                    .Value<TCoBool>()
+                        .Literal().Build("false")
+                    .Build()
+                .Build()
+                .Value(keyStruct)
+            .Done();
+            // clang-format on
+        }
+
+        // A left row without a single point has no match at all: it still has to be passed on with an
+        // empty key so that an outer join reports it as unmatched.
+        // clang-format off
+        lambdaBody = Build<TCoIf>(ctx, pos)
+            .Predicate<TCoHasItems>()
+                .List(lookup.Prefix->Points)
+            .Build()
+            .ThenValue<TCoMap>()
+                .Input(lookup.Prefix->Points)
+                .Lambda()
+                    .Args({point})
+                    .Body<TExprList>()
+                        .Add(leftStruct)
+                        .Add(maybeKey)
+                    .Build()
+                .Build()
+            .Build()
+            .ElseValue<TCoAsList>()
+                .Add<TExprList>()
+                    .Add(leftStruct)
+                    .Add<TCoNothing>()
+                        .OptionalType(NYql::ExpandType(pos, *keyType, ctx))
+                    .Build()
+                .Build()
+            .Build()
+        .Done().Ptr();
+        // clang-format on
+    }
+
     // Here is a tuple for the left side.
     // clang-format off
     const auto lambda = Build<TCoLambda>(ctx, pos)
         .Args({row})
-        .Body<TExprList>()
-            .Add<TCoAsStruct>()
-                .Add(leftMembers)
-            .Build()
-            .Add<TCoJust>()
-                .Input<TCoAsStruct>()
-                    .Add(keyMembers)
-                .Build()
-            .Build()
-        .Build()
+        .Body(lambdaBody)
     .Done();
     // clang-format on
 
     auto buildKeys = [&](TExprNode::TPtr body) {
+        if (lookup.Prefix) {
+            // clang-format off
+            return Build<TCoFlatMap>(ctx, pos)
+                .Input(body)
+                .Lambda(lambda)
+            .Done().Ptr();
+            // clang-format on
+        }
         // clang-format off
         return Build<TCoMap>(ctx, pos)
             .Input(body)
@@ -105,7 +197,7 @@ TLookupKeysResult BuildLookupKeys(TOpTableLookup& lookup, TExprNode::TPtr inputS
     // Tuple: (left row, lookup key).
     const TTypeAnnotationNode::TListType tupleItems{
         ctx.MakeType<TStructExprType>(leftItems),
-        ctx.MakeType<TOptionalExprType>(ctx.MakeType<TStructExprType>(keyItems)),
+        keyType,
     };
     const auto* keysType = ctx.MakeType<TListExprType>(ctx.MakeType<TTupleExprType>(tupleItems));
 

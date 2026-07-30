@@ -3615,6 +3615,8 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
             TString Query;
             // How many joins are expected to be executed as a stream lookup join.
             ui32 LookupJoins;
+            // Set when the old optimizer cannot be used as a reference for the result.
+            const char* ExpectedYson = nullptr;
         };
 
         const TVector<TCase> cases = {
@@ -3681,6 +3683,74 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                     INNER JOIN `/Root/t1` AS y ON x.b = y.a
                 ORDER BY a;
             )", 1},
+
+            // A point predicate on the first key column of t3 leaves the join key as the next key
+            // column, so the pair makes up a full key.
+            {"point predicate ahead of the join key", R"(
+                SELECT t1.a AS a, t3.c AS t3c
+                FROM `/Root/t1` AS t1
+                    INNER JOIN `/Root/t3` AS t3 ON t1.d = t3.b
+                WHERE t3.a = 1
+                ORDER BY a, t3c;
+            )", 1},
+
+            // Every point is probed separately, so a left row can be looked up several times.
+            {"several point predicates ahead of the join key", R"(
+                SELECT t1.a AS a, t3.c AS t3c
+                FROM `/Root/t1` AS t1
+                    INNER JOIN `/Root/t3` AS t3 ON t1.d = t3.b
+                WHERE t3.a IN (1, 2)
+                ORDER BY a, t3c;
+            )", 1},
+
+            // A point predicate can select a null key, so the constant cell of the lookup key is null
+            // here. Only a cell of the point prefix may be null, see AllowNullKeysPrefixSize: a null
+            // taken from the left row still must not match anything.
+            {"null point predicate ahead of the join key", R"(
+                SELECT t1.a AS a, t3.c AS t3c
+                FROM `/Root/t1` AS t1
+                    INNER JOIN `/Root/t3` AS t3 ON t1.d = t3.b
+                WHERE t3.a IS NULL
+                ORDER BY a, t3c;
+            )", 1},
+
+            // The point predicate covers a join key: the lookup cannot check that equality itself, so
+            // it is checked on the left row before the lookup.
+            {"point predicate on a join key", R"(
+                SELECT t1.a AS a, t3.c AS t3c
+                FROM `/Root/t1` AS t1
+                    INNER JOIN `/Root/t3` AS t3 ON t1.c = t3.a AND t1.d = t3.b
+                WHERE t3.a = 1
+                ORDER BY a, t3c;
+            )", 1},
+
+            {"left join with a point predicate ahead of the join key", R"(
+                SELECT t1.a AS a, t3.c AS t3c
+                FROM `/Root/t1` AS t1
+                    LEFT JOIN (SELECT * FROM `/Root/t3` WHERE a = 2) AS t3 ON t1.d = t3.b
+                ORDER BY a, t3c;
+            )", 1},
+
+            // A left row that matches only some of the points would be reported as unmatched by the
+            // probes of the other points, so several points are not usable here.
+            //
+            // The old optimizer does build such a lookup, and gets it wrong: BuildKqpStreamIndexLookupJoin
+            // in kqp_opt_log_join.cpp expands a left row into one input tuple per point of the prefix,
+            // while the lookup worker keys pending left rows by the lookup key (PendingLeftRowsByKey in
+            // kqp_stream_lookup_worker.cpp), so every point that finds nothing emits its own null-extended
+            // row. Its join-kind checks only cover the case of an empty points list, not several points.
+            // For this query it therefore reports t1.a = 2 both as matched ([[2];["p1b"]], from the point
+            // a = 1) and as unmatched ([[2];#], from the point a = 2), which no LEFT JOIN may do. That is a
+            // pre-existing bug of the old optimizer, left alone here; it just cannot serve as a reference,
+            // so the result below is spelled out instead — it is the one required by the join semantics.
+            {"left join with several point predicates ahead of the join key", R"(
+                SELECT t1.a AS a, t3.c AS t3c
+                FROM `/Root/t1` AS t1
+                    LEFT JOIN (SELECT * FROM `/Root/t3` WHERE a IN (1, 2)) AS t3 ON t1.d = t3.b
+                ORDER BY a, t3c;
+            )", 0,
+             R"([[[1];["p1a"]];[[1];["p2a"]];[[2];["p1b"]];[[3];["p1a"]];[[3];["p2a"]];[[4];["p1a"]];)"
+             R"([[4];["p2a"]];[[5];["p1a"]];[[5];["p2a"]];[[6];["p1a"]];[[6];["p2a"]];[[7];["p1a"]];[[7];["p2a"]]])"},
 
             // The join key is the second key column of t3, so a lookup would have to scan the whole
             // table for every left row.
@@ -3772,6 +3842,22 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
             }
 
             {
+                // A null in the first key column: a point predicate can select it, so the constant
+                // cell of a lookup key prefix has to be allowed to hold a null.
+                NYdb::TValueBuilder rows;
+                rows.BeginList();
+                rows.AddListItem().BeginStruct()
+                    .AddMember("a").OptionalInt32(std::nullopt)
+                    .AddMember("b").OptionalString("a")
+                    .AddMember("c").OptionalString("pna")
+                    .AddMember("d").OptionalInt32(60)
+                    .AddMember("e").OptionalInt32(30)
+                    .EndStruct();
+                rows.EndList();
+                bulkUpsert("/Root/t3", rows);
+            }
+
+            {
                 NYdb::TValueBuilder rows;
                 rows.BeginList();
                 for (const auto& [a, b, c, d, e] :
@@ -3831,7 +3917,11 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
             const auto& newRbo = newRboResults[i];
 
             // Check that results are the same.
-            UNIT_ASSERT_VALUES_EQUAL_C(newRbo.Yson, yqlResults[i].Yson, testCase.Name);
+            if (testCase.ExpectedYson) {
+                UNIT_ASSERT_VALUES_EQUAL_C(newRbo.Yson, TString(testCase.ExpectedYson), testCase.Name);
+            } else {
+                UNIT_ASSERT_VALUES_EQUAL_C(newRbo.Yson, yqlResults[i].Yson, testCase.Name);
+            }
 
             const auto lookupJoins = countOccurrences(newRbo.Ast, "KqpIndexLookupJoin");
             UNIT_ASSERT_VALUES_EQUAL_C(lookupJoins, testCase.LookupJoins, testCase.Name << ", ast:\n" << newRbo.Ast);

@@ -407,6 +407,16 @@ public:
         TVector<TString> KeyColumns;  // all table key columns (with or without alias prefix)
         size_t UsedPrefixLen = 0;     // how many leading key columns are range-constrained
         TMaybe<size_t> ExpectedMaxRanges;
+
+        // The point (equality constrained) part of the pushed ranges, extracted separately so that a
+        // lookup join can turn it into the leading cells of its lookup key. A lookup key cell holds a
+        // single value, so points must not be merged into ranges here even when the ranges pushed into
+        // the read have them merged. Empty when the ranges have no point prefix, when the read is not
+        // a datashard read, or when the points expression could not be typed.
+        TExprNode::TPtr Points;                   // List<Struct<PointColumns...>>
+        const TStructExprType* PointsItemType = nullptr;
+        TVector<TString> PointColumns;            // physical names of the leading point columns, in key order
+        TMaybe<size_t> ExpectedMaxPoints;         // upper bound on the length of Points
     };
 
     TOpRead(TExprNode::TPtr node);
@@ -767,13 +777,29 @@ enum class ELookupStrategy : ui32 {
 
 class TOpTableLookup: public IUnaryOperator {
 public:
+    // Join mode: a constant point prefix of the probed key, pushed into the lookup key ahead of the
+    // cells taken from the left row. Cells are laid out in table key order as
+    // [Columns taken from Points][LookupKeyColumns taken from the left row], which is what makes
+    // AllowNullKeysPrefixSize = Columns.size() correct: only a constant cell may be NULL (a point
+    // predicate can legitimately select NULL keys), while a cell coming from the left row must never
+    // match NULL.
+    struct TLookupKeyPrefix {
+        TExprNode::TPtr Points;                    // List<Struct<Columns...>>
+        const TStructExprType* PointsItemType = nullptr;
+        TVector<TString> Columns;                  // leading probed key columns, in key order
+        // Join keys whose probed column is covered by the prefix. The lookup cannot check those
+        // equalities itself, so they are evaluated on the left row before the lookup.
+        TVector<std::pair<TString, TInfoUnit>> Equalities;
+    };
+
     TOpTableLookup(TIntrusivePtr<IOperator> input, TPositionHandle pos, const TExprNode::TPtr& table,
                    const TVector<TString>& fetchColumns, const TVector<TInfoUnit>& outputIUs, const TVector<TInfoUnit>& lookupKeys);
 
     TOpTableLookup(TIntrusivePtr<IOperator> input, TPositionHandle pos, const TExprNode::TPtr& table,
                    const TVector<TString>& fetchColumns, const TVector<TInfoUnit>& outputIUs, const TVector<TInfoUnit>& lookupKeys,
                    const TVector<TString>& lookupKeyColumns, const TString& joinKind,
-                   const std::optional<TExpression>& fetchedRowFilter);
+                   const std::optional<TExpression>& fetchedRowFilter,
+                   const std::optional<TLookupKeyPrefix>& prefix = std::nullopt);
 
     virtual TVector<TInfoUnit> GetUsedIUs(TPlanProps& props) override;
     virtual TVector<std::reference_wrapper<TExpression>> GetExpressions() override;
@@ -795,6 +821,7 @@ public:
     TVector<TString> LookupKeyColumns;
     TString JoinKind;
     std::optional<TExpression> FetchedRowFilter;
+    std::optional<TLookupKeyPrefix> Prefix;
     ELookupStrategy Strategy{ELookupStrategy::LookupRows};
 
 protected:
