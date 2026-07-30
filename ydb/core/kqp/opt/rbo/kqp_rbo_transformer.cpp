@@ -546,6 +546,12 @@ void TKqpNewRBOTransformer::InitializeRBOOptimizationStages() {
         RBO.AddStage(std::make_unique<TRuleBasedStage>("Pruning II", std::move(pruningStage_II_Rules)));
     }
 
+    // Pick the physical join implementations that change the plan shape. This runs after index
+    // selection and pruning so that the rules see the final reads and column sets.
+    TVector<std::unique_ptr<IRule>> physicalJoinRules;
+    physicalJoinRules.emplace_back(std::make_unique<TRewriteJoinToIndexLookupJoinRule>());
+    RBO.AddStage(std::make_unique<TRuleBasedStage>("Physical rewrites II", std::move(physicalJoinRules)));
+
     // Assign physical stages.
     TVector<std::unique_ptr<IRule>> assignPhysicalStageRules;
     assignPhysicalStageRules.emplace_back(std::make_unique<TAssignStagesRule>());

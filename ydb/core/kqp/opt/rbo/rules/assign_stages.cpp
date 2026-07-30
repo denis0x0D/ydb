@@ -230,23 +230,41 @@ bool TAssignStagesRule::MatchAndApply(TIntrusivePtr<IOperator>& input, TRBOConte
         }
         auto columnsNode = NYql::NNodes::Build<NYql::NNodes::TCoAtomList>(exprCtx, lookup->Pos).Add(columnAtoms).Done().Ptr();
 
-        TVector<const NYql::TItemExprType*> keyItems;
-        for (const auto& key : lookup->LookupKeys) {
-            const auto* keyType = lookup->GetInput()->GetIUType(key);
-            Y_ENSURE(keyType, "Lookup key type is not available");
-            keyItems.push_back(exprCtx.MakeType<NYql::TItemExprType>(key.GetFullName(), keyType));
-        }
-        const auto* keyStructType = exprCtx.MakeType<NYql::TStructExprType>(keyItems);
-        const auto* keyListType = exprCtx.MakeType<NYql::TListExprType>(keyStructType);
-        auto inputTypeNode = NYql::ExpandType(lookup->Pos, *keyListType, exprCtx);
-
         TKqpStreamLookupSettings settings;
-        settings.Strategy = EStreamLookupStrategyType::LookupRows;
+        NYql::TExprNode::TPtr inputTypeNode;
+        if (lookup->IsJoin()) {
+            settings.Strategy = EStreamLookupStrategyType::LookupJoinRows;
+            // NULL keys never match, and an unmatched left row of a left join is emitted by the
+            // lookup itself, so no key prefix has to accept NULLs.
+            settings.AllowNullKeysPrefixSize = 0;
+            // The input type describes the tuples built at the end of the input stage, which only
+            // exist once the physical plan is generated: the conversion fills it in.
+        } else {
+            settings.Strategy = EStreamLookupStrategyType::LookupRows;
+
+            TVector<const NYql::TItemExprType*> keyItems;
+            for (const auto& key : lookup->LookupKeys) {
+                const auto* keyType = lookup->GetInput()->GetIUType(key);
+                Y_ENSURE(keyType, "Lookup key type is not available");
+                keyItems.push_back(exprCtx.MakeType<NYql::TItemExprType>(key.GetFullName(), keyType));
+            }
+            const auto* keyStructType = exprCtx.MakeType<NYql::TStructExprType>(keyItems);
+            const auto* keyListType = exprCtx.MakeType<NYql::TListExprType>(keyStructType);
+            inputTypeNode = NYql::ExpandType(lookup->Pos, *keyListType, exprCtx);
+        }
         auto settingsNode = settings.BuildNode(exprCtx, lookup->Pos).Ptr();
 
         props.StageGraph.Connect(inputStageId, newStageId,
                                  MakeIntrusive<TStreamLookupConnection>(outputIndex, lookup->Table, columnsNode, inputTypeNode, settingsNode));
         YQL_CLOG(TRACE, CoreDq) << "Assign stages table lookup";
+    } else if (input->Kind == EOperator::IndexLookupJoin) {
+        // The lookup join shares the stage of its table lookup: the joined pairs only exist inside
+        // the stage that the stream lookup connection feeds.
+        auto lookupJoin = CastOperator<TOpIndexLookupJoin>(input);
+        auto lookup = lookupJoin->GetTableLookup();
+        Y_ENSURE(lookup->IsSingleConsumer(), "A table lookup in join mode must feed only its lookup join");
+        input->Props.StageId = *lookup->Props.StageId;
+        YQL_CLOG(TRACE, CoreDq) << "Assign stages index lookup join";
     } else {
         Y_ENSURE(false, "Unknown operator encountered");
     }

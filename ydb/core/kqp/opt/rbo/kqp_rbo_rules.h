@@ -99,6 +99,19 @@ class TRewriteRightJoinRule : public ISimplifiedRule {
 };
 
 /**
+ * Rewrite a join whose right side is probed by a prefix of its primary key into an index lookup
+ * join, so that the right table is read row by row instead of in full.
+ */
+class TRewriteJoinToIndexLookupJoinRule : public ISimplifiedRule {
+  public:
+    TRewriteJoinToIndexLookupJoinRule()
+        : ISimplifiedRule("Rewrite join into index lookup join", ERuleProperties::RequireParents | ERuleProperties::RequireTypes) {}
+
+    virtual bool QuickMatch(const TIntrusivePtr<IOperator>& input) const override;
+    virtual TIntrusivePtr<IOperator> SimpleMatchAndApply(const TIntrusivePtr<IOperator> &input, TRBOContext &ctx, TPlanProps &props) override;
+};
+
+/**
  * Remove a left join when the right side cannot change left-side row multiplicity
  * and no right-side output is used above the join.
  */

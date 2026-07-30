@@ -300,6 +300,16 @@ void TOpSort::PropagateLiveness(ILivenessContext& ctx) {
 void TOpTableLookup::PropagateLiveness(ILivenessContext& ctx) {
     TInfoUnitSet inputLive;
     AddInfoUnits(inputLive, LookupKeys);
+    if (IsJoin()) {
+        // The input rows are passed through, so everything the plan needs from the left side of
+        // the join stays alive below the lookup.
+        const auto& liveOut = ctx.GetLiveOut(this);
+        for (const auto& iu : GetInput()->GetOutputIUs()) {
+            if (liveOut.contains(iu)) {
+                AddInfoUnit(inputLive, iu);
+            }
+        }
+    }
     ctx.AddLiveInput(this, 0, inputLive);
 }
 

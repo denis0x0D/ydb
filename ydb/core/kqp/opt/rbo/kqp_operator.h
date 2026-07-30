@@ -22,7 +22,7 @@ namespace NKqp {
 
 using namespace NYql;
 
-enum EOperator : ui32 { EmptySource, Source, Map, AddDependencies, Filter, Join, Aggregate, Limit, Sort, UnionAll, TableLookup, CBOTree, Root };
+enum EOperator : ui32 { EmptySource, Source, Map, AddDependencies, Filter, Join, Aggregate, Limit, Sort, UnionAll, TableLookup, IndexLookupJoin, CBOTree, Root };
 
 // clang-format off
 #define PHASE_ENUM(X) \
@@ -760,22 +760,81 @@ private:
     EOpPhase SortPhase{EOpPhase::Undefined};
 };
 
+/**
+ * How the physical stream lookup consumes the input of a TableLookup operator
+ */
+enum class ELookupStrategy : ui32 {
+    // The input carries the key columns of the table, the lookup replaces them with the fetched
+    // row. Used to fetch the columns that a non-covering index read could not provide.
+    LookupRows,
+    // The input rows are joined against the table by a prefix of its key: every input row is
+    // passed through together with the row it matched, if any. Used to implement a lookup join,
+    // and always consumed by a TOpIndexLookupJoin sitting directly on top.
+    LookupJoinRows,
+};
+
 class TOpTableLookup: public IUnaryOperator {
 public:
     TOpTableLookup(TIntrusivePtr<IOperator> input, TPositionHandle pos, const TExprNode::TPtr& table,
                    const TVector<TString>& fetchColumns, const TVector<TInfoUnit>& outputIUs, const TVector<TInfoUnit>& lookupKeys);
 
+    TOpTableLookup(TIntrusivePtr<IOperator> input, TPositionHandle pos, const TExprNode::TPtr& table,
+                   const TVector<TString>& fetchColumns, const TVector<TInfoUnit>& outputIUs, const TVector<TInfoUnit>& lookupKeys,
+                   const TVector<TString>& lookupKeyColumns, const TString& joinKind,
+                   const std::optional<TExpression>& fetchedRowFilter);
+
     virtual TVector<TInfoUnit> GetUsedIUs(TPlanProps& props) override;
+    virtual TVector<std::reference_wrapper<TExpression>> GetExpressions() override;
     virtual void PropagateLiveness(ILivenessContext& ctx) override;
     virtual TString ToString(TExprContext& ctx) override;
-    virtual TString GetExplainName() const override { return "TableLookup"; }
+    virtual NJson::TJsonValue ToJson(ui32 explainFlags) override;
+    virtual TString GetExplainName() const override { return IsJoin() ? "TableLookupJoin" : "TableLookup"; }
 
     virtual void ComputeMetadata(TRBOContext& ctx, TPlanProps& planProps) override;
+
+    bool IsJoin() const {
+        return Strategy == ELookupStrategy::LookupJoinRows;
+    }
 
     TExprNode::TPtr Table;
     TVector<TString> FetchColumns;
     TVector<TInfoUnit> OutputIUs;
     TVector<TInfoUnit> LookupKeys;
+    // Join mode only: the table key columns probed by LookupKeys, positionally aligned with them.
+    TVector<TString> LookupKeyColumns;
+    // Join mode only: the kind of the join being implemented, "Inner" or "Left".
+    TString JoinKind;
+    // Join mode only: a predicate on the probed table, checked on every fetched row. Unlike every
+    // other expression in the plan it refers to the columns this operator produces (OutputIUs) and
+    // not to the columns of its input.
+    std::optional<TExpression> FetchedRowFilter;
+    ELookupStrategy Strategy{ELookupStrategy::LookupRows};
+
+protected:
+    void ComputeOutputIUs() override;
+};
+
+/**
+ * Flattens the (left row, matched row) pairs produced by a TableLookup in join mode into a single
+ * row, filling the right side with NULLs where a left join found no match.
+ *
+ * This operator always sits directly on top of its TableLookup: the pairs only exist inside the
+ * physical stage that the stream lookup connection feeds, so the two operators share a stage and
+ * are created and destroyed together.
+ */
+class TOpIndexLookupJoin: public IUnaryOperator {
+public:
+    TOpIndexLookupJoin(TIntrusivePtr<IOperator> input, TPositionHandle pos, const TString& joinKind,
+                       const TVector<std::pair<TInfoUnit, TInfoUnit>>& joinKeys);
+
+    virtual TString ToString(TExprContext& ctx) override;
+    virtual NJson::TJsonValue ToJson(ui32 explainFlags) override;
+    virtual TString GetExplainName() const override { return "IndexLookupJoin"; }
+
+    TIntrusivePtr<TOpTableLookup> GetTableLookup();
+
+    TString JoinKind;
+    TVector<std::pair<TInfoUnit, TInfoUnit>> JoinKeys;
 
 protected:
     void ComputeOutputIUs() override;
