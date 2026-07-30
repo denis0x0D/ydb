@@ -764,12 +764,7 @@ private:
  * How the physical stream lookup consumes the input of a TableLookup operator
  */
 enum class ELookupStrategy : ui32 {
-    // The input carries the key columns of the table, the lookup replaces them with the fetched
-    // row. Used to fetch the columns that a non-covering index read could not provide.
     LookupRows,
-    // The input rows are joined against the table by a prefix of its key: every input row is
-    // passed through together with the row it matched, if any. Used to implement a lookup join,
-    // and always consumed by a TOpIndexLookupJoin sitting directly on top.
     LookupJoinRows,
 };
 

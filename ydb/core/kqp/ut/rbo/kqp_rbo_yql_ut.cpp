@@ -3383,12 +3383,10 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
     Y_UNIT_TEST(LookupJoins_newRbo) {
         NKikimrConfig::TAppConfig appConfig;
         appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
-        appConfig.MutableTableServiceConfig()->SetAllowOlapDataQuery(true);
         appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
         appConfig.MutableTableServiceConfig()->SetDefaultCostBasedOptimizationLevel(4);
         appConfig.MutableTableServiceConfig()->SetEnableAutoIndexSelectionForIndexLookupJoin(true);
         appConfig.MutableTableServiceConfig()->SetDefaultLangVer(NYql::GetMaxLangVersion());
-        // appConfig.MutableTableServiceConfig()->SetBackportMode(NKikimrConfig::TTableServiceConfig_EBackportMode_All);
 
         TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
         auto db = kikimr.GetTableClient();
@@ -3498,9 +3496,7 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                 WHERE t1.SubKey1 = 0 AND t1.SubKey2 = "0"
                 ORDER BY t1.Value1, t2.Value1;
             )",
-            // The two queries below have to probe the right table through a secondary index. The new
-            // RBO only picks an index for a read with a predicate to push into it, so the join keys
-            // alone do not make it read Index2_21 / Index1_212 and the join stays a map join.
+            // Choosing a right side index based on join keys is not implemented.
             // R"(
             //     -- LookupJoin, PK left / Index21 right (probe t2 by SubKey2 and need t2.Value1)
             //     SELECT t1.Value1, t2.Value1
@@ -3721,9 +3717,6 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
             NKikimrConfig::TAppConfig appConfig;
             appConfig.MutableTableServiceConfig()->SetEnableNewRBO(newRbo);
             appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
-            // The cost based optimizer is free to swap the sides of a join, and it does not know
-            // that one of them can be probed by its key, so the join order is left as written to
-            // keep the expected lookup counts a property of the rewrite rule alone.
             appConfig.MutableTableServiceConfig()->SetDefaultCostBasedOptimizationLevel(0);
             appConfig.MutableTableServiceConfig()->SetDefaultLangVer(NYql::GetMaxLangVersion());
 
@@ -3734,8 +3727,6 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
             auto schemeResult = session.ExecuteSchemeQuery(schema).GetValueSync();
             UNIT_ASSERT_C(schemeResult.IsSuccess(), schemeResult.GetIssues().ToString());
 
-            // The data is loaded with a bulk upsert because the new RBO does not compile UPSERT
-            // statements yet.
             auto bulkUpsert = [&](const char* table, NYdb::TValueBuilder& rows) {
                 auto result = db.BulkUpsert(table, rows.Build()).GetValueSync();
                 UNIT_ASSERT_C(result.IsSuccess(), result.GetIssues().ToString());
@@ -3770,7 +3761,6 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
             }
 
             {
-                // The row (4, "a") points at a t4 row that does not exist.
                 NYdb::TValueBuilder rows;
                 rows.BeginList();
                 for (const auto& [a, b, c, d, e] : TVector<std::tuple<i32, TString, TString, i32, i32>>{
@@ -3789,9 +3779,6 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
             }
 
             {
-                // Rows 5 and 6 reference a t2 row that does not exist, row 6 has no t2 key at all and
-                // row 7 has no t3 key: the left joins get unmatched rows and the lookups get NULL
-                // keys to skip.
                 NYdb::TValueBuilder rows;
                 rows.BeginList();
                 for (const auto& [a, b, c, d, e] :

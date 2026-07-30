@@ -33,8 +33,7 @@ TLookupKeysResult BuildLookupKeys(TOpTableLookup& lookup, TExprNode::TPtr inputS
     const auto pos = lookup.Pos;
     const auto row = Build<TCoArgument>(ctx, pos).Name("lookup_join_left_row").Done();
 
-    // The left row is passed through the lookup, so it only has to carry what the plan still needs
-    // above the join. The lookup keys travel separately, in the second element of the tuple.
+    // We want to split it into tuple(left row, lookup key).
     const auto& liveOut = GetLiveOut(&lookup);
     TVector<TExprBase> leftMembers;
     TVector<const TItemExprType*> leftItems;
@@ -49,8 +48,6 @@ TLookupKeysResult BuildLookupKeys(TOpTableLookup& lookup, TExprNode::TPtr inputS
         leftItems.push_back(ctx.MakeType<TItemExprType>(name, type));
     }
 
-    // The stream lookup identifies the probed columns by name, so the keys are named after the
-    // columns of the table and not after the plan columns they are taken from.
     TVector<TExprBase> keyMembers;
     TVector<const TItemExprType*> keyItems;
     for (size_t i = 0; i < lookup.LookupKeys.size(); ++i) {
@@ -62,6 +59,7 @@ TLookupKeysResult BuildLookupKeys(TOpTableLookup& lookup, TExprNode::TPtr inputS
         keyItems.push_back(ctx.MakeType<TItemExprType>(column, type));
     }
 
+    // Here is a tuple for the left side.
     // clang-format off
     const auto lambda = Build<TCoLambda>(ctx, pos)
         .Args({row})
@@ -88,9 +86,8 @@ TLookupKeysResult BuildLookupKeys(TOpTableLookup& lookup, TExprNode::TPtr inputS
     };
 
     TExprNode::TPtr newInputStage;
+    // Special case for row tables.
     if (TDqPhyStage::Match(inputStage.Get())) {
-        // A read of a row storage table is converted into a complete stage, everything else is
-        // still a bare stage body at this point.
         const auto stage = TDqPhyStage(inputStage);
         // clang-format off
         newInputStage = Build<TDqPhyStage>(ctx, inputStage->Pos())
@@ -105,6 +102,7 @@ TLookupKeysResult BuildLookupKeys(TOpTableLookup& lookup, TExprNode::TPtr inputS
         newInputStage = buildKeys(inputStage);
     }
 
+    // Tuple: (left row, lookup key).
     const TTypeAnnotationNode::TListType tupleItems{
         ctx.MakeType<TStructExprType>(leftItems),
         ctx.MakeType<TOptionalExprType>(ctx.MakeType<TStructExprType>(keyItems)),
@@ -118,11 +116,7 @@ TLookupKeysResult BuildLookupKeys(TOpTableLookup& lookup, TExprNode::TPtr inputS
 
 } // namespace NKikimr::NKqp::NLookupJoinBuilder
 
-/**
- * The fetched row arrives named after the columns of the table, while the plan refers to those
- * columns by the names of the join output. Renaming it before the pair is flattened keeps the join
- * callable from having to label the two sides apart, and lets the filter below run on plan names.
- */
+
 TExprNode::TPtr TPhysicalIndexLookupJoinBuilder::BuildRenamedRow(const TExprBase& fetchedRow, const TOpTableLookup& lookup,
                                                                 bool& needsRename) const {
     Y_ENSURE(lookup.FetchColumns.size() == lookup.OutputIUs.size());
@@ -167,8 +161,6 @@ TExprNode::TPtr TPhysicalIndexLookupJoinBuilder::ProcessFetchedRows(TExprNode::T
     auto processedRow = TExprBase(BuildRenamedRow(fetchedRow, lookup, needsRename));
 
     if (lookup.FetchedRowFilter) {
-        // The predicate of the probed side restricts which fetched rows count as a match: an inner
-        // join drops the pair, a left join reports it as unmatched.
         const auto lambda = TCoLambda(Ctx.DeepCopyLambda(*lookup.FetchedRowFilter->GetLambda()));
         const auto row = lambda.Args().Arg(0);
         // clang-format off
@@ -192,6 +184,7 @@ TExprNode::TPtr TPhysicalIndexLookupJoinBuilder::ProcessFetchedRows(TExprNode::T
         return input;
     }
 
+    // This is a tuple which represents input for index lookup join.
     // clang-format off
     return Build<TCoMap>(Ctx, Pos)
         .Input(input)
@@ -219,8 +212,6 @@ TExprNode::TPtr TPhysicalIndexLookupJoinBuilder::BuildPhysicalOp(TExprNode::TPtr
     input = Build<TCoToStream>(Ctx, Pos).Input(input).Done().Ptr();
     input = ProcessFetchedRows(input, *lookup);
 
-    // Both sides already carry the names the plan uses, so there is nothing left for the join
-    // callable to prefix them with.
     // clang-format off
     input = Build<TKqpIndexLookupJoin>(Ctx, Pos)
         .Input(input)

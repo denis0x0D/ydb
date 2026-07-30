@@ -234,11 +234,9 @@ bool TAssignStagesRule::MatchAndApply(TIntrusivePtr<IOperator>& input, TRBOConte
         NYql::TExprNode::TPtr inputTypeNode;
         if (lookup->IsJoin()) {
             settings.Strategy = EStreamLookupStrategyType::LookupJoinRows;
-            // NULL keys never match, and an unmatched left row of a left join is emitted by the
-            // lookup itself, so no key prefix has to accept NULLs.
+            // TODO: move this settings to lookuptable operator. It sets to 0, because it depends on pushed point predicate on the right side. 
+            // Currently we do not push them, we use original predicate to filter after.
             settings.AllowNullKeysPrefixSize = 0;
-            // The input type describes the tuples built at the end of the input stage, which only
-            // exist once the physical plan is generated: the conversion fills it in.
         } else {
             settings.Strategy = EStreamLookupStrategyType::LookupRows;
 
