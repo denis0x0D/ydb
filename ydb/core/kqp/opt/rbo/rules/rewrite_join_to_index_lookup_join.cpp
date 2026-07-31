@@ -149,9 +149,12 @@ bool IsUsablePointPrefix(const TOpRead::TRangeInfo& ranges, const TVector<TStrin
     }
 
     // Every point turns into a lookup key of its own, so a left row is probed as many times as there
-    // are points. A left join emits an unmatched left row per probe, so it tolerates a single point
-    // only, while an inner join just needs the fan-out to stay reasonable.
-    if (joinKind == "Left") {
+    // are points, and every probe reports its matches as a sequence of right rows of its own. Only an
+    // inner join may look at a right row in isolation, it just needs the fan-out to stay reasonable.
+    // The other kinds decide on a left row by the whole sequence, so a second probe makes them wrong:
+    // a left and a left only join emit the left row for every probe that finds nothing, and a left
+    // semi join emits it for every probe that finds anything. They tolerate a single point only.
+    if (joinKind != "Inner") {
         pointsLimit = std::min<size_t>(pointsLimit, 1);
     }
     return ranges.ExpectedMaxPoints.Defined() && *ranges.ExpectedMaxPoints <= pointsLimit;
@@ -177,8 +180,11 @@ TIntrusivePtr<IOperator> TRewriteJoinToIndexLookupJoinRule::SimpleMatchAndApply(
     // TODO: Add check for join algo specified by CBO.
     auto join = CastOperator<TOpJoin>(input);
     // TODO: Add support for other join kind.
+    // GetValidJoinKind does not normalize the semi kinds, they are spelled out as is throughout the
+    // RBO. A right join reaches this rule already rewritten into its left counterpart, see
+    // TRewriteRightJoinRule.
     const auto joinKind = GetValidJoinKind(join->JoinKind);
-    if (joinKind != "Inner" && joinKind != "Left") {
+    if (joinKind != "Inner" && joinKind != "Left" && joinKind != "LeftSemi" && joinKind != "LeftOnly") {
         return input;
     }
 

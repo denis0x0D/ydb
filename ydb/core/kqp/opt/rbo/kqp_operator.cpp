@@ -1047,7 +1047,11 @@ TOpTableLookup::TOpTableLookup(TIntrusivePtr<IOperator> input, TPositionHandle p
     // A lookup key driven only by constants is a broadcast rather than a join, and it would also make
     // AllowNullKeysPrefixSize cover the whole key, allowing NULL keys to match.
     Y_ENSURE(!LookupKeys.empty(), "Lookup join needs at least one key");
-    Y_ENSURE(JoinOutputsLeft(JoinKind) && JoinOutputsRight(JoinKind), "Lookup join must output both sides");
+    // The lookup itself always emits both sides as a tuple, its join kind only tells the index lookup
+    // join above what to do with the fetched row. A right sided kind would need the inputs swapped
+    // instead, which is what TRewriteRightJoinRule does.
+    Y_ENSURE(JoinKind == "Inner" || JoinKind == "Left" || JoinKind == "LeftSemi" || JoinKind == "LeftOnly",
+             "Unsupported lookup join kind");
     if (Prefix) {
         Y_ENSURE(Prefix->Points, "Lookup key prefix needs a points expression");
         Y_ENSURE(Prefix->PointsItemType, "Lookup key prefix needs a typed points expression");
@@ -1168,6 +1172,12 @@ TIntrusivePtr<TOpTableLookup> TOpIndexLookupJoin::GetTableLookup() {
 }
 
 void TOpIndexLookupJoin::ComputeOutputIUs() {
+    if (!JoinOutputsRight(JoinKind)) {
+        // A semi or an only join outputs the left row alone, while the table lookup below outputs the
+        // fetched right row as well.
+        Props.OutputIUs = GetTableLookup()->GetInput()->GetOutputIUs();
+        return;
+    }
     Props.OutputIUs = GetInput()->GetOutputIUs();
 }
 

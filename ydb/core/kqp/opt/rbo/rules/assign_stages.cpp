@@ -233,7 +233,13 @@ bool TAssignStagesRule::MatchAndApply(TIntrusivePtr<IOperator>& input, TRBOConte
         TKqpStreamLookupSettings settings;
         NYql::TExprNode::TPtr inputTypeNode;
         if (lookup->IsJoin()) {
-            settings.Strategy = EStreamLookupStrategyType::LookupJoinRows;
+            // A semi join needs a single fetched row per lookup key, the strategy lets the stream lookup
+            // know that. It behaves exactly like LookupJoinRows at the moment, the deduplication happens
+            // in TKqpIndexLookupJoin above, but the old optimizer spells it out the same way, see
+            // BuildKqpStreamIndexLookupJoin in kqp_opt_log_join.cpp.
+            settings.Strategy = lookup->JoinKind == "LeftSemi"
+                ? EStreamLookupStrategyType::LookupSemiJoinRows
+                : EStreamLookupStrategyType::LookupJoinRows;
             // Only the cells taken from a pushed point predicate may be null: such a predicate can
             // legitimately select null keys, while a null coming from the left row must not match
             // anything. The point cells are the leading ones, see TOpTableLookup::TLookupKeyPrefix.

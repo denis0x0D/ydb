@@ -3752,6 +3752,85 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
              R"([[[1];["p1a"]];[[1];["p2a"]];[[2];["p1b"]];[[3];["p1a"]];[[3];["p2a"]];[[4];["p1a"]];)"
              R"([[4];["p2a"]];[[5];["p1a"]];[[5];["p2a"]];[[6];["p1a"]];[[6];["p2a"]];[[7];["p1a"]];[[7];["p2a"]]])"},
 
+            // An IN subplan becomes a semi join and a NOT IN one an only join, see
+            // TInlineSimpleInExistsSubplanRule; the SEMI and ONLY join syntax itself is not supported by
+            // the YqlSelect translation yet. Both kinds output the left row alone, and a semi join
+            // outputs it once even though the key prefix leaves several matches per left row: t1.c = 1
+            // matches both (1, "a") and (1, "b") of t3.
+            {"semi join from an in subplan", R"(
+                SELECT t1.a AS a
+                FROM `/Root/t1` AS t1
+                WHERE t1.c IN (SELECT a FROM `/Root/t3`)
+                ORDER BY a;
+            )", 1},
+
+            // An only join outputs the left rows that match nothing. The subplan of a NOT IN has to be
+            // free of nulls for it to mean an only join at all, hence t2 here.
+            {"only join from a not in subplan", R"(
+                SELECT t1.a AS a
+                FROM `/Root/t1` AS t1
+                WHERE t1.a NOT IN (SELECT a FROM `/Root/t2`)
+                ORDER BY a;
+            )", 1},
+
+            // The predicate on the probed side is checked after the lookup, so a left row whose every
+            // fetched row is filtered out counts as unmatched for both kinds. Here t1.c = 1 and t1.a = 1
+            // fetch two rows of t3 each and lose both.
+            {"semi join with a filtered probed side", R"(
+                SELECT t1.a AS a
+                FROM `/Root/t1` AS t1
+                WHERE t1.c IN (SELECT a FROM `/Root/t3` WHERE d >= 30)
+                ORDER BY a;
+            )", 1},
+
+            {"only join with a filtered probed side", R"(
+                SELECT t1.a AS a
+                FROM `/Root/t1` AS t1
+                WHERE t1.a NOT IN (SELECT a FROM `/Root/t3` WHERE d >= 30 AND d <= 50)
+                ORDER BY a;
+            )", 1},
+
+            {"semi join with a point predicate ahead of the join key", R"(
+                SELECT t1.a AS a
+                FROM `/Root/t1` AS t1
+                WHERE t1.d IN (SELECT b FROM `/Root/t3` WHERE a = 2)
+                ORDER BY a;
+            )", 1},
+
+            {"only join with a point predicate ahead of the join key", R"(
+                SELECT t1.a AS a
+                FROM `/Root/t1` AS t1
+                WHERE t1.d NOT IN (SELECT b FROM `/Root/t3` WHERE a = 2)
+                ORDER BY a;
+            )", 1},
+
+            // Several points are not usable for a semi or an only join either, for the same reason as
+            // for a left join: every point is probed separately and reports its own matches, while the
+            // decision on a left row needs them all. A semi join would emit the left row once per point
+            // that finds something, and an only join once per point that finds nothing.
+            //
+            // The old optimizer does build such a lookup and gets both wrong, so it cannot serve as a
+            // reference here. Every left row of these queries matches something, ("a" and "b" of t1.d are
+            // both among the b values of t3 selected by a IN (1, 2)), so the semi join has to output them
+            // all and the only join none of them. The old optimizer instead emits t1.a = 1 and 3 to 7
+            // twice from the semi join, once per point that matches, and t1.a = 2 from the only join,
+            // for the point a = 2 that its t1.d = "b" does not match.
+            {"semi join with several point predicates ahead of the join key", R"(
+                SELECT t1.a AS a
+                FROM `/Root/t1` AS t1
+                WHERE t1.d IN (SELECT b FROM `/Root/t3` WHERE a IN (1, 2))
+                ORDER BY a;
+            )", 0,
+             R"([[[1]];[[2]];[[3]];[[4]];[[5]];[[6]];[[7]]])"},
+
+            {"only join with several point predicates ahead of the join key", R"(
+                SELECT t1.a AS a
+                FROM `/Root/t1` AS t1
+                WHERE t1.d NOT IN (SELECT b FROM `/Root/t3` WHERE a IN (1, 2))
+                ORDER BY a;
+            )", 0,
+             R"([])"},
+
             // The join key is the second key column of t3, so a lookup would have to scan the whole
             // table for every left row.
             {"join key is not a key prefix", R"(
