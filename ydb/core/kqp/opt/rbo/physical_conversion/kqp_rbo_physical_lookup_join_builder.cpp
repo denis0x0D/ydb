@@ -37,15 +37,27 @@ TLookupKeysResult BuildLookupKeys(TOpTableLookup& lookup, TExprNode::TPtr inputS
     const auto& liveOut = GetLiveOut(&lookup);
     TVector<TExprBase> leftMembers;
     TVector<const TItemExprType*> leftItems;
-    for (const auto& iu : input.GetOutputIUs()) {
-        if (!liveOut.contains(iu)) {
-            continue;
+    THashSet<TString> addedNames;
+    auto addLeftMember = [&](const TInfoUnit& iu) {
+        const auto name = iu.GetFullName();
+        if (!addedNames.insert(name).second) {
+            return;
         }
         const auto* type = input.GetIUType(iu);
-        Y_ENSURE(type, "Type of the lookup join input column " << iu.GetFullName() << " is not available");
-        const auto name = iu.GetFullName();
+        Y_ENSURE(type, "Type of the lookup join input column " << name << " is not available");
         leftMembers.push_back(BuildMemberTuple(name, name, row, ctx, pos));
         leftItems.push_back(ctx.MakeType<TItemExprType>(name, type));
+    };
+    for (const auto& iu : input.GetOutputIUs()) {
+        if (liveOut.contains(iu)) {
+            addLeftMember(iu);
+        }
+    }
+    // A residual join key is checked on the left row after the lookup, so its left value has to ride
+    // along in the tuple even when it is not a live output of the join.
+    for (const auto& [leftKey, rightKey] : lookup.ResidualJoinKeys) {
+        Y_UNUSED(rightKey);
+        addLeftMember(leftKey);
     }
 
     const auto point = Build<TCoArgument>(ctx, pos).Name("lookup_join_key_point").Done();
@@ -272,7 +284,56 @@ TExprNode::TPtr TPhysicalIndexLookupJoinBuilder::ProcessFetchedRows(TExprNode::T
             .Build()
         .Done();
         // clang-format on
-    } else if (!needsRename) {
+    }
+
+    if (!lookup.ResidualJoinKeys.empty()) {
+        // Join keys that the lookup could not check (their probed column is not part of the matched
+        // key prefix) are applied here, against the fetched row. A mismatch nulls the right row, which
+        // the index lookup join above treats as no match for the join kind at hand.
+        const auto leftRow = Build<TCoNth>(Ctx, Pos)
+            .Tuple(pair)
+            .Index().Value("0").Build()
+        .Done();
+        const auto rightArg = Build<TCoArgument>(Ctx, Pos).Name("lookup_join_residual_right").Done();
+        TVector<TExprBase> equalities;
+        for (const auto& [leftKey, rightKey] : lookup.ResidualJoinKeys) {
+            // clang-format off
+            equalities.push_back(Build<TCoCmpEqual>(Ctx, Pos)
+                .Left<TCoMember>()
+                    .Struct(leftRow)
+                    .Name<TCoAtom>().Build(leftKey.GetFullName())
+                    .Build()
+                .Right<TCoMember>()
+                    .Struct(rightArg)
+                    .Name<TCoAtom>().Build(rightKey.GetFullName())
+                    .Build()
+            .Done());
+            // clang-format on
+        }
+        const TExprBase pred = equalities.size() == 1
+            ? equalities.front()
+            : TExprBase(Build<TCoAnd>(Ctx, Pos).Add(equalities).Done());
+        // clang-format off
+        processedRow = Build<TCoFlatMap>(Ctx, Pos)
+            .Input(processedRow)
+            .Lambda()
+                .Args({rightArg})
+                .Body<TCoOptionalIf>()
+                    .Predicate<TCoCoalesce>()
+                        .Predicate(pred)
+                        .Value<TCoBool>()
+                            .Literal().Build("false")
+                        .Build()
+                    .Build()
+                    .Value(rightArg)
+                .Build()
+            .Build()
+        .Done();
+        // clang-format on
+    }
+
+    // Nothing to transform the right row: it is already the second element of the tuple.
+    if (!lookup.FetchedRowFilter && lookup.ResidualJoinKeys.empty() && !needsRename) {
         return input;
     }
 

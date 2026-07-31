@@ -1032,7 +1032,8 @@ TOpTableLookup::TOpTableLookup(TIntrusivePtr<IOperator> input, TPositionHandle p
                                const TVector<TString>& fetchColumns, const TVector<TInfoUnit>& outputIUs,
                                const TVector<TInfoUnit>& lookupKeys, const TVector<TString>& lookupKeyColumns,
                                const TString& joinKind, const std::optional<TExpression>& fetchedRowFilter,
-                               const std::optional<TLookupKeyPrefix>& prefix)
+                               const std::optional<TLookupKeyPrefix>& prefix,
+                               const TVector<std::pair<TInfoUnit, TInfoUnit>>& residualJoinKeys)
     : IUnaryOperator(EOperator::TableLookup, pos, input)
     , Table(table)
     , FetchColumns(fetchColumns)
@@ -1042,7 +1043,8 @@ TOpTableLookup::TOpTableLookup(TIntrusivePtr<IOperator> input, TPositionHandle p
     , JoinKind(joinKind)
     , FetchedRowFilter(fetchedRowFilter)
     , Prefix(prefix)
-    , Strategy(ELookupStrategy::LookupJoinRows) {
+    , Strategy(ELookupStrategy::LookupJoinRows)
+    , ResidualJoinKeys(residualJoinKeys) {
     Y_ENSURE(LookupKeys.size() == LookupKeyColumns.size(), "Lookup join keys must be paired with table key columns");
     // A lookup key driven only by constants is a broadcast rather than a join, and it would also make
     // AllowNullKeysPrefixSize cover the whole key, allowing NULL keys to match.
@@ -1123,6 +1125,9 @@ TString TOpTableLookup::ToString(TExprContext& ctx) {
     if (FetchedRowFilter) {
         res << ", filter: " << FetchedRowFilter->ToString();
     }
+    for (const auto& [leftKey, rightKey] : ResidualJoinKeys) {
+        res << ", residual: " << leftKey.GetFullName() << " = " << rightKey.GetFullName();
+    }
     return res;
 }
 
@@ -1143,6 +1148,12 @@ NJson::TJsonValue TOpTableLookup::ToJson(ui32 explainFlags) {
                 condition << ", " << iu.GetFullName() << " = " << column;
             }
             res["LookupKeyPrefix"] = JoinSeq(", ", Prefix->Columns);
+        }
+        for (const auto& [leftKey, rightKey] : ResidualJoinKeys) {
+            if (!condition.empty()) {
+                condition << ", ";
+            }
+            condition << leftKey.GetFullName() << " = " << rightKey.GetFullName();
         }
         res["Condition"] = TString(condition);
     }

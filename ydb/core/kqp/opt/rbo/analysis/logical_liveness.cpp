@@ -314,6 +314,12 @@ void TOpTableLookup::PropagateLiveness(ILivenessContext& ctx) {
                 AddInfoUnit(inputLive, iu);
             }
         }
+        // A residual join key is checked on the left row after the lookup, so its left value has to be
+        // produced by the input even when nothing downstream selects it.
+        for (const auto& [leftKey, rightKey] : ResidualJoinKeys) {
+            Y_UNUSED(rightKey);
+            AddInfoUnit(inputLive, leftKey);
+        }
     }
     ctx.AddLiveInput(this, 0, inputLive);
 }

@@ -3608,6 +3608,14 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                 b String,
                 PRIMARY KEY (a)
             );
+
+            CREATE TABLE `/Root/t5` (
+                a Int32,
+                b Int32,
+                c Int32,
+                d String,
+                PRIMARY KEY (a)
+            );
         )";
 
         struct TCase {
@@ -3840,6 +3848,28 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                 ORDER BY a, t3c;
             )", 0},
 
+            // A join key on a non-key column of the probed table cannot be checked by the lookup, so it
+            // is applied against the fetched row. Here t1.b drives the lookup by t5.a, while t1.c = t5.b
+            // is residual: t5.a = 1 fetches both (1, "m1") and (1, "m2"), but only the first has b = 1,
+            // so only it survives. The unmatched join keys of the old optimizer are handled the same
+            // way, see rightTableUnmatchedJoinKeys in kqp_opt_log_join.cpp.
+            {"inner join with a residual non-key join key", R"(
+                SELECT t1.a AS a, t5.d AS t5d
+                FROM `/Root/t1` AS t1
+                    INNER JOIN `/Root/t5` AS t5 ON t1.b = t5.a AND t1.c = t5.b
+                ORDER BY a, t5d;
+            )", 1},
+
+            // A residual mismatch must not drop the left row of a left join. The row t1.a = 7 has a
+            // null t1.c, so its fetched row fails the residual filter and the left row is emitted with
+            // a null right side, as is the row with no match at all (t1.a = 5).
+            {"left join with a residual non-key join key", R"(
+                SELECT t1.a AS a, t5.d AS t5d
+                FROM `/Root/t1` AS t1
+                    LEFT JOIN `/Root/t5` AS t5 ON t1.b = t5.a AND t1.c = t5.b
+                ORDER BY a, t5d;
+            )", 1},
+
             // The lookup key would have to be cast to the type of the probed column first.
             {"join key types differ", R"(
                 SELECT t1.a AS a, t2.b AS t2b
@@ -3900,6 +3930,24 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                 }
                 rows.EndList();
                 bulkUpsert("/Root/t4", rows);
+            }
+
+            {
+                // A probed table whose only key column is joined, while a non-key column carries a
+                // second join condition that the lookup cannot check and has to filter after fetching.
+                NYdb::TValueBuilder rows;
+                rows.BeginList();
+                for (const auto& [a, b, c, d] : TVector<std::tuple<i32, i32, i32, TString>>{
+                         {1, 1, 10, "m1"}, {1, 2, 20, "m2"}, {2, 2, 30, "m3"}, {3, 4, 40, "m4"}}) {
+                    rows.AddListItem().BeginStruct()
+                        .AddMember("a").OptionalInt32(a)
+                        .AddMember("b").OptionalInt32(b)
+                        .AddMember("c").OptionalInt32(c)
+                        .AddMember("d").OptionalString(d)
+                        .EndStruct();
+                }
+                rows.EndList();
+                bulkUpsert("/Root/t5", rows);
             }
 
             {

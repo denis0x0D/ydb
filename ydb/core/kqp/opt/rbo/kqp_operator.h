@@ -799,7 +799,8 @@ public:
                    const TVector<TString>& fetchColumns, const TVector<TInfoUnit>& outputIUs, const TVector<TInfoUnit>& lookupKeys,
                    const TVector<TString>& lookupKeyColumns, const TString& joinKind,
                    const std::optional<TExpression>& fetchedRowFilter,
-                   const std::optional<TLookupKeyPrefix>& prefix = std::nullopt);
+                   const std::optional<TLookupKeyPrefix>& prefix = std::nullopt,
+                   const TVector<std::pair<TInfoUnit, TInfoUnit>>& residualJoinKeys = {});
 
     virtual TVector<TInfoUnit> GetUsedIUs(TPlanProps& props) override;
     virtual TVector<std::reference_wrapper<TExpression>> GetExpressions() override;
@@ -823,6 +824,12 @@ public:
     std::optional<TExpression> FetchedRowFilter;
     std::optional<TLookupKeyPrefix> Prefix;
     ELookupStrategy Strategy{ELookupStrategy::LookupRows};
+
+    // Join keys whose probed column is not part of the matched key prefix: either a non-key column of
+    // the probed table or a key column past a gap in the matched prefix. The lookup cannot check these
+    // equalities, so they are applied after the stream lookup, against the fetched row. Each pair is
+    // (left join key, right join key); the right key names a fetched column.
+    TVector<std::pair<TInfoUnit, TInfoUnit>> ResidualJoinKeys;
 
 protected:
     void ComputeOutputIUs() override;
