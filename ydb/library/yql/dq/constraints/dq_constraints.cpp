@@ -62,6 +62,9 @@ TStatus ConstraintDqCnMerge(const TExprNode::TPtr& input, TExprContext& ctx, boo
 }
 
 TStatus ConstraintDqBlockHashJoin(const TExprNode::TPtr& input, TExprContext& ctx) {
+    if (const auto status = UpdateAllChildLambdasConstraints(*input); status != TStatus::Ok) {
+        return status;
+    }
     const auto join = TDqJoinBase(input);
     if (join.LeftInput().Ref().GetConstraint<TStreamingConstraintNode>() || join.RightInput().Ref().GetConstraint<TStreamingConstraintNode>()) {
         ctx.AddError(TIssue(ctx.GetPosition(input->Pos()), "Streaming inputs are not supported for BlockHashJoin"));
@@ -71,6 +74,10 @@ TStatus ConstraintDqBlockHashJoin(const TExprNode::TPtr& input, TExprContext& ct
 }
 
 TStatus ConstraintDqBlockHashJoinCore(const TExprNode::TPtr& input, TExprContext& ctx) {
+    if (const auto status = UpdateAllChildLambdasConstraints(*input); status != TStatus::Ok) {
+        return status;
+    }
+
     const auto& leftInputNode = *input->Child(0);
     const auto& rightInputNode = *input->Child(1);
     if (leftInputNode.GetConstraint<TStreamingConstraintNode>() || rightInputNode.GetConstraint<TStreamingConstraintNode>()) {

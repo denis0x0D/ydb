@@ -353,7 +353,7 @@ TIntrusivePtr<IMkqlCallableCompiler> CreateKqlCompiler(const TKqlCompileContext&
 
     compiler->AddCallable(TDqBlockHashJoinCore::CallableName(),
         [&ctx](const TExprNode& node, TMkqlBuildContext& buildCtx) {
-            YQL_ENSURE(node.ChildrenSize() == 8, "BlockHashJoinCore should have 8 arguments");
+            YQL_ENSURE(node.ChildrenSize() >= 8 && node.ChildrenSize() <= 11, "Invalid number of arguments for BlockHashJoinCore");
 
             // Compile input streams
             auto leftInput = MkqlBuildExpr(*node.Child(0), buildCtx);
@@ -422,6 +422,7 @@ TIntrusivePtr<IMkqlCallableCompiler> CreateKqlCompiler(const TKqlCompileContext&
                     }
                 }
             }
+
             return ctx.PgmBuilder().DqBlockHashJoin(leftInput, rightInput, joinKind,
                 leftKeyColumns, rightKeyColumns, graceJoinRenames.Left, graceJoinRenames.Right, returnType, settings);
         });

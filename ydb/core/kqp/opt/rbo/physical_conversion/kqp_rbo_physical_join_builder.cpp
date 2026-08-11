@@ -329,6 +329,81 @@ TExprNode::TPtr TPhysicalJoinBuilder::BuildMapJoin(const TString& joinType, TExp
     // clang-format on
 }
 
+TExprNode::TPtr ConvertToWideLambda(TExprNode::TPtr input, const TVector<TInfoUnit> &inputs, TExprContext& ctx) {
+    Y_ENSURE(input->IsLambda());
+
+    TVector<TExprNode::TPtr> lambdaArgs;
+    lambdaArgs.reserve(inputs.size());
+    for (ui32 i = 0; i < inputs.size(); ++i) {
+        lambdaArgs.push_back(ctx.NewArgument(input->Pos(), "param" + ToString(i)));
+    }
+
+    TVector<TExprBase> items;
+    for (ui32 i = 0; i < inputs.size(); ++i) {
+        // clang-format off
+        auto tuple = Build<TCoNameValueTuple>(ctx, input->Pos())
+            .Name().Build(inputs[i].GetFullName())
+            .Value(lambdaArgs[i])
+        .Done();
+        // clang-format on
+        items.push_back(tuple);
+    }
+
+    // clang-format off
+    auto asStruct = Build<TCoAsStruct>(ctx, input->Pos())
+        .Add(items)
+    .Done().Ptr();
+    // clang-format on
+
+    auto lambda = TCoLambda(input);
+    auto body = lambda.Body().Ptr();
+    auto arg = lambda.Args().Arg(0);
+
+    auto newBody = ctx.ReplaceNode(std::move(body), arg.Ref(), asStruct);
+    return ctx.NewLambda(input->Pos(), ctx.NewArguments(input->Pos(), std::move(lambdaArgs)), std::move(newBody));
+}
+
+TExprNode::TPtr BuildVoidLamda(TExprContext& ctx, TPositionHandle pos) {
+    // clang-format off
+    return Build<TCoLambda>(ctx, pos)
+        .Args({"arg"})
+        .Body<TCoVoid>().Build()
+    .Done().Ptr();
+    // clang-format on
+}
+
+void TPhysicalJoinBuilder::PrepareJoinFilters(TExprNode::TPtr& leftLambda, TExprNode::TPtr& rightLambda, TExprNode::TPtr& commonLambda) {
+    TVector<TExpression> leftFilters;
+    TVector<TExpression> rightFilters;
+    TVector<TExpression> commonFilters;
+
+    auto leftInputs = NPhysicalConvertionUtils::GetLiveInputIUs(*Join, 0);
+    const auto rightInputs = NPhysicalConvertionUtils::GetLiveInputIUs(*Join, 1);
+ 
+    for (const auto& filterExpr : Join->JoinFilters) {
+        if (IUIsSubset(filterExpr.GetInputIUs(), leftInputs)) {
+            leftFilters.push_back(filterExpr);
+        } else if (IUIsSubset(filterExpr.GetInputIUs(), rightInputs)) {
+            rightFilters.push_back(filterExpr);
+        } else {
+            commonFilters.push_back(filterExpr);
+        }
+    }
+
+    // Left filter.
+    auto leftFilter = leftFilters.size() ? MakeConjunction(leftFilters).Node : BuildVoidLamda(Ctx, Pos);
+    leftLambda = ConvertToWideLambda(leftFilter, leftInputs, Ctx);
+
+    // Right filter.
+    auto rightFilter = leftFilters.size() ? MakeConjunction(rightFilters).Node : BuildVoidLamda(Ctx, Pos);
+    rightLambda = ConvertToWideLambda(rightFilter, rightInputs, Ctx);
+
+    // Common filter.
+    leftInputs.insert(leftInputs.end(), rightInputs.begin(), rightInputs.end());
+    auto commonFilter = leftFilters.size() ? MakeConjunction(commonFilters).Node : BuildVoidLamda(Ctx, Pos);
+    commonLambda = ConvertToWideLambda(commonFilter, leftInputs, Ctx);
+}
+
 TExprNode::TPtr TPhysicalJoinBuilder::BuildBlockHashJoin(const TString& joinType, TExprNode::TPtr leftInput, TExprNode::TPtr rightInput,
                                                          const TVector<TCoAtom>& leftKeyColumnIdxs, const TVector<TCoAtom>& rightKeyColumnIdsx,
                                                          const TVector<TCoAtom>& leftKeyColumnNames, const TVector<TCoAtom>& rightKeyColumnNames,
@@ -343,6 +418,11 @@ TExprNode::TPtr TPhysicalJoinBuilder::BuildBlockHashJoin(const TString& joinType
                 .Done());
         // clang-format on
     }
+
+    TExprNode::TPtr leftFilter;
+    TExprNode::TPtr rightFilter;
+    TExprNode::TPtr commonFilter;
+    PrepareJoinFilters(leftFilter, rightFilter, commonFilter);
 
     // clang-format off
     return Build<TDqBlockHashJoinCore>(Ctx, Pos)
@@ -366,6 +446,9 @@ TExprNode::TPtr TPhysicalJoinBuilder::BuildBlockHashJoin(const TString& joinType
         .Settings()
             .Add(joinSettings)
         .Build()
+        .LeftFilter(leftFilter)
+        .RightFilter(rightFilter)
+        .CommonFilter(commonFilter)
     .Done().Ptr();
     // clang-format on
 }
@@ -518,7 +601,6 @@ TExprNode::TPtr TPhysicalJoinBuilder::BuildPhysicalJoin(TExprNode::TPtr leftInpu
     .Done().Ptr();
     // clang-format on
 
-
     leftInput = NPhysicalConvertionUtils::BuildExpandMapForNarrowInput(leftInput, leftInputColumns, Ctx);
     rightInput = NPhysicalConvertionUtils::BuildExpandMapForNarrowInput(rightInput, rightInputColumns, Ctx);
 
@@ -537,6 +619,8 @@ TExprNode::TPtr TPhysicalJoinBuilder::BuildPhysicalJoin(TExprNode::TPtr leftInpu
         .Done().Ptr();
         // clang-format on
     }
+
+    Y_ENSURE(Join->JoinFilters.empty() || (Join->JoinFilters.size() && useBlockHashJoin), "Join filters supported only for block join.");
 
     TExprNode::TPtr phyJoin;
     switch (joinAlgo) {
