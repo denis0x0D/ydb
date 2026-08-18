@@ -4656,7 +4656,7 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
         }
     }
 
-    std::set<ui32> MakeTPC_YqlSingleQuerySkipList(const EBenchType type, const ui32 queryId) {
+    std::set<ui32> MakePerf_YqlSingleQuerySkipList(const EBenchType type, const ui32 queryId) {
         std::set<ui32> skipList;
         for (ui32 qId = 1, e = BenchmarkQueryCount[type]; qId <= e; ++qId) {
             if (qId != queryId) {
@@ -4675,7 +4675,7 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
             expectedSuccessQueries.insert(BenchmarkQueryCount[EBenchType::TPCH] + 1);
         }
 
-        RunPerf_YqlTest(EBenchType::TPCH, /*columnstore=*/true, std::move(expectedSuccessQueries), MakeTPC_YqlSingleQuerySkipList(EBenchType::TPCH, queryId),
+        RunPerf_YqlTest(EBenchType::TPCH, /*columnstore=*/true, std::move(expectedSuccessQueries), MakePerf_YqlSingleQuerySkipList(EBenchType::TPCH, queryId),
                         /*new rbo=*/true, /*printStatus=*/false, /*compareResults=*/true, /*checkNewRBOCbo=*/true);
     }
 
@@ -7910,6 +7910,15 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                         /*queriesStatus=*/{1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 21,
                                            22, 23, 24, 25, 26, 27, 28, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 41, 42},
                         /*skipList=*/{}, /*new rbo=*/true, /*printStatus=*/false, /*compareResults=*/true,
+                        /*checkNewRBOCbo=*/false, /*queriesWithoutCboCheck=*/{});
+    }
+
+    Y_UNIT_TEST(ClickBench_YQL_Single) {
+        const ui32 query = 10;
+        auto skipList = MakePerf_YqlSingleQuerySkipList(EBenchType::CLICKBENCH, query);
+        RunPerf_YqlTest(EBenchType::CLICKBENCH, /*columnstore=*/true,
+                        /*queriesStatus=*/{query},
+                        /*skipList=*/std::move(skipList), /*new rbo=*/true, /*printStatus=*/false, /*compareResults=*/true,
                         /*checkNewRBOCbo=*/false, /*queriesWithoutCboCheck=*/{});
     }
 
