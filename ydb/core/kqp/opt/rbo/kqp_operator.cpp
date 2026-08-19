@@ -840,6 +840,44 @@ NJson::TJsonValue TOpJoin::ToJson(ui32 explainFlags) {
 }
 
 /**
+ * OpDependentJoin operator methods
+ */
+
+TOpDependentJoin::TOpDependentJoin(TIntrusivePtr<IOperator> domain, TIntrusivePtr<IOperator> input, const TVector<TInfoUnit>& dependencies,
+                                   TPositionHandle pos)
+    : IBinaryOperator(EOperator::DependentJoin, pos, domain, input)
+    , Dependencies(dependencies) {
+    Y_ENSURE(!Dependencies.empty(), "Dependent join must have correlated columns");
+}
+
+// The domain columns come from the domain child, everything else the right input adds on top. The
+// right input already exposes the correlated columns through its AddDependencies operator, so we
+// have to deduplicate.
+void TOpDependentJoin::ComputeOutputIUs() {
+    TVector<TInfoUnit> res = GetDomain()->GetOutputIUs();
+    for (const auto& iu : GetInput()->GetOutputIUs()) {
+        if (!ContainsInfoUnit(res, iu)) {
+            res.push_back(iu);
+        }
+    }
+    Props.OutputIUs = std::move(res);
+}
+
+TString TOpDependentJoin::ToString(TExprContext& ctx) {
+    Y_UNUSED(ctx);
+    TStringBuilder res;
+    res << "DependentJoin, Domain: [";
+    for (size_t i = 0; i < Dependencies.size(); i++) {
+        if (i) {
+            res << ", ";
+        }
+        res << Dependencies[i].GetFullName();
+    }
+    res << "]";
+    return res;
+}
+
+/**
  * OpUnionAll operator methods
  */
 
@@ -1438,6 +1476,8 @@ void TOpRoot::ComputeParents() {
         auto& op = item.Current;
         op->Parents.clear();
         for (ui32 childIndex = 0; childIndex < op->Children.size(); ++childIndex) {
+            Y_ENSURE(op->Children[childIndex],
+                     TStringBuilder() << "Operator " << op->GetExplainName() << " has no input at index " << childIndex);
             op->Children[childIndex]->Parents.emplace_back(op.Get(), childIndex);
         }
     }
