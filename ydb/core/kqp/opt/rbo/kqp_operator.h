@@ -123,7 +123,6 @@ struct TPhysicalOpProps {
     std::optional<int> StageId;
     std::optional<TString> Algorithm;
     std::optional<TOrderEnforcer> OrderEnforcer;
-    bool EnsureAtMostOne = false;
 
     std::optional<TRBOMetadata> Metadata;
     std::optional<TRBOStatistics> Statistics;
@@ -150,7 +149,6 @@ private:
         StageId = other.StageId;
         Algorithm = other.Algorithm;
         OrderEnforcer = other.OrderEnforcer;
-        EnsureAtMostOne = other.EnsureAtMostOne;
         Metadata = other.Metadata;
         Statistics = other.Statistics;
         JoinAlgo = other.JoinAlgo;
