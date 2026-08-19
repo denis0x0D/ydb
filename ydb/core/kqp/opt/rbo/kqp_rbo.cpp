@@ -23,6 +23,9 @@ bool ISimplifiedRule::MatchAndApply(TIntrusivePtr<IOperator> &input, TRBOContext
     }
 
     auto output = SimpleMatchAndApply(input, ctx, props);
+    // A rule that doesn't match has to return its input unchanged, returning nothing would splice a
+    // hole into the plan.
+    Y_ENSURE(output, TStringBuilder() << "Rule " << RuleName << " produced no operator");
     if (input != output) {
         input = output;
         return true;

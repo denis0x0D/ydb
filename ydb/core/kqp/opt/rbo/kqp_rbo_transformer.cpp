@@ -462,6 +462,24 @@ void TKqpNewRBOTransformer::InitializeRBOOptimizationStages() {
     inlineSimpleSubPlanStageRules.emplace_back(std::make_unique<TInlineGenericInExistsSubplanRule>());
     RBO.AddStage(std::make_unique<TRuleBasedStage>("Inline in/exists subplans", std::move(inlineSimpleSubPlanStageRules)));
 
+    // Subplan inlining leaves a dependent join behind whenever the correlated predicate could not be
+    // pulled up. Push it down the correlated plan fragment until the correlation is bound and the
+    // dependent join degenerates into a cross join with the domain. The diagnostic rule must stay
+    // last: it only fires when none of the pushdown rules could be applied.
+    TVector<std::unique_ptr<IRule>> decorrelationStageRules;
+    decorrelationStageRules.emplace_back(std::make_unique<TDependentJoinToCrossJoinRule>());
+    decorrelationStageRules.emplace_back(std::make_unique<TRemoveDependenciesUnderDependentJoinRule>());
+    // Has to be tried before the correlated predicate is pushed above the dependent join, that is the
+    // only place where the binding of the correlated columns is visible.
+    decorrelationStageRules.emplace_back(std::make_unique<TEliminateDependentJoinDomainRule>());
+    decorrelationStageRules.emplace_back(std::make_unique<TPushDependentJoinThroughFilterRule>());
+    decorrelationStageRules.emplace_back(std::make_unique<TPushDependentJoinThroughMapRule>());
+    decorrelationStageRules.emplace_back(std::make_unique<TPushDependentJoinThroughAggregateRule>());
+    decorrelationStageRules.emplace_back(std::make_unique<TPushDependentJoinThroughUnionAllRule>());
+    decorrelationStageRules.emplace_back(std::make_unique<TPushDependentJoinThroughJoinRule>());
+    decorrelationStageRules.emplace_back(std::make_unique<TDependentJoinNotSupportedRule>());
+    RBO.AddStage(std::make_unique<TRuleBasedStage>("Decorrelate dependent joins", std::move(decorrelationStageRules)));
+
     // Rewrite all right joins into left joins
     TVector<std::unique_ptr<IRule>> rewriteRightJoinsStageRules;
     rewriteRightJoinsStageRules.emplace_back(std::make_unique<TRewriteRightJoinRule>());

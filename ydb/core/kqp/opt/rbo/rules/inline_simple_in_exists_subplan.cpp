@@ -1,5 +1,7 @@
 #include "kqp_rules_include.h"
 
+#include "dependent_join.h"
+
 namespace NKikimr {
 namespace NKqp {
 
@@ -58,9 +60,11 @@ TIntrusivePtr<IOperator> TInlineSimpleInExistsSubplanRule::SimpleMatchAndApply(c
     const auto subPlanKind = uncorrSubplan->Kind;
     TVector<TExpression> joinFilters;
 
-
     // If its a correlated subplan with filters pulled up, build join conditions from the pulled up filter
-    if (subPlanKind == EOperator::Filter && CastOperator<TOpFilter>(uncorrSubplan)->GetInput()->Kind == EOperator::AddDependencies) {
+    const bool filterPullUpSucceeded =
+        subPlanKind == EOperator::Filter && CastOperator<TOpFilter>(uncorrSubplan)->GetInput()->Kind == EOperator::AddDependencies;
+
+    if (filterPullUpSucceeded) {
         auto subplanFilter = CastOperator<TOpFilter>(subplanEntry.Plan);
         auto addDeps = CastOperator<TOpAddDependencies>(subplanFilter->GetInput());
         uncorrSubplan = addDeps->GetInput();
@@ -84,9 +88,19 @@ TIntrusivePtr<IOperator> TInlineSimpleInExistsSubplanRule::SimpleMatchAndApply(c
         }
     }
 
-    // If we have a correlated subplan where pull up didn't succeed, throw an exception
-    else if (subPlanKind == EOperator::Filter && subplanEntry.DependentIUs.size()) {
-        Y_ENSURE(false, "Decorrelation via filter pull up didn't succeed");
+    // The correlated predicate could not be pulled up to the top of the subplan, so the correlation is
+    // still inside it. A plain semi join cannot express that, so decline and let the generic rule
+    // decorrelate the subplan with a dependent join.
+    else if (HasFreeCorrelation(uncorrSubplan, subplanEntry.DependentIUs)) {
+        return input;
+    }
+
+    // A correlated EXISTS whose pulled up predicate produced no equi join key cannot go down the
+    // uncorrelated path below: that one evaluates the subplan once and only counts its rows, so the
+    // remaining correlated conjuncts would end up on a join that no longer sees the subplan columns.
+    // Decline and let the generic rule build a mark join over the domain instead.
+    if (filterPullUpSucceeded && subplanEntry.Type == ESubplanType::EXISTS && extraJoinKeys.empty()) {
+        return input;
     }
 
     // We build a semi-join or a left-only join when processing IN subplan

@@ -8178,6 +8178,19 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
             R"(
                 SELECT bar.id FROM `/Root/bar` as bar where (NOT EXISTS(SELECT foo.id FROM `/Root/foo` as foo where foo.id == bar.id)) OR bar.id == 1;
             )",
+            // A correlated EXISTS must yield false, not null, for outer rows without a match. Otherwise
+            // the rows below where the equi condition doesn't hold are lost in the enclosing OR.
+            R"(
+                SELECT bar.id FROM `/Root/bar` as bar where (NOT EXISTS(SELECT foo.id FROM `/Root/foo` as foo where foo.id == bar.id AND foo.id == 1)) OR bar.id == 2 order by bar.id;
+            )",
+            // Same, but the correlated condition is not an equi condition, so it stays a join filter.
+            R"(
+                SELECT bar.id FROM `/Root/bar` as bar where (NOT EXISTS(SELECT foo.id FROM `/Root/foo` as foo where foo.id == bar.id AND foo.id2 > bar.id2)) OR bar.id == 0 order by bar.id;
+            )",
+            // IN over non-nullable columns is two-valued as well: an empty subquery result is false.
+            R"(
+                SELECT bar.id FROM `/Root/bar` as bar where (bar.id2 NOT IN (SELECT foo.id2 FROM `/Root/foo` as foo where foo.id == bar.id AND foo.id == 1)) OR bar.id == 2 order by bar.id;
+            )",
         };
 
         // TODO: The order of result is not defined, we need order by to add more interesting tests.
@@ -8189,6 +8202,9 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
             R"([[0];[1];[2];[3]])",
             R"([[3]])",
             R"([[1]])",
+            R"([[0];[2];[3]])",
+            R"([[0];[1];[2];[3]])",
+            R"([[0];[2];[3]])",
         };
 
         for (ui32 i = 0; i < queries.size(); ++i) {
@@ -8198,6 +8214,278 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
             //Cout << FormatResultSetYson(result.GetResultSet(0)) << Endl;
             UNIT_ASSERT_VALUES_EQUAL(FormatResultSetYson(result.GetResultSet(0)), results[i]);
         }
+    }
+
+    // Correlated subqueries that the plain correlated filter pull up cannot handle, so they are
+    // decorrelated with a dependent join, plus the pull up cases for comparison. Every query orders
+    // its result, so the expected value is fully determined.
+    void TestDecorrelation(bool columnTables) {
+        NKikimrConfig::TAppConfig appConfig;
+        appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+        appConfig.MutableTableServiceConfig()->SetAllowOlapDataQuery(true);
+        // The decorrelation has to handle these queries itself, a fallback would hide a failure.
+        appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
+        appConfig.MutableTableServiceConfig()->SetDefaultLangVer(NYql::GetMaxLangVersion());
+        appConfig.MutableTableServiceConfig()->SetBackportMode(NKikimrConfig::TTableServiceConfig_EBackportMode_All);
+        TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        TString schemeQuery;
+        for (const auto* table : {"t1", "t2", "t3"}) {
+            schemeQuery += TStringBuilder() << R"(
+                CREATE TABLE `/Root/)" << table << R"(` (
+                    a   Int64   NOT NULL,
+                    b   Int64   NOT NULL,
+                    c   Int64   NOT NULL,
+                    d   String,
+                    primary key(a)
+                ))" << (columnTables ? " WITH (STORE = column)" : "") << ";\n";
+        }
+
+        auto schemeResult = session.ExecuteSchemeQuery(schemeQuery).GetValueSync();
+        UNIT_ASSERT_C(schemeResult.IsSuccess(), schemeResult.GetIssues().ToString());
+
+        // The data is chosen so that the expected result of every query below can be derived by
+        // hand. All columns are non nullable and hold no nulls, which keeps the three valued corners
+        // of IN out of these tests.
+        //
+        //   t1: a in [1, 12], b = a % 4, c = 10 * a, d = 'g' || (a % 3)
+        //   a | 1   2   3   4   5   6   7   8   9   10  11  12
+        //   b | 1   2   3   0   1   2   3   0   1   2   3   0
+        //   c | 10  20  30  40  50  60  70  80  90  100 110 120
+        //   d | g1  g2  g0  g1  g2  g0  g1  g2  g0  g1  g2  g0
+        //
+        //   t2: a in [1, 12], b = a % 3, c = a * a, d = 'g' || (a % 4)
+        //   a | 1   2   3   4   5   6   7   8   9   10  11  12
+        //   b | 1   2   0   1   2   0   1   2   0   1   2   0
+        //   c | 1   4   9   16  25  36  49  64  81  100 121 144
+        //   d | g1  g2  g3  g0  g1  g2  g3  g0  g1  g2  g3  g0
+        //
+        //   t3: a in [1, 6], b = a % 2, c = a, d = 'g' || (a % 2)
+        auto fill = [&](const TString& table, i64 rowCount, auto&& b, auto&& c, auto&& d) {
+            NYdb::TValueBuilder rows;
+            rows.BeginList();
+            for (i64 a = 1; a <= rowCount; ++a) {
+                rows.AddListItem()
+                    .BeginStruct()
+                    .AddMember("a").Int64(a)
+                    .AddMember("b").Int64(b(a))
+                    .AddMember("c").Int64(c(a))
+                    .AddMember("d").String(d(a))
+                    .EndStruct();
+            }
+            rows.EndList();
+
+            auto result = db.BulkUpsert(table, rows.Build()).GetValueSync();
+            UNIT_ASSERT_C(result.IsSuccess(), result.GetIssues().ToString());
+        };
+
+        auto group = [](i64 n) { return TString("g") + std::to_string(n); };
+        fill("/Root/t1", 12, [](i64 a) { return a % 4; }, [](i64 a) { return 10 * a; }, [&](i64 a) { return group(a % 3); });
+        fill("/Root/t2", 12, [](i64 a) { return a % 3; }, [](i64 a) { return a * a; }, [&](i64 a) { return group(a % 4); });
+        fill("/Root/t3", 6, [](i64 a) { return a % 2; }, [](i64 a) { return a; }, [&](i64 a) { return group(a % 2); });
+
+        auto queryClient = kikimr.GetQueryClient();
+
+        std::vector<std::pair<std::string, std::string>> cases = {
+            // An uncorrelated scalar subquery compared with something other than equality. The
+            // comparison lives in the outer filter, so it must not constrain the decorrelation:
+            // max(t2.c) - 44 == 100, so t1.c > 100 keeps a in {11, 12}.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE t1.c > (SELECT max(t2.c) - 44 FROM `/Root/t2` as t2)
+                ORDER BY t1.a;
+             )",
+             R"([[11];[12]])"},
+
+            // An equi correlated predicate is pulled up into the join condition and, because the
+            // aggregate keeps one group per correlation value, becomes a grouping key. The outer
+            // comparison is still not an equality: 2 * t1.c >= max(t2.c) over t2.b == t1.b, which is
+            // 144 for t1.b == 0, 100 for 1, 121 for 2 and null for 3 since t2.b is never 3.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE t1.c * 2 >= (SELECT max(t2.c) FROM `/Root/t2` as t2 WHERE t2.b == t1.b)
+                ORDER BY t1.a;
+             )",
+             R"([[5];[8];[9];[10];[12]])"},
+
+            // A non equi correlated predicate below an aggregate cannot become a grouping key, so
+            // this needs a dependent join. max(t2.c) over t2.a <= t1.a is t1.a * t1.a, so the
+            // condition is 10 * a > a * a, which holds for a < 10.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE t1.c > (SELECT max(t2.c) FROM `/Root/t2` as t2 WHERE t2.a <= t1.a)
+                ORDER BY t1.a;
+             )",
+             R"([[1];[2];[3];[4];[5];[6];[7];[8];[9]])"},
+
+            // The aggregated expression itself reads a correlated column, so the dependent join has
+            // to be pushed through the aggregate and the projection below it. The subquery yields
+            // t1.a * t1.a - t1.b, and 10 * a > a * a - b fails first for a == 11.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE t1.c > (SELECT max(t2.c - t1.b) FROM `/Root/t2` as t2 WHERE t2.a <= t1.a)
+                ORDER BY t1.a;
+             )",
+             R"([[1];[2];[3];[4];[5];[6];[7];[8];[9];[10]])"},
+
+            // The correlated predicate cannot be pulled up: it doesn't reference every correlated
+            // column, t1.a is also used by the projection. The subquery yields {0, .., 12 - t1.a},
+            // and t1.b == a % 4 is outside that range only for a == 11.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE t1.b IN (SELECT t2.a - t1.a FROM `/Root/t2` as t2 WHERE t2.a >= t1.a)
+                ORDER BY t1.a;
+             )",
+             R"([[1];[2];[3];[4];[5];[6];[7];[8];[9];[10];[12]])"},
+
+            // Here the predicate does cover the correlation, the pull up is blocked by the projection
+            // computing an expression over a correlated column. Per t1.b the subquery yields
+            // {3, 6, 9, 12} for 0, {2, 5, 8, 11} for 1, {4, 7, 10, 13} for 2 and nothing for 3.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE t1.a IN (SELECT t2.a + t1.b FROM `/Root/t2` as t2 WHERE t2.b == t1.b)
+                ORDER BY t1.a;
+             )",
+             R"([[5];[10];[12]])"},
+
+            // A grouped aggregate under an IN subquery with a non equi correlated predicate: the
+            // subquery yields the group sizes of t2.b over t2.a <= t1.a, and t1.b has to be one of
+            // them.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE t1.b IN (SELECT CAST(count(*) AS Int64) FROM `/Root/t2` as t2 WHERE t2.a <= t1.a GROUP BY t2.b)
+                ORDER BY t1.a;
+             )",
+             R"([[1];[5];[6];[7];[11]])"},
+
+            // The same shape under EXISTS, with the group filtered by a HAVING clause. A group of
+            // t2.b reaches four rows only once t1.a is at least 10.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE EXISTS (SELECT t2.b FROM `/Root/t2` as t2 WHERE t2.a <= t1.a GROUP BY t2.b HAVING count(*) > 3)
+                ORDER BY t1.a;
+             )",
+             R"([[10];[11];[12]])"},
+
+            // A correlated EXISTS must yield false, not null, for outer rows without a match,
+            // otherwise those rows are lost in the enclosing OR. t2.b == 0 holds for t2.a in
+            // {3, 6, 9, 12}, so those are the only rows the EXISTS matches.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE (NOT EXISTS (SELECT t2.a FROM `/Root/t2` as t2 WHERE t2.a == t1.a AND t2.b == 0)) OR t1.a == 1
+                ORDER BY t1.a;
+             )",
+             R"([[1];[2];[4];[5];[7];[8];[10];[11]])"},
+
+            // The same for IN over non nullable columns, which is two valued as well.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE (t1.a NOT IN (SELECT t2.a FROM `/Root/t2` as t2 WHERE t2.a == t1.a AND t2.b == 0)) OR t1.a == 3
+                ORDER BY t1.a;
+             )",
+             R"([[1];[2];[3];[4];[5];[7];[8];[10];[11]])"},
+
+            // The dependent join is pushed into both branches of a union all. The first branch
+            // decides a == 12, the second one a == 2.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE t1.a IN (
+                    SELECT t2.a + t1.b FROM `/Root/t2` as t2 WHERE t2.b == 0
+                    UNION ALL
+                    SELECT t3.a * 2 FROM `/Root/t3` as t3 WHERE t3.a <= t1.b
+                )
+                ORDER BY t1.a;
+             )",
+             R"([[2];[12]])"},
+
+            // The correlation only reaches the left side of a join inside the subquery, so the
+            // dependent join is pushed into that side alone. The join keeps t2.b in {0, 1}, that is
+            // t2.a in {1, 3, 4, 6, 7, 9, 10, 12}, and the largest of those exceeds 2 * t1.a up to
+            // a == 5.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE EXISTS (
+                    SELECT t2.a FROM `/Root/t2` as t2 JOIN `/Root/t3` as t3 ON t2.b == t3.b
+                    WHERE t2.a > t1.a * 2 GROUP BY t2.a
+                )
+                ORDER BY t1.a;
+             )",
+             R"([[1];[2];[3];[4];[5]])"},
+
+            // Two levels of correlation: a correlated IN inside a correlated scalar subquery, each
+            // level correlated with its immediately enclosing one. The inner IN keeps the t2 rows
+            // whose b is a b of t3 up to t2.a, that is every t2 row except b == 2, so the maximum is
+            // the largest square of a in {1, 3, 4, 6, 7, 9, 10, 12} up to t1.a.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE t1.c > (
+                    SELECT max(t2.c) FROM `/Root/t2` as t2
+                    WHERE t2.a <= t1.a AND t2.b IN (SELECT t3.b FROM `/Root/t3` as t3 WHERE t3.a <= t2.a)
+                )
+                ORDER BY t1.a;
+             )",
+             R"([[1];[2];[3];[4];[5];[6];[7];[8];[9];[11]])"},
+
+            // An equi correlated IN over a string column, decorrelated by the filter pull up. t1.d
+            // matches t2.d of the next row exactly when a % 3 == (a + 1) % 4.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE t1.d IN (SELECT t2.d FROM `/Root/t2` as t2 WHERE t2.a == t1.a + 1)
+                ORDER BY t1.a;
+             )",
+             R"([[3];[4];[5]])"},
+
+            // A correlated EXISTS whose only correlated predicate is a non equi comparison, so the
+            // pulled up predicate yields a join filter and no join key at all. Such a subplan still
+            // has to be evaluated per domain value, the largest t2.a is 12 so 12 > 2 * t1.a.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE EXISTS (
+                    SELECT t2.a FROM `/Root/t2` as t2 WHERE t2.a > t1.a * 2 GROUP BY t2.a
+                )
+                ORDER BY t1.a;
+             )",
+             R"([[1];[2];[3];[4];[5]])"},
+
+            // A correlated EXISTS whose predicate is an equality, but below a group by, so the pull up
+            // cannot reach the top of the subplan and the dependent join takes over. The equality lets
+            // the decorrelation drop the domain again. t2.b only takes the values 0, 1 and 2, so the
+            // rows of t1 with b == 3 have nothing to match.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE EXISTS (
+                    SELECT t2.d FROM `/Root/t2` as t2 WHERE t2.b == t1.b GROUP BY t2.d HAVING count(*) > 0
+                )
+                ORDER BY t1.a;
+             )",
+             R"([[1];[2];[4];[5];[6];[8];[9];[10];[12]])"},
+        };
+
+        for (ui32 i = 0; i < cases.size(); ++i) {
+            const auto& [query, expected] = cases[i];
+            auto querySession = queryClient.GetSession().GetValueSync().GetSession();
+            auto result = querySession.ExecuteQuery(query, NYdb::NQuery::TTxControl::NoTx()).ExtractValueSync();
+            UNIT_ASSERT_C(result.IsSuccess(), TStringBuilder() << "query " << i << ": " << result.GetIssues().ToString());
+            UNIT_ASSERT_VALUES_EQUAL_C(FormatResultSetYson(result.GetResultSet(0)), expected, "query " << i);
+        }
+
+        // The subquery below is decorrelated with a dependent join, its map is correlated so there is
+        // nothing to pull up. Its correlated predicate binds the correlated column to a column of the
+        // subquery though, so the domain of the correlation is neither materialized nor cross joined
+        // against: everything this plan joins, it joins on a key.
+        auto planSession = queryClient.GetSession().GetValueSync().GetSession();
+        auto plan = ExecuteExplain(planSession, R"(
+            SELECT t1.a FROM `/Root/t1` as t1
+            WHERE t1.a IN (SELECT t2.a + t1.b FROM `/Root/t2` as t2 WHERE t2.b == t1.b)
+            ORDER BY t1.a;
+        )");
+        UNIT_ASSERT_C(!FindOperatorByStringField(GetSimplifiedPlan(plan), "JoinKind", "Cross"), plan);
+    }
+
+    Y_UNIT_TEST_TWIN(Decorrelation, ColumnStore) {
+        TestDecorrelation(ColumnStore);
     }
 
     Y_UNIT_TEST(OrderBy) {

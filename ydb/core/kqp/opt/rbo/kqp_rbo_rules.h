@@ -76,6 +76,131 @@ class TInlineGenericInExistsSubplanRule : public ISimplifiedRule {
 };
 
 /**
+ * Dependent join decorrelation, following Neumann/Kemper "Unnesting Arbitrary Queries".
+ *
+ * A dependent join D ⋈ᵈᵉᵖ T is pushed down the right input T until the free correlated variables
+ * are bound. The rules below implement one step of that descent each. Once the domain reaches the
+ * AddDependencies operator that injects the correlated columns, the dependent join degenerates into
+ * a plain cross join with the domain and the marker is removed.
+ *
+ * All rules keep the domain child untouched: only the position of the dependent join changes.
+ */
+
+/**
+ * D ⋈ᵈᵉᵖ AddDependencies(T) = D × T. The correlated columns are now provided by the domain, so the
+ * correlation boundary marker is no longer needed.
+ */
+class TRemoveDependenciesUnderDependentJoinRule : public ISimplifiedRule {
+  public:
+    TRemoveDependenciesUnderDependentJoinRule() : ISimplifiedRule("Remove dependencies under dependent join", ERuleProperties::RequireParents | ERuleProperties::RequireOutputIUs) {}
+
+    virtual bool QuickMatch(const TIntrusivePtr<IOperator>& input) const override;
+    virtual TIntrusivePtr<IOperator> SimpleMatchAndApply(const TIntrusivePtr<IOperator> &input, TRBOContext &ctx, TPlanProps &props) override;
+};
+
+/**
+ * Base case of the rewrite: D ⋈ᵈᵉᵖ T = D × T when T has no free correlated variables left.
+ */
+class TDependentJoinToCrossJoinRule : public ISimplifiedRule {
+  public:
+    TDependentJoinToCrossJoinRule() : ISimplifiedRule("Dependent join to cross join", ERuleProperties::RequireParents | ERuleProperties::RequireOutputIUs) {}
+
+    virtual bool QuickMatch(const TIntrusivePtr<IOperator>& input) const override;
+    virtual TIntrusivePtr<IOperator> SimpleMatchAndApply(const TIntrusivePtr<IOperator> &input, TRBOContext &ctx, TPlanProps &props) override;
+};
+
+/**
+ * D elimination: D ⋈ᵈᵉᵖ σ_{⋀ dᵢ = rᵢ ∧ p}(AddDependencies_{d}(T)) = σ_p(Π_{T.*, dᵢ := rᵢ}(T)).
+ *
+ * When the correlated predicate binds every correlated column to a column of the subplan, the domain
+ * does not have to be materialized and joined at all: the binding is already carried by the subplan
+ * row itself. Dropping the domain also drops the restriction to the values D contains, but every
+ * decorrelated subplan is joined back to the outer plan on all of its domain columns, so the extra
+ * bindings are discarded there.
+ */
+class TEliminateDependentJoinDomainRule : public ISimplifiedRule {
+  public:
+    TEliminateDependentJoinDomainRule() : ISimplifiedRule("Eliminate dependent join domain", ERuleProperties::RequireParents | ERuleProperties::RequireOutputIUs) {}
+
+    virtual bool QuickMatch(const TIntrusivePtr<IOperator>& input) const override;
+    virtual TIntrusivePtr<IOperator> SimpleMatchAndApply(const TIntrusivePtr<IOperator> &input, TRBOContext &ctx, TPlanProps &props) override;
+};
+
+/**
+ * D ⋈ᵈᵉᵖ σ_p(T) = σ_p(D ⋈ᵈᵉᵖ T). The predicate may reference the domain columns, which is exactly
+ * the correlated predicate case.
+ */
+class TPushDependentJoinThroughFilterRule : public ISimplifiedRule {
+  public:
+    TPushDependentJoinThroughFilterRule() : ISimplifiedRule("Push dependent join through filter", ERuleProperties::RequireParents | ERuleProperties::RequireOutputIUs) {}
+
+    virtual bool QuickMatch(const TIntrusivePtr<IOperator>& input) const override;
+    virtual TIntrusivePtr<IOperator> SimpleMatchAndApply(const TIntrusivePtr<IOperator> &input, TRBOContext &ctx, TPlanProps &props) override;
+};
+
+/**
+ * D ⋈ᵈᵉᵖ Π_e(T) = Π_e(D ⋈ᵈᵉᵖ T). Maps in this IR are additive, so the domain columns stay visible
+ * without extending the projection list.
+ */
+class TPushDependentJoinThroughMapRule : public ISimplifiedRule {
+  public:
+    TPushDependentJoinThroughMapRule() : ISimplifiedRule("Push dependent join through map", ERuleProperties::RequireParents | ERuleProperties::RequireOutputIUs) {}
+
+    virtual bool QuickMatch(const TIntrusivePtr<IOperator>& input) const override;
+    virtual TIntrusivePtr<IOperator> SimpleMatchAndApply(const TIntrusivePtr<IOperator> &input, TRBOContext &ctx, TPlanProps &props) override;
+};
+
+/**
+ * D ⋈ᵈᵉᵖ Γ_{g;a}(T) = Γ_{g ∪ A(D);a}(D ⋈ᵈᵉᵖ T). The domain columns become additional grouping keys,
+ * so every binding of the correlated columns gets its own group.
+ */
+class TPushDependentJoinThroughAggregateRule : public ISimplifiedRule {
+  public:
+    TPushDependentJoinThroughAggregateRule() : ISimplifiedRule("Push dependent join through aggregate", ERuleProperties::RequireParents | ERuleProperties::RequireOutputIUs) {}
+
+    virtual bool QuickMatch(const TIntrusivePtr<IOperator>& input) const override;
+    virtual TIntrusivePtr<IOperator> SimpleMatchAndApply(const TIntrusivePtr<IOperator> &input, TRBOContext &ctx, TPlanProps &props) override;
+};
+
+/**
+ * D ⋈ᵈᵉᵖ (T₁ ∪ T₂) = (D ⋈ᵈᵉᵖ T₁) ∪ (D ⋈ᵈᵉᵖ T₂).
+ */
+class TPushDependentJoinThroughUnionAllRule : public ISimplifiedRule {
+  public:
+    TPushDependentJoinThroughUnionAllRule() : ISimplifiedRule("Push dependent join through union all", ERuleProperties::RequireParents | ERuleProperties::RequireOutputIUs) {}
+
+    virtual bool QuickMatch(const TIntrusivePtr<IOperator>& input) const override;
+    virtual TIntrusivePtr<IOperator> SimpleMatchAndApply(const TIntrusivePtr<IOperator> &input, TRBOContext &ctx, TPlanProps &props) override;
+};
+
+/**
+ * D ⋈ᵈᵉᵖ (T₁ ⋈_p T₂). If only one side is correlated the dependent join is pushed into that side.
+ * If both sides are correlated, both get their own copy of the domain and the join additionally
+ * equates the two copies.
+ */
+class TPushDependentJoinThroughJoinRule : public ISimplifiedRule {
+  public:
+    TPushDependentJoinThroughJoinRule() : ISimplifiedRule("Push dependent join through join", ERuleProperties::RequireParents | ERuleProperties::RequireOutputIUs) {}
+
+    virtual bool QuickMatch(const TIntrusivePtr<IOperator>& input) const override;
+    virtual TIntrusivePtr<IOperator> SimpleMatchAndApply(const TIntrusivePtr<IOperator> &input, TRBOContext &ctx, TPlanProps &props) override;
+};
+
+/**
+ * Terminal diagnostic rule. It fires only when no other dependent join rule could be applied to a
+ * dependent join, i.e. the correlation cannot be pushed past some operator (a limit or a sort, which
+ * are not distributable over the domain without per-partition semantics). Reports the operator that
+ * blocks decorrelation instead of failing later with an obscure message.
+ */
+class TDependentJoinNotSupportedRule : public ISimplifiedRule {
+  public:
+    TDependentJoinNotSupportedRule() : ISimplifiedRule("Dependent join not supported", ERuleProperties::RequireParents | ERuleProperties::RequireOutputIUs) {}
+
+    virtual bool QuickMatch(const TIntrusivePtr<IOperator>& input) const override;
+    virtual TIntrusivePtr<IOperator> SimpleMatchAndApply(const TIntrusivePtr<IOperator> &input, TRBOContext &ctx, TPlanProps &props) override;
+};
+
+/**
  * Inline join filters
  */
 class TInlineJoinFiltersRule : public ISimplifiedRule {

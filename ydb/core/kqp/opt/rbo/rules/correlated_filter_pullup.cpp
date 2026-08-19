@@ -116,10 +116,11 @@ bool TPullUpCorrelatedFilterRule::MatchAndApply(TIntrusivePtr<IOperator> &input,
     } else if (input->Kind == EOperator::Aggregate) {
         auto aggregate = CastOperator<TOpAggregate>(input);
 
-        // Check that all filter conditions are pure equi-join conditions
+        // Only pure equi-join conditions can become grouping keys. Anything else is left to the
+        // dependent join decorrelation.
         for (const auto& cond : dependentSubset) {
             if (!cond.MaybeEquiJoinCondition()) {
-                Y_ENSURE(false, "Only equi-join conditions are supported before aggregates in correlated subqueries");
+                return false;
             }
         }
 

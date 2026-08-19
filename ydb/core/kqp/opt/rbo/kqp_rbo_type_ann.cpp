@@ -476,6 +476,29 @@ TStatus ComputeTypes(TIntrusivePtr<TOpJoin> join, TRBOContext& ctx) {
     return TStatus::Ok;
 }
 
+// A dependent join produces the domain columns followed by whatever the right input adds. The right
+// input already carries the correlated columns through its AddDependencies operator, so we keep the
+// domain's copy and skip the duplicates.
+TStatus ComputeTypes(TIntrusivePtr<TOpDependentJoin> dependentJoin, TRBOContext& ctx) {
+    const auto* domainItemType = dependentJoin->GetDomain()->Type->Cast<TListExprType>()->GetItemType();
+    const auto* inputItemType = dependentJoin->GetInput()->Type->Cast<TListExprType>()->GetItemType();
+
+    TVector<const TItemExprType*> structItemTypes = domainItemType->Cast<TStructExprType>()->GetItems();
+    THashSet<TStringBuf> domainNames;
+    for (const auto* item : structItemTypes) {
+        domainNames.insert(item->GetName());
+    }
+
+    for (const auto* item : inputItemType->Cast<TStructExprType>()->GetItems()) {
+        if (!domainNames.contains(item->GetName())) {
+            structItemTypes.push_back(item);
+        }
+    }
+
+    dependentJoin->Type = ctx.ExprCtx.MakeType<TListExprType>(ctx.ExprCtx.MakeType<TStructExprType>(structItemTypes));
+    return TStatus::Ok;
+}
+
 TStatus ComputeTypes(TIntrusivePtr<TOpLimit> limit, TRBOContext& ctx) {
     auto inputType = limit->GetInput()->Type;
     const auto* structType = inputType->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
@@ -633,6 +656,9 @@ TStatus ComputeTypes(TIntrusivePtr<IOperator> op, TRBOContext& ctx, TPlanProps& 
     }
     else if(MatchOperator<TOpJoin>(op)) {
         return ComputeTypes(CastOperator<TOpJoin>(op), ctx);
+    }
+    else if(MatchOperator<TOpDependentJoin>(op)) {
+        return ComputeTypes(CastOperator<TOpDependentJoin>(op), ctx);
     }
     else if(MatchOperator<TOpUnionAll>(op)) {
         return ComputeTypes(CastOperator<TOpUnionAll>(op), ctx);

@@ -675,6 +675,33 @@ void TOpJoin::ComputeStatistics(TRBOContext& ctx, TPlanProps& planProps) {
     }
 }
 
+// The dependent join is a transient operator that the pushdown rules eliminate before statistics
+// matter, so we only provide the cross-product estimate the degenerate case would produce.
+void TOpDependentJoin::ComputeMetadata(TRBOContext& ctx, TPlanProps& planProps) {
+    Y_UNUSED(ctx);
+    Y_UNUSED(planProps);
+    if (!GetDomain()->Props.Metadata.has_value() || !GetInput()->Props.Metadata.has_value()) {
+        return;
+    }
+
+    Props.Metadata = TRBOMetadata();
+    Props.Metadata->LogicalCard = ELogicalCardinality::ZeroOrMore;
+    Props.Metadata->ColumnsCount = GetOutputIUs().size();
+}
+
+void TOpDependentJoin::ComputeStatistics(TRBOContext& ctx, TPlanProps& planProps) {
+    Y_UNUSED(ctx);
+    Y_UNUSED(planProps);
+    if (!GetDomain()->Props.Statistics.has_value() || !GetInput()->Props.Statistics.has_value()) {
+        return;
+    }
+
+    Props.Statistics = TRBOStatistics();
+    Props.Statistics->ERows = GetDomain()->Props.Statistics->ERows * GetInput()->Props.Statistics->ERows;
+    Props.Statistics->EBytes = GetDomain()->Props.Statistics->EBytes + GetInput()->Props.Statistics->EBytes;
+    Props.Cost = std::nullopt;
+}
+
 void TOpUnionAll::ComputeMetadata(TRBOContext& ctx, TPlanProps& planProps) {
     Y_UNUSED(ctx);
     Y_UNUSED(planProps);

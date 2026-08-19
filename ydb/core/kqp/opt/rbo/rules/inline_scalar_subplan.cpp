@@ -1,5 +1,6 @@
 #include "kqp_rules_include.h"
 
+#include "dependent_join.h"
 #include <ydb/core/kqp/opt/rbo/map_renames.h>
 
 namespace NKikimr {
@@ -34,6 +35,21 @@ bool TInlineScalarSubplanRule::MatchAndApply(TIntrusivePtr<IOperator> &input, TR
     auto unaryOp = CastOperator<IUnaryOperator>(input);
 
     auto child = unaryOp->GetInput();
+
+    // Attach the subplan result, which the join below produced under joinedSubplanResIU, to the
+    // operator the subplan reference came from.
+    auto attachSubplanResult = [&](const TIntrusivePtr<IOperator>& join, const TInfoUnit& joinedSubplanResIU) {
+        if (input->Kind == EOperator::Filter) {
+            auto outerFilter = CastOperator<TOpFilter>(input);
+            outerFilter->FilterExpr = outerFilter->FilterExpr.ApplyRenames({{scalarIU, joinedSubplanResIU}});
+            outerFilter->SetInput(join);
+        } else {
+            TVector<TMapElement> renameElements;
+            renameElements.emplace_back(scalarIU, joinedSubplanResIU, subplan->Pos, &ctx.ExprCtx, &props);
+            auto rename = MakeIntrusive<TOpMap>(join, subplan->Pos, renameElements);
+            unaryOp->SetInput(rename);
+        }
+    };
 
     // Check whether this is a correlated subplan with filter pushed up
     // FIXME: if the filter got stuck we will crash later in the optimizer
@@ -98,21 +114,53 @@ bool TInlineScalarSubplanRule::MatchAndApply(TIntrusivePtr<IOperator> &input, TR
         auto leftJoin = NMapRenames::MakeJoinWithRightRenames(
             child, uncorrSubplan, subplan->Pos, "Left", joinKeys, joinFilters, subplanOutputRenames, ctx.ExprCtx, props);
 
-        if (input->Kind == EOperator::Filter) {
-            auto outerFilter = CastOperator<TOpFilter>(input);
-            outerFilter->FilterExpr = outerFilter->FilterExpr.ApplyRenames({{scalarIU, joinedSubplanResIU}});
-            outerFilter->SetInput(leftJoin);
-        } else {
-            TVector<TMapElement> renameElements;
-            renameElements.emplace_back(scalarIU, joinedSubplanResIU, subplan->Pos, &ctx.ExprCtx, &props);
-            auto rename = MakeIntrusive<TOpMap>(leftJoin, subplan->Pos, renameElements);
-            unaryOp->SetInput(rename);
-        }
+        attachSubplanResult(leftJoin, joinedSubplanResIU);
     }
 
-    // If its a correlated subplan where filter pull up didn't succeed, throw an exception
-    else if (subplanEntry.DependentIUs.size()) {
-        Y_ENSURE(false, "Decorrelation via filter pull up didn't succeed");
+    // The correlated predicate could not be pulled up to the top of the subplan, so the correlation
+    // stays inside it and we decorrelate with a dependent join instead. The pushdown rules of the
+    // "Decorrelate dependent joins" stage move the domain down until the correlation is bound.
+    else if (HasFreeCorrelation(subplan, subplanEntry.DependentIUs)) {
+        const auto& dependencies = subplanEntry.DependentIUs;
+
+        auto leftIUs = child->GetOutputIUs();
+        for (const auto& iu : dependencies) {
+            Y_ENSURE(ContainsInfoUnit(leftIUs, iu),
+                     TStringBuilder() << "Correlation column " << iu.GetFullName() << " is not produced by the outer plan");
+        }
+
+        auto dependentJoin =
+            MakeIntrusive<TOpDependentJoin>(MakeDomainProjection(child, dependencies, subplan->Pos), subplan, dependencies, subplan->Pos);
+
+        // The dependent join re-exposes the correlation columns, and the subplan may well produce
+        // columns that collide with the outer plan, so everything colliding gets renamed.
+        auto rightIUs = dependentJoin->GetOutputIUs();
+        THashSet<TInfoUnit, TInfoUnit::THashFunction> usedIUs;
+        NMapRenames::AddUsedIUs(usedIUs, leftIUs);
+        NMapRenames::AddUsedIUs(usedIUs, rightIUs);
+
+        NMapRenames::TRenameMap subplanOutputRenames;
+        for (const auto& iu : rightIUs) {
+            if (ContainsInfoUnit(leftIUs, iu) && !subplanOutputRenames.contains(iu)) {
+                subplanOutputRenames.emplace(iu, NMapRenames::MakeUniqueInternalIU(props.InternalVarIdx, usedIUs));
+            }
+        }
+
+        // One row of the subplan per binding of the correlation columns, joined back on the binding.
+        TVector<std::pair<TInfoUnit, TInfoUnit>> joinKeys;
+        for (const auto& iu : dependencies) {
+            joinKeys.push_back(std::make_pair(iu, iu));
+        }
+
+        auto joinedSubplanResIU = subplanResIU;
+        if (const auto renameIt = subplanOutputRenames.find(joinedSubplanResIU); renameIt != subplanOutputRenames.end()) {
+            joinedSubplanResIU = renameIt->second;
+        }
+
+        auto leftJoin = NMapRenames::MakeJoinWithRightRenames(child, dependentJoin, subplan->Pos, "Left", joinKeys, {}, subplanOutputRenames,
+                                                              ctx.ExprCtx, props);
+
+        attachSubplanResult(leftJoin, joinedSubplanResIU);
     }
 
     // Otherwise we assume an uncorrelated supbplan
