@@ -5,7 +5,6 @@ SRCS(
     assign_stages.cpp
     build_initial_cbo_tree.cpp
     constant_folding_stage.cpp
-    correlated_filter_pullup.cpp
     dependent_join.cpp
     expand_cbo_tree.cpp
     expand_distinct_aggregation.cpp

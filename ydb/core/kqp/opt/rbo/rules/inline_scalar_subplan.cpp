@@ -95,81 +95,10 @@ bool TInlineScalarSubplanRule::MatchAndApply(TIntrusivePtr<IOperator> &input, TR
         }
     };
 
-    // Check whether this is a correlated subplan with filter pushed up
-    // FIXME: if the filter got stuck we will crash later in the optimizer
-    if (subplan->Kind == EOperator::Filter && CastOperator<TOpFilter>(subplan)->GetInput()->Kind == EOperator::AddDependencies) {
-        auto subplanFilter = CastOperator<TOpFilter>(subplan);
-        auto addDeps = CastOperator<TOpAddDependencies>(subplanFilter->GetInput());
-        auto uncorrSubplan = addDeps->GetInput();
-
-        TVector<std::pair<TInfoUnit, TInfoUnit>> joinKeys;
-        TVector<TExpression> joinFilters;
-
-        // Split the pulled up predicate first: the subplan side of its equi conditions is what groups
-        // the rows of the subplan per outer row.
-        for (const auto& conj : subplanFilter->FilterExpr.SplitConjunct()) {
-            if (!conj.MaybeEquiJoinCondition()) {
-                joinFilters.push_back(conj);
-                continue;
-            }
-
-            TEquiJoinCondition jc(conj);
-            TInfoUnit leftKey = jc.GetLeftIU();
-            TInfoUnit rightKey = jc.GetRightIU();
-
-            if (std::find(addDeps->Dependencies.begin(), addDeps->Dependencies.end(), rightKey) != addDeps->Dependencies.end()) {
-                std::swap(leftKey, rightKey);
-            } else if (std::find(addDeps->Dependencies.begin(), addDeps->Dependencies.end(), leftKey) == addDeps->Dependencies.end()) {
-                Y_ENSURE(false, "Correlated filter missing join condition");
-            }
-
-            joinKeys.push_back(std::make_pair(leftKey, rightKey));
-        }
-
-        auto rightInput = uncorrSubplan;
-        auto rightResIU = subplanResIU;
-
-        // The join matches the subplan rows by these keys, so at most one row per outer row is the
-        // same as at most one row per value of the subplan side keys. A join filter mixes outer and
-        // subplan columns and cannot become a grouping, so those subqueries stay unchecked.
-        if (joinFilters.empty() && !joinKeys.empty()) {
-            TVector<TInfoUnit> groupKeys;
-            for (const auto& joinKey : joinKeys) {
-                if (!ContainsInfoUnit(groupKeys, joinKey.second)) {
-                    groupKeys.push_back(joinKey.second);
-                }
-            }
-            std::tie(rightInput, rightResIU) = MakeAtMostOneRowPerGroup(uncorrSubplan, groupKeys, subplanResIU, subplan->Pos, ctx, props);
-        }
-
-        auto leftIUs = child->GetOutputIUs();
-        auto rightIUs = rightInput->GetOutputIUs();
-        THashSet<TInfoUnit, TInfoUnit::THashFunction> usedIUs;
-        NMapRenames::AddUsedIUs(usedIUs, leftIUs);
-        NMapRenames::AddUsedIUs(usedIUs, rightIUs);
-
-        NMapRenames::TRenameMap subplanOutputRenames;
-        for (const auto& iu : rightIUs) {
-            if (ContainsInfoUnit(leftIUs, iu) && !subplanOutputRenames.contains(iu)) {
-                subplanOutputRenames.emplace(iu, NMapRenames::MakeUniqueInternalIU(props.InternalVarIdx, usedIUs));
-            }
-        }
-
-        auto joinedSubplanResIU = rightResIU;
-        if (const auto renameIt = subplanOutputRenames.find(joinedSubplanResIU); renameIt != subplanOutputRenames.end()) {
-            joinedSubplanResIU = renameIt->second;
-        }
-
-        auto leftJoin = NMapRenames::MakeJoinWithRightRenames(
-            child, rightInput, subplan->Pos, "Left", joinKeys, joinFilters, subplanOutputRenames, ctx.ExprCtx, props);
-
-        attachSubplanResult(leftJoin, joinedSubplanResIU);
-    }
-
-    // The correlated predicate could not be pulled up to the top of the subplan, so the correlation
-    // stays inside it and we decorrelate with a dependent join instead. The pushdown rules of the
-    // "Decorrelate dependent joins" stage move the domain down until the correlation is bound.
-    else if (HasFreeCorrelation(subplan, subplanEntry.DependentIUs)) {
+    // A correlated subplan is decorrelated with a dependent join: the domain of the correlation
+    // columns is joined with the subplan, which the pushdown rules of the "Decorrelate dependent
+    // joins" stage then move down until the correlation is bound.
+    if (HasFreeCorrelation(subplan, subplanEntry.DependentIUs)) {
         const auto& dependencies = subplanEntry.DependentIUs;
 
         auto leftIUs = child->GetOutputIUs();

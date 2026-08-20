@@ -446,8 +446,11 @@ TIntrusivePtr<IOperator> TPushDependentJoinThroughJoinRule::SimpleMatchAndApply(
     }
 
     // Both sides are correlated, so both get their own copy of the domain and the join has to
-    // additionally equate the two copies. Only inner-like joins can absorb the extra equality.
-    if (!innerLike) {
+    // additionally equate the two copies. The equality becomes a join condition, which an outer join
+    // evaluates without dropping its preserved rows, so the domain columns of the result can come
+    // from the left copy as long as the left rows survive the join. A right or full outer join null
+    // extends them and would lose the binding.
+    if (!innerLike && joinKind != "Left" && joinKind != "LeftSemi" && joinKind != "LeftOnly") {
         return input;
     }
 
@@ -465,8 +468,11 @@ TIntrusivePtr<IOperator> TPushDependentJoinThroughJoinRule::SimpleMatchAndApply(
         joinKeys.emplace_back(iu, iu);
     }
 
-    return NMapRenames::MakeJoinWithRightRenames(newLeft, newRight, join->Pos, "Inner", joinKeys, join->JoinFilters, rightRenames, ctx.ExprCtx,
-                                                 props);
+    // A cross join cannot carry the equality, it becomes an inner join. Every other kind is kept.
+    const TString newJoinKind = joinKind == "Cross" ? "Inner" : joinKind;
+
+    return NMapRenames::MakeJoinWithRightRenames(newLeft, newRight, join->Pos, newJoinKind, joinKeys, join->JoinFilters, rightRenames,
+                                                 ctx.ExprCtx, props);
 }
 
 /**

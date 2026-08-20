@@ -8208,9 +8208,9 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
         for (ui32 i = 0; i < queries.size(); ++i) {
             const auto &query = queries[i];
             auto result = session2.ExecuteDataQuery(query, TTxControl::BeginTx().CommitTx()).GetValueSync();
-            UNIT_ASSERT_C(result.IsSuccess(), result.GetIssues().ToString());
+            UNIT_ASSERT_C(result.IsSuccess(), TStringBuilder() << "query " << i << ": " << result.GetIssues().ToString());
             //Cout << FormatResultSetYson(result.GetResultSet(0)) << Endl;
-            UNIT_ASSERT_VALUES_EQUAL(FormatResultSetYson(result.GetResultSet(0)), results[i]);
+            UNIT_ASSERT_VALUES_EQUAL_C(FormatResultSetYson(result.GetResultSet(0)), results[i], "query " << i);
         }
     }
 

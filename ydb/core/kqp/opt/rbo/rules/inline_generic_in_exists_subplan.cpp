@@ -63,83 +63,31 @@ TIntrusivePtr<IOperator> TInlineGenericInExistsSubplanRule::SimpleMatchAndApply(
     auto subplanIU = inOrExistsSubplans[0];
     auto subplanEntry = props.Subplans.PlanMap.at(subplanIU);
     TIntrusivePtr<IOperator> newFilterInput;
-    TVector<std::pair<TInfoUnit, TInfoUnit>> extraJoinKeys;
-    auto uncorrSubplan = CastOperator<IOperator>(subplanEntry.Plan);
-    const auto subPlanKind = uncorrSubplan->Kind;
-    TVector<TExpression> joinFilters;
-    TVector<TInfoUnit> dependencies;
+    auto subplan = CastOperator<IOperator>(subplanEntry.Plan);
 
-
-    // If its a correlated subplan with filters pulled up, build join conditions from the pulled up filter
-    const bool filterPullUpSucceeded =
-        subPlanKind == EOperator::Filter && CastOperator<TOpFilter>(uncorrSubplan)->GetInput()->Kind == EOperator::AddDependencies;
-
-    if (filterPullUpSucceeded) {
-        auto subplanFilter = CastOperator<TOpFilter>(subplanEntry.Plan);
-        auto addDeps = CastOperator<TOpAddDependencies>(subplanFilter->GetInput());
-        uncorrSubplan = addDeps->GetInput();
-        dependencies = addDeps->Dependencies;
-        auto subplanConjuncts = subplanFilter->FilterExpr.SplitConjunct();
-
-        for (const auto& conj : subplanConjuncts) {
-            if (conj.MaybeEquiJoinCondition()) {
-
-                auto jc = TEquiJoinCondition(conj);
-                if (std::find(dependencies.begin(), dependencies.end(), jc.GetLeftIU()) != dependencies.end()) {
-                    extraJoinKeys.push_back(std::make_pair(jc.GetLeftIU(), jc.GetRightIU()));
-                } else if (std::find(dependencies.begin(), dependencies.end(), jc.GetRightIU()) != dependencies.end()) {
-                    extraJoinKeys.push_back(std::make_pair(jc.GetRightIU(), jc.GetLeftIU()));
-                } else {
-                    Y_ENSURE(false, "Correlated filter missing join condition");
-                }
-            } else {
-                joinFilters.push_back(conj);
-            }
-
-        }
-    }
-
-    // If the correlated predicate could not be pulled up to the top of the subplan, the correlation
-    // stays inside the subplan and we decorrelate with a dependent join instead. The pushdown rules
-    // of the "Decorrelate dependent joins" stage take it from here.
-    const bool useDependentJoin = !filterPullUpSucceeded && HasFreeCorrelation(uncorrSubplan, subplanEntry.DependentIUs);
-    if (useDependentJoin) {
-        dependencies = subplanEntry.DependentIUs;
-    }
-
-    // We decorrelate an IN subplan or a correlated EXISTS subplan the way a dependent join is
-    // unnested: first restrict the outer plan to the distinct values of the correlation columns
-    // (the domain D), then join D with the subplan, reduce the result back to the domain values
-    // that produced at least one match, and finally left join that mark back into the outer plan.
+    // A correlated subplan keeps its correlation inside, so we decorrelate it with a dependent join.
+    // The pushdown rules of the "Decorrelate dependent joins" stage take it from here.
     //
-    // A subplan is correlated as soon as it has correlation columns to bind, no matter whether the
-    // pulled up predicate produced an equi join key: a plain join filter has to be evaluated against
-    // the subplan columns as well, which the uncorrelated path below cannot do.
-    const bool correlated = !dependencies.empty() && (filterPullUpSucceeded || useDependentJoin);
+    // Either way we unnest the way a dependent join is: first restrict the outer plan to the distinct
+    // values of the domain columns, then join the domain with the subplan, reduce the result back to
+    // the domain values that produced at least one match, and finally left join that mark back into
+    // the outer plan.
+    const bool useDependentJoin = HasFreeCorrelation(subplan, subplanEntry.DependentIUs);
 
-    if (subplanEntry.Type == ESubplanType::IN_SUBPLAN || correlated) {
+    if (subplanEntry.Type == ESubplanType::IN_SUBPLAN || useDependentJoin) {
         auto leftInput = filter->GetInput();
-        auto rightInput = uncorrSubplan;
+        auto rightInput = subplan;
         const auto outerIUs = leftInput->GetOutputIUs();
         // The dependent join keeps the correlation inside the subplan, so the columns the tuple is
         // compared against are the subplan's result columns, not simply its first output columns.
         const auto originalPlanIUs = useDependentJoin ? GetSubplanResultIUs(rightInput) : rightInput->GetOutputIUs();
 
-        // Collect the domain: every outer column the join condition refers to.
         TVector<TInfoUnit> domain;
-        for (const auto& joinKey : extraJoinKeys) {
-            AddDomainColumn(domain, joinKey.first);
-        }
-        for (const auto& joinFilter : joinFilters) {
-            for (const auto& iu : IUSetIntersect(joinFilter.GetInputIUs(), dependencies)) {
-                AddDomainColumn(domain, iu);
-            }
-        }
         if (useDependentJoin) {
             // The dependent join binds the correlated columns only. The tuple of an IN subplan is
             // compared in the mark join below instead, so that the subplan is not evaluated once per
             // (correlation, tuple) pair.
-            for (const auto& iu : dependencies) {
+            for (const auto& iu : subplanEntry.DependentIUs) {
                 AddDomainColumn(domain, iu);
             }
         } else {
@@ -198,10 +146,6 @@ TIntrusivePtr<IOperator> TInlineGenericInExistsSubplanRule::SimpleMatchAndApply(
             const auto rightRenamings = MakeRenameMap(commonIUs, props.InternalVarIdx, usedIUs);
             if (!rightRenamings.empty()) {
                 rightInput = MakeMapFromRenames(rightInput, rightRenamings, filter->Pos, ctx.ExprCtx, props);
-                extraJoinKeys = RemapRightJoinKeys(extraJoinKeys, rightRenamings);
-                for (auto& joinFilter : joinFilters) {
-                    joinFilter = joinFilter.ApplyRenames(rightRenamings);
-                }
             }
 
             TVector<std::pair<TInfoUnit, TInfoUnit>> joinKeys;
@@ -212,9 +156,8 @@ TIntrusivePtr<IOperator> TInlineGenericInExistsSubplanRule::SimpleMatchAndApply(
             }
 
             // Build the join over the domain instead of the full outer plan
-            joinKeys.insert(joinKeys.begin(), extraJoinKeys.begin(), extraJoinKeys.end());
-            matchSource = MakeIntrusive<TOpJoin>(MakeDomainProjection(leftInput, domain, filter->Pos), rightInput, input->Pos, "Inner", joinKeys,
-                                                 joinFilters);
+            matchSource =
+                MakeIntrusive<TOpJoin>(MakeDomainProjection(leftInput, domain, filter->Pos), rightInput, input->Pos, "Inner", joinKeys);
         }
 
         // Reduce the result back to the values that have at least one match and mark them. A distinct
@@ -229,8 +172,12 @@ TIntrusivePtr<IOperator> TInlineGenericInExistsSubplanRule::SimpleMatchAndApply(
 
         // Left join the mark back into the outer plan. The marked relation holds at most one row per
         // key of the mark join, so this cannot duplicate outer rows.
-        const auto topCommonIUs = IUSetIntersect(outerIUs, markMap->GetOutputIUs());
-        const auto topRenamings = MakeRenameMap(topCommonIUs, props.InternalVarIdx, usedIUs);
+        //
+        // The join may only add the mark to the outer plan. Every other column of the marked relation
+        // is renamed away: the domain columns carry outer names, and on the dependent join path the
+        // subplan result column comes along as well, which is free to collide with a column the plan
+        // above produces.
+        const auto topRenamings = MakeRenameMap(markColumns, props.InternalVarIdx, usedIUs);
 
         auto markJoin = NMapRenames::MakeJoinWithRightRenames(
             leftInput, markMap, filter->Pos, "Left", markJoinKeys, {}, topRenamings, ctx.ExprCtx, props);
@@ -249,7 +196,7 @@ TIntrusivePtr<IOperator> TInlineGenericInExistsSubplanRule::SimpleMatchAndApply(
     // uncorrelated EXISTS
     else {
         auto zero = MakeConstant("Uint64", "0", filter->Pos, &ctx.ExprCtx);
-        auto limit = MakeIntrusive<TOpLimit>(uncorrSubplan, filter->Pos, MakeConstant("Uint64", "1", filter->Pos, &ctx.ExprCtx), EOpPhase::Undefined);
+        auto limit = MakeIntrusive<TOpLimit>(subplan, filter->Pos, MakeConstant("Uint64", "1", filter->Pos, &ctx.ExprCtx), EOpPhase::Undefined);
 
         auto countResult = TInfoUnit("_rbo_arg_" + std::to_string(props.InternalVarIdx++), true);
         TVector<TMapElement> countMapElements;
@@ -269,7 +216,7 @@ TIntrusivePtr<IOperator> TInlineGenericInExistsSubplanRule::SimpleMatchAndApply(
         auto map = MakeIntrusive<TOpMap>(agg, filter->Pos, mapElements, true);
 
         TVector<std::pair<TInfoUnit, TInfoUnit>> joinKeys;
-        newFilterInput = MakeIntrusive<TOpJoin>(filter->GetInput(), map, filter->Pos, "Cross", joinKeys, joinFilters);
+        newFilterInput = MakeIntrusive<TOpJoin>(filter->GetInput(), map, filter->Pos, "Cross", joinKeys);
     }
 
     props.Subplans.Remove(subplanIU);

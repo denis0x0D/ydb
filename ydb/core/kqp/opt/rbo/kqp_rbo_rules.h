@@ -36,20 +36,6 @@ class TExtractJoinExpressionsRule : public IRule {
 };
 
 /**
- * Filter pull-up rule for correlated subqueries. Currently handles only basic form of correlated subqueries
- * Matches a filter on top of add dependencies operator. Extracts join conditions from this filter that are
- * dependent on outer columns. Pushes the filter up the plan though map and aggregate operators.
- */
-
- class TPullUpCorrelatedFilterRule : public IRule {
-  public:
-    TPullUpCorrelatedFilterRule() : IRule("Pull up correlated filter", ERuleProperties::RequireParents | ERuleProperties::RequireOutputIUs) {}
-
-    virtual bool QuickMatch(const TIntrusivePtr<IOperator>& input) const override;
-    virtual bool MatchAndApply(TIntrusivePtr<IOperator> &input, TRBOContext &ctx, TPlanProps &props) override;
- };
-
-/**
  * Rewrites scalar subplans into cross join plans
  */
 class TInlineScalarSubplanRule : public IRule {

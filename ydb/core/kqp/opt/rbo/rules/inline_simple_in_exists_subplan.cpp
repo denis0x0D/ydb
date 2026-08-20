@@ -1,6 +1,7 @@
 #include "kqp_rules_include.h"
 
 #include "dependent_join.h"
+#include <ydb/core/kqp/opt/rbo/map_renames.h>
 
 namespace NKikimr {
 namespace NKqp {
@@ -56,51 +57,16 @@ TIntrusivePtr<IOperator> TInlineSimpleInExistsSubplanRule::SimpleMatchAndApply(c
 
     TIntrusivePtr<IOperator> join;
     TVector<std::pair<TInfoUnit, TInfoUnit>> extraJoinKeys;
-    auto uncorrSubplan = CastOperator<IOperator>(subplanEntry.Plan);
-    const auto subPlanKind = uncorrSubplan->Kind;
-    TVector<TExpression> joinFilters;
+    auto subplan = CastOperator<IOperator>(subplanEntry.Plan);
 
-    // If its a correlated subplan with filters pulled up, build join conditions from the pulled up filter
-    const bool filterPullUpSucceeded =
-        subPlanKind == EOperator::Filter && CastOperator<TOpFilter>(uncorrSubplan)->GetInput()->Kind == EOperator::AddDependencies;
-
-    if (filterPullUpSucceeded) {
-        auto subplanFilter = CastOperator<TOpFilter>(subplanEntry.Plan);
-        auto addDeps = CastOperator<TOpAddDependencies>(subplanFilter->GetInput());
-        uncorrSubplan = addDeps->GetInput();
-        auto subplanConjuncts = subplanFilter->FilterExpr.SplitConjunct();
-
-        for (const auto& conj : subplanConjuncts) {
-            if (conj.MaybeEquiJoinCondition()) {
-
-                auto jc = TEquiJoinCondition(conj);
-                if (std::find(addDeps->Dependencies.begin(), addDeps->Dependencies.end(), jc.GetLeftIU()) != addDeps->Dependencies.end()) {
-                    extraJoinKeys.push_back(std::make_pair(jc.GetLeftIU(), jc.GetRightIU()));
-                } else if (std::find(addDeps->Dependencies.begin(), addDeps->Dependencies.end(), jc.GetRightIU()) != addDeps->Dependencies.end()) {
-                    extraJoinKeys.push_back(std::make_pair(jc.GetRightIU(), jc.GetLeftIU()));
-                } else {
-                    Y_ENSURE(false, "Correlated filter missing join condition");
-                }
-            } else {
-                joinFilters.push_back(conj);
-            }
-
+    // A correlated subplan keeps its correlation inside. A dependent join over the domain of the
+    // correlated columns evaluates it once per binding, and matching the binding back is one more
+    // key of the semi join.
+    const bool useDependentJoin = HasFreeCorrelation(subplan, subplanEntry.DependentIUs);
+    if (useDependentJoin) {
+        for (const auto& dependency : subplanEntry.DependentIUs) {
+            extraJoinKeys.push_back(std::make_pair(dependency, dependency));
         }
-    }
-
-    // The correlated predicate could not be pulled up to the top of the subplan, so the correlation is
-    // still inside it. A plain semi join cannot express that, so decline and let the generic rule
-    // decorrelate the subplan with a dependent join.
-    else if (HasFreeCorrelation(uncorrSubplan, subplanEntry.DependentIUs)) {
-        return input;
-    }
-
-    // A correlated EXISTS whose pulled up predicate produced no equi join key cannot go down the
-    // uncorrelated path below: that one evaluates the subplan once and only counts its rows, so the
-    // remaining correlated conjuncts would end up on a join that no longer sees the subplan columns.
-    // Decline and let the generic rule build a mark join over the domain instead.
-    if (filterPullUpSucceeded && subplanEntry.Type == ESubplanType::EXISTS && extraJoinKeys.empty()) {
-        return input;
     }
 
     // We build a semi-join or a left-only join when processing IN subplan
@@ -110,7 +76,7 @@ TIntrusivePtr<IOperator> TInlineSimpleInExistsSubplanRule::SimpleMatchAndApply(c
 
         TVector<std::pair<TInfoUnit, TInfoUnit>> joinKeys;
 
-        auto planIUs = GetSubplanResultIUs(uncorrSubplan);
+        auto planIUs = GetSubplanResultIUs(subplan);
 
         for (size_t i = 0; i < subplanEntry.Tuple.size(); i++) {
             joinKeys.push_back(std::make_pair(subplanEntry.Tuple[i], planIUs[i]));
@@ -118,12 +84,42 @@ TIntrusivePtr<IOperator> TInlineSimpleInExistsSubplanRule::SimpleMatchAndApply(c
 
         joinKeys.insert(joinKeys.begin(), extraJoinKeys.begin(), extraJoinKeys.end());
 
-        join = MakeIntrusive<TOpJoin>(leftJoinInput, uncorrSubplan, input->Pos, joinKind, joinKeys, joinFilters);
+        if (useDependentJoin) {
+            const auto outerIUs = leftJoinInput->GetOutputIUs();
+            for (const auto& dependency : subplanEntry.DependentIUs) {
+                Y_ENSURE(ContainsInfoUnit(outerIUs, dependency),
+                         TStringBuilder() << "Correlation column " << dependency.GetFullName() << " is not produced by the outer plan");
+            }
+
+            // The subplan is still correlated, so it is evaluated once per value of the domain. The
+            // pushdown rules of the decorrelation stage take it from here.
+            auto rightInput = MakeIntrusive<TOpDependentJoin>(MakeDomainProjection(leftJoinInput, subplanEntry.DependentIUs, filter->Pos),
+                                                              subplan, subplanEntry.DependentIUs, filter->Pos);
+
+            // The dependent join re-exposes the correlation columns under their outer names. The semi
+            // join does not output the right side, but its keys still have to tell the two apart.
+            TInfoUnitSet usedIUs;
+            NMapRenames::AddUsedIUs(usedIUs, outerIUs);
+            NMapRenames::AddUsedIUs(usedIUs, rightInput->GetOutputIUs());
+
+            NMapRenames::TRenameMap rightRenames;
+            for (const auto& rightIU : rightInput->GetOutputIUs()) {
+                if (ContainsInfoUnit(outerIUs, rightIU) && !rightRenames.contains(rightIU)) {
+                    rightRenames.emplace(rightIU, NMapRenames::MakeUniqueInternalIU(props.InternalVarIdx, usedIUs));
+                }
+            }
+
+            join = NMapRenames::MakeJoinWithRightRenames(leftJoinInput, rightInput, input->Pos, joinKind, joinKeys, {}, rightRenames,
+                                                         ctx.ExprCtx, props);
+        } else {
+            join = MakeIntrusive<TOpJoin>(leftJoinInput, subplan, input->Pos, joinKind, joinKeys);
+        }
+
         conjuncts.erase(conjuncts.begin() + conjunctIdx);
     }
     // EXISTS and NOT EXISTS
     else {
-        auto limit = MakeIntrusive<TOpLimit>(uncorrSubplan, filter->Pos, MakeConstant("Uint64", "1", filter->Pos, &ctx.ExprCtx), EOpPhase::Undefined);
+        auto limit = MakeIntrusive<TOpLimit>(subplan, filter->Pos, MakeConstant("Uint64", "1", filter->Pos, &ctx.ExprCtx), EOpPhase::Undefined);
 
         auto countResult = TInfoUnit("_rbo_arg_" + std::to_string(props.InternalVarIdx++), true);
         TVector<TMapElement> countMapElements;
@@ -145,7 +141,7 @@ TIntrusivePtr<IOperator> TInlineSimpleInExistsSubplanRule::SimpleMatchAndApply(c
         auto map = MakeIntrusive<TOpMap>(agg, filter->Pos, mapElements);
 
         TVector<std::pair<TInfoUnit, TInfoUnit>> joinKeys;
-        join = MakeIntrusive<TOpJoin>(filter->GetInput(), map, filter->Pos, "Cross", joinKeys, joinFilters);
+        join = MakeIntrusive<TOpJoin>(filter->GetInput(), map, filter->Pos, "Cross", joinKeys);
 
         conjuncts[conjunctIdx] = MakeColumnAccess(compareResult, filter->Pos, &ctx.ExprCtx, &props);
     }

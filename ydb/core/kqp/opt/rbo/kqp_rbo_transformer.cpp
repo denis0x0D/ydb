@@ -447,11 +447,8 @@ void TKqpNewRBOTransformer::InitializeRBOOptimizationStages() {
     expandAggregationRules.emplace_back(std::make_unique<TExpandDistinctAggregationRule>());
     RBO.AddStage(std::make_unique<TRuleBasedStage>("Expand aggregation", std::move(expandAggregationRules)));
 
-    // Predicate pull-up and subplan inlining and decorelation stages.
-    TVector<std::unique_ptr<IRule>> filterPullUpRules;
-    filterPullUpRules.emplace_back(std::make_unique<TPullUpCorrelatedFilterRule>());
-    RBO.AddStage(std::make_unique<TRuleBasedStage>("Correlated predicate pullup", std::move(filterPullUpRules)));
-
+    // Subplan inlining and decorrelation stages. A correlated subplan is inlined as a dependent join
+    // over the domain of its correlated columns, which the decorrelation stage below pushes down.
     TVector<std::unique_ptr<IRule>> inlineScalarSubPlanStageRules;
     inlineScalarSubPlanStageRules.emplace_back(std::make_unique<TInlineScalarSubplanRule>());
     RBO.AddStage(std::make_unique<TRuleBasedStage>("Inline scalar subplans", std::move(inlineScalarSubPlanStageRules)));
