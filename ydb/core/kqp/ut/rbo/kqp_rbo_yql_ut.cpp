@@ -8237,6 +8237,7 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                     b   Int64   NOT NULL,
                     c   Int64   NOT NULL,
                     d   String,
+                    e   Int64,
                     primary key(a)
                 ))" << (columnTables ? " WITH (STORE = column)" : "") << ";\n";
         }
@@ -8245,22 +8246,23 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
         UNIT_ASSERT_C(schemeResult.IsSuccess(), schemeResult.GetIssues().ToString());
 
         // The data is chosen so that the expected result of every query below can be derived by
-        // hand. All columns are non nullable and hold no nulls, which keeps the three valued corners
-        // of IN out of these tests.
+        // hand. Only e holds nulls: a, b and c are non nullable, and d is nullable but never null.
         //
-        //   t1: a in [1, 12], b = a % 4, c = 10 * a, d = 'g' || (a % 3)
+        //   t1: a in [1, 12], b = a % 4, c = 10 * a, d = 'g' || (a % 3), e = a % 4 except null for a == 1
         //   a | 1   2   3   4   5   6   7   8   9   10  11  12
         //   b | 1   2   3   0   1   2   3   0   1   2   3   0
         //   c | 10  20  30  40  50  60  70  80  90  100 110 120
         //   d | g1  g2  g0  g1  g2  g0  g1  g2  g0  g1  g2  g0
+        //   e | -   2   3   0   1   2   3   0   1   2   3   0
         //
-        //   t2: a in [1, 12], b = a % 3, c = a * a, d = 'g' || (a % 4)
+        //   t2: a in [1, 12], b = a % 3, c = a * a, d = 'g' || (a % 4), e = a % 4 except null for a == 1
         //   a | 1   2   3   4   5   6   7   8   9   10  11  12
         //   b | 1   2   0   1   2   0   1   2   0   1   2   0
         //   c | 1   4   9   16  25  36  49  64  81  100 121 144
         //   d | g1  g2  g3  g0  g1  g2  g3  g0  g1  g2  g3  g0
+        //   e | -   2   3   0   1   2   3   0   1   2   3   0
         //
-        //   t3: a in [1, 6], b = a % 2, c = a, d = 'g' || (a % 2)
+        //   t3: a in [1, 6], b = a % 2, c = a, d = 'g' || (a % 2), e as above
         auto fill = [&](const TString& table, i64 rowCount, auto&& b, auto&& c, auto&& d) {
             NYdb::TValueBuilder rows;
             rows.BeginList();
@@ -8271,6 +8273,7 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                     .AddMember("b").Int64(b(a))
                     .AddMember("c").Int64(c(a))
                     .AddMember("d").String(d(a))
+                    .AddMember("e").OptionalInt64(a == 1 ? std::nullopt : std::make_optional(a % 4))
                     .EndStruct();
             }
             rows.EndList();
@@ -8426,14 +8429,76 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
              )",
              R"([[1];[2];[3];[4];[5];[6];[7];[8];[9];[11]])"},
 
-            // An equi correlated IN over a string column, decorrelated by the filter pull up. t1.d
-            // matches t2.d of the next row exactly when a % 3 == (a + 1) % 4.
+            // An equi correlated IN over a string column. t1.d matches t2.d of the next row exactly
+            // when a % 3 == (a + 1) % 4.
             {R"(
                 SELECT t1.a FROM `/Root/t1` as t1
                 WHERE t1.d IN (SELECT t2.d FROM `/Root/t2` as t2 WHERE t2.a == t1.a + 1)
                 ORDER BY t1.a;
              )",
              R"([[3];[4];[5]])"},
+
+            // The same correlated IN negated, and inside an OR so that it has to become a three valued
+            // expression instead of a semi join. Both sides are nullable columns, but neither holds a
+            // null, so "no match" means false and not unknown: the rows the query above drops are
+            // exactly the rows this one keeps, plus a == 3 from the second disjunct and a == 12 whose
+            // subquery is empty.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE (t1.d NOT IN (SELECT t2.d FROM `/Root/t2` as t2 WHERE t2.a == t1.a + 1)) OR t1.a == 3
+                ORDER BY t1.a;
+             )",
+             R"([[1];[2];[3];[6];[7];[8];[9];[10];[11];[12]])"},
+
+            // A NOT IN whose subquery really does produce a null. The subquery yields {null, 0, 1, 2},
+            // so t1.b in {0, 1, 2} is a match and false, while t1.b == 3 is unknown rather than false
+            // and NOT IN must not let it through. Only the second disjunct keeps a row.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE (t1.b NOT IN (SELECT IF(t2.a == 1, NULL, t2.b) FROM `/Root/t2` as t2)) OR t1.a == 3
+                ORDER BY t1.a;
+             )",
+             R"([[3]])"},
+
+            // The same, correlated: the subquery is a single row per binding, and it is null for
+            // exactly a == 3. Everywhere else NOT IN is true when a % 4 differs from a % 3, which is
+            // false for a in {1, 2, 12}. The first disjunct is unknown for a == 3 and must not let it
+            // through, while a == 1 comes back through the second disjunct.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE (t1.b NOT IN (SELECT IF(t2.a == 3, NULL, t2.b) FROM `/Root/t2` as t2 WHERE t2.a == t1.a)) OR t1.a == 1
+                ORDER BY t1.a;
+             )",
+             R"([[1];[4];[5];[6];[7];[8];[9];[10];[11]])"},
+
+            // A null operand over a subquery that produced no null at all: {0, 1, 2}. NOT IN is true
+            // for the rows whose e is 3, and unknown for a == 1 where the operand itself is null.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE (t1.e NOT IN (SELECT t2.b FROM `/Root/t2` as t2)) OR t1.a == 12
+                ORDER BY t1.a;
+             )",
+             R"([[3];[7];[11];[12]])"},
+
+            // The same null operand over an empty subquery. Nothing can contradict the operand there,
+            // so NOT IN is true for every row including the null one.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE (t1.e NOT IN (SELECT t2.b FROM `/Root/t2` as t2 WHERE t2.a > 100)) OR t1.a == 12
+                ORDER BY t1.a;
+             )",
+             R"([[1];[2];[3];[4];[5];[6];[7];[8];[9];[10];[11];[12]])"},
+
+            // The correlated shape of the same corner: the subquery is a single non null row per
+            // binding, so the only unknown comes from the operand. a % 4 differs from a % 3 for every
+            // a but 2 and 12, and a == 1 is dropped because the operand is null over a subquery that
+            // did produce a row.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE (t1.e NOT IN (SELECT t2.b FROM `/Root/t2` as t2 WHERE t2.a == t1.a)) OR t1.a == 12
+                ORDER BY t1.a;
+             )",
+             R"([[3];[4];[5];[6];[7];[8];[9];[10];[11];[12]])"},
 
             // A correlated EXISTS whose only correlated predicate is a non equi comparison, so the
             // pulled up predicate yields a join filter and no join key at all. Such a subplan still
@@ -8469,6 +8534,43 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                 ORDER BY t1.a;
              )",
              R"([[1];[2];[3];[4];[5];[6];[7];[8];[9]])"},
+
+            // A null correlation value, bound by an equality. The subquery matches nothing for it,
+            // the same as for e == 3 which t2.b never takes, so both yield a null aggregate.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE (SELECT max(t2.c) FROM `/Root/t2` as t2 WHERE t2.b == t1.e) IS NULL
+                ORDER BY t1.a;
+             )",
+             R"([[1];[3];[7];[11]])"},
+
+            // A null correlation value whose subquery is not empty: the predicate is not null
+            // rejecting, so t1.e IS NULL selects all of t2 and max(t2.c) is 144 there. It is 144 for
+            // e == 0 as well, 100 for 1, 121 for 2 and null for 3.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE (SELECT max(t2.c) FROM `/Root/t2` as t2 WHERE t1.e IS NULL OR t2.b == t1.e) == 144
+                ORDER BY t1.a;
+             )",
+             R"([[1];[4];[8];[12]])"},
+
+            // An ungrouped count() in a correlated scalar subquery, on the non empty side where it
+            // has a group to count. t2.b takes each of the values 0, 1 and 2 four times.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE (SELECT count(*) FROM `/Root/t2` as t2 WHERE t2.b == t1.b) == 4
+                ORDER BY t1.a;
+             )",
+             R"([[1];[2];[4];[5];[6];[8];[9];[10];[12]])"},
+
+            // The same subquery where it matches no row at all, which yields 0 and not null: t2.b
+            // never takes the value 3, so the rows of t1 with b == 3 see an empty subquery.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE (SELECT count(*) FROM `/Root/t2` as t2 WHERE t2.b == t1.b) == 0
+                ORDER BY t1.a;
+             )",
+             R"([[3];[7];[11]])"},
         };
 
         for (ui32 i = 0; i < cases.size(); ++i) {

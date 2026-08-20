@@ -8,14 +8,11 @@ namespace {
 using namespace NKikimr::NKqp;
 using namespace NKikimr::NKqp::NMapRenames;
 
-// Conservatively decide whether a column may be null. Postgres types are always nullable, so
-// callers have to exclude the postgres syntax separately.
-bool IsNullableIU(const TIntrusivePtr<IOperator>& input, const TInfoUnit& iu) {
-    if (!input->Type) {
-        return true;
-    }
-    const auto* columnType = input->GetIUType(iu);
-    return !columnType || columnType->IsOptionalOrNull();
+// The null of the Bool type, which the three valued result of an IN needs as a value and not only
+// as the absence of a row.
+TExprNode::TPtr MakeNullBoolNode(TPositionHandle pos, TExprContext& ctx) {
+    auto boolType = ctx.NewCallable(pos, "DataType", {ctx.NewAtom(pos, "Bool")});
+    return ctx.NewCallable(pos, "Nothing", {ctx.NewCallable(pos, "OptionalType", {boolType})});
 }
 
 void AddDomainColumn(TVector<TInfoUnit>& domain, const TInfoUnit& iu) {
@@ -75,7 +72,7 @@ TIntrusivePtr<IOperator> TInlineGenericInExistsSubplanRule::SimpleMatchAndApply(
     const bool useDependentJoin = HasFreeCorrelation(subplan, subplanEntry.DependentIUs);
 
     if (subplanEntry.Type == ESubplanType::IN_SUBPLAN || useDependentJoin) {
-        auto leftInput = filter->GetInput();
+        TIntrusivePtr<IOperator> leftInput = filter->GetInput();
         auto rightInput = subplan;
         const auto outerIUs = leftInput->GetOutputIUs();
         // The dependent join keeps the correlation inside the subplan, so the columns the tuple is
@@ -104,8 +101,8 @@ TIntrusivePtr<IOperator> TInlineGenericInExistsSubplanRule::SimpleMatchAndApply(
 
         // EXISTS is two-valued: a domain value without a match yields false. IN is three-valued, so
         // we may only collapse "no match" into false when neither side of the comparison is
-        // nullable. Otherwise we keep the null the left join produces, which is the correct unknown
-        // for a null operand and matches the behaviour we had before.
+        // nullable. When one of them is, the unknown has to be told apart from the false, which is
+        // what the three valued path below is for.
         bool markMissingAsFalse = subplanEntry.Type == ESubplanType::EXISTS;
         if (!markMissingAsFalse && !props.PgSyntax) {
             markMissingAsFalse = true;
@@ -113,6 +110,12 @@ TIntrusivePtr<IOperator> TInlineGenericInExistsSubplanRule::SimpleMatchAndApply(
                 markMissingAsFalse = !IsNullableIU(leftInput, subplanEntry.Tuple[i]) && !IsNullableIU(rightInput, originalPlanIUs[i]);
             }
         }
+
+        // Everything the mark cannot tell apart from "no match" is built below out of two more facts
+        // about the subquery. A tuple of several columns is not handled that way yet, so it keeps the
+        // null the mark join produces, which is right for a null operand and wrong for a null result.
+        const bool threeValued =
+            !markMissingAsFalse && !props.PgSyntax && subplanEntry.Type == ESubplanType::IN_SUBPLAN && subplanEntry.Tuple.size() == 1;
 
         TInfoUnitSet usedIUs;
         AddUsedIUs(usedIUs, outerIUs);
@@ -122,10 +125,18 @@ TIntrusivePtr<IOperator> TInlineGenericInExistsSubplanRule::SimpleMatchAndApply(
         // against. An IN subplan compares its result against the outer tuple, an EXISTS subplan only
         // has to match the correlation.
         TVector<TInfoUnit> markColumns = domain;
-        TVector<std::pair<TInfoUnit, TInfoUnit>> markJoinKeys;
+        TVector<std::pair<TInfoUnit, TInfoUnit>> domainJoinKeys;
+        TVector<std::pair<TInfoUnit, TInfoUnit>> tupleJoinKeys;
         for (const auto& iu : domain) {
-            markJoinKeys.push_back(std::make_pair(iu, iu));
+            domainJoinKeys.push_back(std::make_pair(iu, iu));
         }
+
+        // Where a three valued IN counts the results of the subquery, and the columns that counting
+        // is grouped by. The correlated case counts per binding of the correlation, the uncorrelated
+        // one counts the subquery as a whole.
+        TIntrusivePtr<IOperator> statsSource;
+        TVector<TInfoUnit> statsKeys;
+        TInfoUnit compareResultIU;
 
         TIntrusivePtr<IOperator> matchSource;
         if (useDependentJoin) {
@@ -138,7 +149,12 @@ TIntrusivePtr<IOperator> TInlineGenericInExistsSubplanRule::SimpleMatchAndApply(
             // means "the subplan has, for this correlation, a row equal to the tuple".
             for (size_t i = 0; i < subplanEntry.Tuple.size(); i++) {
                 AddDomainColumn(markColumns, originalPlanIUs[i]);
-                markJoinKeys.push_back(std::make_pair(subplanEntry.Tuple[i], originalPlanIUs[i]));
+                tupleJoinKeys.push_back(std::make_pair(subplanEntry.Tuple[i], originalPlanIUs[i]));
+            }
+
+            statsKeys = domain;
+            if (threeValued) {
+                compareResultIU = originalPlanIUs[0];
             }
         } else {
             // The domain carries outer column names, so rename the colliding subplan columns.
@@ -158,12 +174,25 @@ TIntrusivePtr<IOperator> TInlineGenericInExistsSubplanRule::SimpleMatchAndApply(
             // Build the join over the domain instead of the full outer plan
             matchSource =
                 MakeIntrusive<TOpJoin>(MakeDomainProjection(leftInput, domain, filter->Pos), rightInput, input->Pos, "Inner", joinKeys);
+
+            // The join above has already dropped the rows that did not match, so the subquery itself
+            // is the only place the nulls it produced are still visible.
+            statsSource = rightInput;
+            if (threeValued) {
+                compareResultIU = planIUs[0];
+            }
         }
 
         // Reduce the result back to the values that have at least one match and mark them. A distinct
         // projection is enough here, we don't need to count the matches, and it keeps the mark join
         // below from duplicating outer rows.
         auto matchedDomain = MakeDomainProjection(matchSource, markColumns, filter->Pos);
+        if (!statsSource) {
+            // The distinct projection keeps both facts the counting below is after: a group exists
+            // exactly when the subquery produced a row for that binding, and a null result survives
+            // deduplication like any other value.
+            statsSource = matchedDomain;
+        }
 
         auto markIU = MakeUniqueInternalIU(props.InternalVarIdx, usedIUs);
         TVector<TMapElement> markElements;
@@ -179,19 +208,101 @@ TIntrusivePtr<IOperator> TInlineGenericInExistsSubplanRule::SimpleMatchAndApply(
         // above produces.
         const auto topRenamings = MakeRenameMap(markColumns, props.InternalVarIdx, usedIUs);
 
-        auto markJoin = NMapRenames::MakeJoinWithRightRenames(
-            leftInput, markMap, filter->Pos, "Left", markJoinKeys, {}, topRenamings, ctx.ExprCtx, props);
+        // A binding of the correlation is matched back, and a null is a binding like any other. The
+        // uncorrelated path keys by the tuple of the IN instead, where a null operand means unknown
+        // and not a match, so its keys stay plain equalities.
+        TIntrusivePtr<IOperator> markRight = markMap;
+        auto markJoinKeys = useDependentJoin
+                                ? MakeNullSafeJoinKeys(leftInput, markRight, domainJoinKeys, filter->Pos, ctx, props, usedIUs)
+                                : domainJoinKeys;
+        markJoinKeys.insert(markJoinKeys.end(), tupleJoinKeys.begin(), tupleJoinKeys.end());
+
+        TIntrusivePtr<IOperator> markJoin = NMapRenames::MakeJoinWithRightRenames(
+            leftInput, markRight, filter->Pos, "Left", markJoinKeys, {}, topRenamings, ctx.ExprCtx, props);
 
         // The mark is null for outer rows without a match, turn it into the subplan result
+        auto column = [&](const TInfoUnit& iu) { return MakeColumnAccess(iu, filter->Pos, &ctx.ExprCtx, &props); };
+        auto falseConst = MakeConstant("Bool", "false", filter->Pos, &ctx.ExprCtx);
+        auto matched = MakeBinaryPredicate("Coalesce", column(markIU), falseConst);
+
+        TIntrusivePtr<IOperator> resultInput = markJoin;
         TVector<TMapElement> resultElements;
+
         if (markMissingAsFalse) {
-            resultElements.emplace_back(subplanIU,
-                                        MakeBinaryPredicate("Coalesce", MakeColumnAccess(markIU, filter->Pos, &ctx.ExprCtx, &props),
-                                                            MakeConstant("Bool", "false", filter->Pos, &ctx.ExprCtx)));
+            resultElements.emplace_back(subplanIU, matched);
+        } else if (threeValued) {
+            // An unmatched row is false only when nothing could have hidden the answer behind a
+            // null: the subquery produced no null of its own, and the operand is not itself null
+            // over a subquery that produced anything at all. Both facts are per binding of the
+            // correlation, and neither can be counted over the grouping the mark is built from, so
+            // they come from a second aggregate joined in next to the mark.
+            auto rowIU = MakeUniqueInternalIU(props.InternalVarIdx, usedIUs);
+            TVector<TMapElement> rowElements;
+            rowElements.emplace_back(rowIU, MakeConstant("Uint64", "1", filter->Pos, &ctx.ExprCtx));
+            auto rowMap = MakeIntrusive<TOpMap>(statsSource, filter->Pos, rowElements);
+
+            // count() counts the non null values of its argument, so counting the compared column
+            // against a column that is never null is what tells a null result apart from no result.
+            auto valueCountIU = MakeUniqueInternalIU(props.InternalVarIdx, usedIUs);
+            auto rowCountIU = MakeUniqueInternalIU(props.InternalVarIdx, usedIUs);
+            TVector<TOpAggregationTraits> statsTraits;
+            statsTraits.emplace_back(compareResultIU, "count", valueCountIU);
+            statsTraits.emplace_back(rowIU, "count", rowCountIU);
+            auto statsAggregate =
+                MakeIntrusive<TOpAggregate>(rowMap, statsTraits, statsKeys, EOpPhase::Undefined, /*distinctAll=*/false, filter->Pos);
+
+            auto hasNullIU = MakeUniqueInternalIU(props.InternalVarIdx, usedIUs);
+            auto nonEmptyIU = MakeUniqueInternalIU(props.InternalVarIdx, usedIUs);
+            TVector<TMapElement> statsElements;
+            statsElements.emplace_back(hasNullIU, MakeBinaryPredicate(">", column(rowCountIU), column(valueCountIU)));
+            statsElements.emplace_back(nonEmptyIU, MakeBinaryPredicate(">", column(rowCountIU),
+                                                                       MakeConstant("Uint64", "0", filter->Pos, &ctx.ExprCtx)));
+            auto statsMap = MakeIntrusive<TOpMap>(statsAggregate, filter->Pos, statsElements);
+
+            // At most one row per binding of the correlation, so this cannot duplicate outer rows
+            // either. Without a correlation the aggregate yields exactly one row and the join over
+            // no keys at all is a cross join.
+            TVector<std::pair<TInfoUnit, TInfoUnit>> statsJoinKeys;
+            for (const auto& iu : statsKeys) {
+                statsJoinKeys.push_back(std::make_pair(iu, iu));
+            }
+            const auto statsRenamings = MakeRenameMap(statsKeys, props.InternalVarIdx, usedIUs);
+
+            // Keyed by the binding of the correlation again, so a null binding has to find its row
+            // here as well.
+            TIntrusivePtr<IOperator> statsLeft = markJoin;
+            TIntrusivePtr<IOperator> statsRight = statsMap;
+            statsJoinKeys = MakeNullSafeJoinKeys(statsLeft, statsRight, statsJoinKeys, filter->Pos, ctx, props, usedIUs);
+
+            resultInput = MakeJoinWithRightRenames(statsLeft, statsRight, filter->Pos, statsKeys.empty() ? "Cross" : "Left", statsJoinKeys,
+                                                   {}, statsRenamings, ctx.ExprCtx, props);
+
+            TVector<TExpression> unknownTerms;
+            unknownTerms.push_back(MakeBinaryPredicate("Coalesce", column(hasNullIU), falseConst));
+            if (IsNullableIU(leftInput, subplanEntry.Tuple[0])) {
+                // "x == x" is unknown for a null x and true otherwise, which is the null test this
+                // has to make without knowing anything about the type of the operand.
+                auto tuple = column(subplanEntry.Tuple[0]);
+                auto tupleIsNull = MakeNegation(MakeBinaryPredicate("Coalesce", MakeBinaryPredicate("==", tuple, tuple), falseConst));
+                unknownTerms.push_back(
+                    MakeBinaryPredicate("And", tupleIsNull, MakeBinaryPredicate("Coalesce", column(nonEmptyIU), falseConst)));
+            }
+
+            auto unknown = unknownTerms[0];
+            for (size_t i = 1; i < unknownTerms.size(); i++) {
+                unknown = MakeBinaryPredicate("Or", unknown, unknownTerms[i]);
+            }
+
+            // "Or" is three valued, so anding the unknown with a null Bool turns it into exactly the
+            // null the result needs, and the mark keeps its precedence over it. Cheaper than an If,
+            // and there is no builder for one.
+            auto nullBool = TExpression(MakeNullBoolNode(filter->Pos, ctx.ExprCtx), &ctx.ExprCtx, &props);
+            resultElements.emplace_back(subplanIU, MakeBinaryPredicate("Or", matched, MakeBinaryPredicate("And", unknown, nullBool)));
         } else {
             resultElements.emplace_back(subplanIU, markIU, filter->Pos, &ctx.ExprCtx, &props);
         }
-        newFilterInput = MakeIntrusive<TOpMap>(markJoin, filter->Pos, resultElements);
+
+        newFilterInput = MakeIntrusive<TOpMap>(resultInput, filter->Pos, resultElements);
     }
     // uncorrelated EXISTS
     else {

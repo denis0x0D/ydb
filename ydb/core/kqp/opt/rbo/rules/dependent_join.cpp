@@ -50,6 +50,62 @@ TVector<TInfoUnit> MissingDomainColumns(const TVector<TInfoUnit>& dependencies, 
     return result;
 }
 
+// Puts back the groups an aggregate without grouping keys loses once it is grouped by the domain.
+//
+// Such an aggregate produces a row even for an empty input -- that is the missing group by clause of
+// SQL -- and count() answers zero in it. Grouping by the domain columns turns that into one row per
+// group that is not empty, so a binding the subplan holds no row for loses its zero. The domain knows
+// every binding, so it is left joined back and the missing counts are filled in.
+TIntrusivePtr<IOperator> RestoreEmptyGroupCounts(const TIntrusivePtr<TOpDependentJoin>& dependentJoin,
+                                                 const TIntrusivePtr<TOpAggregate>& aggregate, const TVector<TInfoUnit>& countResults,
+                                                 TRBOContext& ctx, TPlanProps& props) {
+    const auto& dependencies = dependentJoin->Dependencies;
+    const auto pos = aggregate->Pos;
+
+    TIntrusivePtr<IOperator> leftInput = dependentJoin->GetDomain();
+    TIntrusivePtr<IOperator> rightInput = aggregate;
+
+    TInfoUnitSet usedIUs;
+    NMapRenames::AddUsedIUs(usedIUs, leftInput->GetOutputIUs());
+    NMapRenames::AddUsedIUs(usedIUs, rightInput->GetOutputIUs());
+
+    TVector<std::pair<TInfoUnit, TInfoUnit>> joinKeys;
+    for (const auto& iu : dependencies) {
+        joinKeys.emplace_back(iu, iu);
+    }
+    joinKeys = MakeNullSafeJoinKeys(leftInput, rightInput, joinKeys, pos, ctx, props, usedIUs);
+
+    // The domain columns of the result come from the domain itself, so the aggregate's copy of them
+    // is renamed away. The counts are renamed as well, the map below republishes them under their
+    // original names.
+    NMapRenames::TRenameMap rightRenames;
+    TVector<std::pair<TInfoUnit, TInfoUnit>> renamedCounts;
+    for (const auto& iu : dependencies) {
+        rightRenames.emplace(iu, NMapRenames::MakeUniqueInternalIU(props.InternalVarIdx, usedIUs));
+    }
+    for (const auto& iu : countResults) {
+        if (rightRenames.contains(iu)) {
+            continue;
+        }
+        auto renamedIU = NMapRenames::MakeUniqueInternalIU(props.InternalVarIdx, usedIUs);
+        rightRenames.emplace(iu, renamedIU);
+        renamedCounts.emplace_back(iu, renamedIU);
+    }
+
+    auto join = NMapRenames::MakeJoinWithRightRenames(leftInput, rightInput, pos, "Left", joinKeys, {}, rightRenames, ctx.ExprCtx, props);
+
+    // count() is never null on its own, the left join is what makes it one, and it does so exactly
+    // for the bindings whose input was empty.
+    TVector<TMapElement> resultElements;
+    resultElements.reserve(renamedCounts.size());
+    for (const auto& [resultIU, renamedIU] : renamedCounts) {
+        resultElements.emplace_back(resultIU, MakeBinaryPredicate("Coalesce", MakeColumnAccess(renamedIU, pos, &ctx.ExprCtx, &props),
+                                                                  MakeConstant("Uint64", "0", pos, &ctx.ExprCtx)));
+    }
+
+    return MakeIntrusive<TOpMap>(join, pos, resultElements);
+}
+
 } // anonymous namespace
 
 TIntrusivePtr<TOpAggregate> MakeDomainProjection(const TIntrusivePtr<IOperator>& input, const TVector<TInfoUnit>& columns, TPositionHandle pos) {
@@ -61,6 +117,49 @@ TIntrusivePtr<TOpAggregate> MakeDomainProjection(const TIntrusivePtr<IOperator>&
         traits.emplace_back(iu, "distinct", iu);
     }
     return MakeIntrusive<TOpAggregate>(input, traits, columns, EOpPhase::Undefined, /*distinctAll=*/true, pos);
+}
+
+bool IsNullableIU(const TIntrusivePtr<IOperator>& input, const TInfoUnit& iu) {
+    if (!input->Type) {
+        return true;
+    }
+    const auto* columnType = input->GetIUType(iu);
+    return !columnType || columnType->IsOptionalOrNull();
+}
+
+TVector<std::pair<TInfoUnit, TInfoUnit>> MakeNullSafeJoinKeys(TIntrusivePtr<IOperator>& leftInput, TIntrusivePtr<IOperator>& rightInput,
+                                                              const TVector<std::pair<TInfoUnit, TInfoUnit>>& joinKeys, TPositionHandle pos,
+                                                              TRBOContext& ctx, TPlanProps& props, TInfoUnitSet& usedIUs) {
+    TVector<std::pair<TInfoUnit, TInfoUnit>> result;
+    result.reserve(joinKeys.size());
+
+    TVector<TMapElement> leftElements;
+    TVector<TMapElement> rightElements;
+
+    auto encode = [&](const TInfoUnit& iu, TVector<TMapElement>& elements) {
+        auto encodedIU = NMapRenames::MakeUniqueInternalIU(props.InternalVarIdx, usedIUs);
+        elements.emplace_back(encodedIU, MakeUnaryCallable("StablePickle", MakeColumnAccess(iu, pos, &ctx.ExprCtx, &props)));
+        return encodedIU;
+    };
+
+    for (const auto& [leftKey, rightKey] : joinKeys) {
+        // A key that cannot be null already compares the way the domain needs it to.
+        if (!IsNullableIU(leftInput, leftKey) && !IsNullableIU(rightInput, rightKey)) {
+            result.emplace_back(leftKey, rightKey);
+            continue;
+        }
+
+        result.emplace_back(encode(leftKey, leftElements), encode(rightKey, rightElements));
+    }
+
+    if (!leftElements.empty()) {
+        leftInput = MakeIntrusive<TOpMap>(leftInput, pos, leftElements);
+    }
+    if (!rightElements.empty()) {
+        rightInput = MakeIntrusive<TOpMap>(rightInput, pos, rightElements);
+    }
+
+    return result;
 }
 
 bool HasFreeCorrelation(const TIntrusivePtr<IOperator>& op, const TVector<TInfoUnit>& correlatedColumns) {
@@ -309,9 +408,6 @@ bool TPushDependentJoinThroughAggregateRule::QuickMatch(const TIntrusivePtr<IOpe
 
 TIntrusivePtr<IOperator> TPushDependentJoinThroughAggregateRule::SimpleMatchAndApply(const TIntrusivePtr<IOperator>& input, TRBOContext& ctx,
                                                                                     TPlanProps& props) {
-    Y_UNUSED(ctx);
-    Y_UNUSED(props);
-
     auto dependentJoin = CastOperator<TOpDependentJoin>(input);
     auto body = dependentJoin->GetInput();
     if (body->Kind != EOperator::Aggregate) {
@@ -351,8 +447,29 @@ TIntrusivePtr<IOperator> TPushDependentJoinThroughAggregateRule::SimpleMatchAndA
     }
 
     auto newInput = PushInto(dependentJoin, aggregate->GetInput());
-    return MakeIntrusive<TOpAggregate>(newInput, newTraits, newKeyColumns, aggregate->GetAggregationPhase(), aggregate->IsDistinctAll(),
-                                       aggregate->Pos);
+    auto newAggregate = MakeIntrusive<TOpAggregate>(newInput, newTraits, newKeyColumns, aggregate->GetAggregationPhase(),
+                                                    aggregate->IsDistinctAll(), aggregate->Pos);
+
+    // The equivalence above holds for a grouped aggregate only. Without grouping keys the aggregate
+    // answers for an empty input as well, which grouping by the domain silently drops. Only count is
+    // put back: every other supported function answers a null there, which is also what the consumer
+    // reads a missing group as, and leaving those plans alone keeps the domain out of them.
+    if (!aggregate->KeyColumns.empty() || aggregate->IsDistinctAll()) {
+        return newAggregate;
+    }
+
+    TVector<TInfoUnit> countResults;
+    for (const auto& traits : newTraits) {
+        if (traits.AggFunction == "count") {
+            countResults.push_back(traits.ResultColName);
+        }
+    }
+
+    if (countResults.empty()) {
+        return newAggregate;
+    }
+
+    return RestoreEmptyGroupCounts(dependentJoin, newAggregate, countResults, ctx, props);
 }
 
 /**
@@ -454,8 +571,8 @@ TIntrusivePtr<IOperator> TPushDependentJoinThroughJoinRule::SimpleMatchAndApply(
         return input;
     }
 
-    auto newLeft = PushInto(dependentJoin, join->GetLeftInput());
-    auto newRight = PushInto(dependentJoin, join->GetRightInput());
+    TIntrusivePtr<IOperator> newLeft = PushInto(dependentJoin, join->GetLeftInput());
+    TIntrusivePtr<IOperator> newRight = PushInto(dependentJoin, join->GetRightInput());
 
     // The right copy of the domain is renamed so that the two bindings can be compared.
     TInfoUnitSet usedIUs;
@@ -463,10 +580,15 @@ TIntrusivePtr<IOperator> TPushDependentJoinThroughJoinRule::SimpleMatchAndApply(
     NMapRenames::AddUsedIUs(usedIUs, newRight->GetOutputIUs());
     const auto rightRenames = NMapRenames::MakeRenameMap(dependencies, props.InternalVarIdx, usedIUs);
 
-    auto joinKeys = join->JoinKeys;
+    TVector<std::pair<TInfoUnit, TInfoUnit>> domainKeys;
     for (const auto& iu : dependencies) {
-        joinKeys.emplace_back(iu, iu);
+        domainKeys.emplace_back(iu, iu);
     }
+    // Both copies are the same domain, so a null binding has to match itself here as well.
+    domainKeys = MakeNullSafeJoinKeys(newLeft, newRight, domainKeys, join->Pos, ctx, props, usedIUs);
+
+    auto joinKeys = join->JoinKeys;
+    joinKeys.insert(joinKeys.end(), domainKeys.begin(), domainKeys.end());
 
     // A cross join cannot carry the equality, it becomes an inner join. Every other kind is kept.
     const TString newJoinKind = joinKind == "Cross" ? "Inner" : joinKind;

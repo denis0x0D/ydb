@@ -141,6 +141,9 @@ TExpression MakeNegation(const TExpression& expr);
 // Make a binary predicate with an arbitrary callable, extract context and properties from one of the arguments
 TExpression MakeBinaryPredicate(const TString& callable, const TExpression& left, const TExpression& right);
 
+// Apply an arbitrary callable of one argument, context and properties come from the argument
+TExpression MakeUnaryCallable(const TString& callable, const TExpression& arg);
+
 // Make an expression that evaluates to the value, but aborts the query with the given message when the
 // predicate does not hold. Context and properties are extracted from one of the arguments.
 TExpression MakeEnsure(const TExpression& value, const TExpression& predicate, const TString& message);

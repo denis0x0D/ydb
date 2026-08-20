@@ -923,6 +923,13 @@ TExpression MakeBinaryPredicate(const TString& callable, const TExpression& left
     return TExpression(lambda, ctx, props);
 }
 
+TExpression MakeUnaryCallable(const TString& callable, const TExpression& arg) {
+    Y_ENSURE(arg.Ctx);
+
+    auto node = arg.Ctx->NewCallable(arg.Node->Pos(), callable, {arg.GetExpressionBody()});
+    return TExpression(node, arg.Ctx, arg.PlanProps);
+}
+
 TExpression MakeEnsure(const TExpression& value, const TExpression& predicate, const TString& message) {
     // Fetch context and plan properties from one of the arguments
     TExprContext* ctx = nullptr;

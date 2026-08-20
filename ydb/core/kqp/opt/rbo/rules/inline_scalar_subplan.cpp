@@ -129,18 +129,22 @@ bool TInlineScalarSubplanRule::MatchAndApply(TIntrusivePtr<IOperator> &input, TR
         }
 
         // One row of the subplan per binding of the correlation columns, joined back on the binding.
+        // A null is a binding like any other, so the match has to treat it as one.
         TVector<std::pair<TInfoUnit, TInfoUnit>> joinKeys;
         for (const auto& iu : dependencies) {
             joinKeys.push_back(std::make_pair(iu, iu));
         }
+        TIntrusivePtr<IOperator> joinLeftInput = child;
+        TIntrusivePtr<IOperator> joinRightInput = rightInput;
+        joinKeys = MakeNullSafeJoinKeys(joinLeftInput, joinRightInput, joinKeys, subplan->Pos, ctx, props, usedIUs);
 
         auto joinedSubplanResIU = rightResIU;
         if (const auto renameIt = subplanOutputRenames.find(joinedSubplanResIU); renameIt != subplanOutputRenames.end()) {
             joinedSubplanResIU = renameIt->second;
         }
 
-        auto leftJoin = NMapRenames::MakeJoinWithRightRenames(child, rightInput, subplan->Pos, "Left", joinKeys, {}, subplanOutputRenames,
-                                                              ctx.ExprCtx, props);
+        auto leftJoin = NMapRenames::MakeJoinWithRightRenames(joinLeftInput, joinRightInput, subplan->Pos, "Left", joinKeys, {},
+                                                              subplanOutputRenames, ctx.ExprCtx, props);
 
         attachSubplanResult(leftJoin, joinedSubplanResIU);
     }

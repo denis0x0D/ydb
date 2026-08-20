@@ -56,33 +56,25 @@ TIntrusivePtr<IOperator> TInlineSimpleInExistsSubplanRule::SimpleMatchAndApply(c
     }
 
     TIntrusivePtr<IOperator> join;
-    TVector<std::pair<TInfoUnit, TInfoUnit>> extraJoinKeys;
     auto subplan = CastOperator<IOperator>(subplanEntry.Plan);
 
     // A correlated subplan keeps its correlation inside. A dependent join over the domain of the
     // correlated columns evaluates it once per binding, and matching the binding back is one more
     // key of the semi join.
     const bool useDependentJoin = HasFreeCorrelation(subplan, subplanEntry.DependentIUs);
-    if (useDependentJoin) {
-        for (const auto& dependency : subplanEntry.DependentIUs) {
-            extraJoinKeys.push_back(std::make_pair(dependency, dependency));
-        }
-    }
 
     // We build a semi-join or a left-only join when processing IN subplan
-    if (subplanEntry.Type == ESubplanType::IN_SUBPLAN || !extraJoinKeys.empty()) {
-        auto leftJoinInput = filter->GetInput();
+    if (subplanEntry.Type == ESubplanType::IN_SUBPLAN || useDependentJoin) {
+        TIntrusivePtr<IOperator> leftJoinInput = filter->GetInput();
         auto joinKind = negated ? "LeftOnly" : "LeftSemi";
 
-        TVector<std::pair<TInfoUnit, TInfoUnit>> joinKeys;
+        TVector<std::pair<TInfoUnit, TInfoUnit>> tupleJoinKeys;
 
         auto planIUs = GetSubplanResultIUs(subplan);
 
         for (size_t i = 0; i < subplanEntry.Tuple.size(); i++) {
-            joinKeys.push_back(std::make_pair(subplanEntry.Tuple[i], planIUs[i]));
+            tupleJoinKeys.push_back(std::make_pair(subplanEntry.Tuple[i], planIUs[i]));
         }
-
-        joinKeys.insert(joinKeys.begin(), extraJoinKeys.begin(), extraJoinKeys.end());
 
         if (useDependentJoin) {
             const auto outerIUs = leftJoinInput->GetOutputIUs();
@@ -93,8 +85,9 @@ TIntrusivePtr<IOperator> TInlineSimpleInExistsSubplanRule::SimpleMatchAndApply(c
 
             // The subplan is still correlated, so it is evaluated once per value of the domain. The
             // pushdown rules of the decorrelation stage take it from here.
-            auto rightInput = MakeIntrusive<TOpDependentJoin>(MakeDomainProjection(leftJoinInput, subplanEntry.DependentIUs, filter->Pos),
-                                                              subplan, subplanEntry.DependentIUs, filter->Pos);
+            TIntrusivePtr<IOperator> rightInput =
+                MakeIntrusive<TOpDependentJoin>(MakeDomainProjection(leftJoinInput, subplanEntry.DependentIUs, filter->Pos), subplan,
+                                                subplanEntry.DependentIUs, filter->Pos);
 
             // The dependent join re-exposes the correlation columns under their outer names. The semi
             // join does not output the right side, but its keys still have to tell the two apart.
@@ -109,10 +102,20 @@ TIntrusivePtr<IOperator> TInlineSimpleInExistsSubplanRule::SimpleMatchAndApply(c
                 }
             }
 
+            // Matching the binding back is one more key of the semi join, and a null is a binding
+            // like any other. The tuple of an IN keeps a plain equality: there a null operand means
+            // unknown and not a match.
+            TVector<std::pair<TInfoUnit, TInfoUnit>> joinKeys;
+            for (const auto& dependency : subplanEntry.DependentIUs) {
+                joinKeys.push_back(std::make_pair(dependency, dependency));
+            }
+            joinKeys = MakeNullSafeJoinKeys(leftJoinInput, rightInput, joinKeys, filter->Pos, ctx, props, usedIUs);
+            joinKeys.insert(joinKeys.end(), tupleJoinKeys.begin(), tupleJoinKeys.end());
+
             join = NMapRenames::MakeJoinWithRightRenames(leftJoinInput, rightInput, input->Pos, joinKind, joinKeys, {}, rightRenames,
                                                          ctx.ExprCtx, props);
         } else {
-            join = MakeIntrusive<TOpJoin>(leftJoinInput, subplan, input->Pos, joinKind, joinKeys);
+            join = MakeIntrusive<TOpJoin>(leftJoinInput, subplan, input->Pos, joinKind, tupleJoinKeys);
         }
 
         conjuncts.erase(conjuncts.begin() + conjunctIdx);
