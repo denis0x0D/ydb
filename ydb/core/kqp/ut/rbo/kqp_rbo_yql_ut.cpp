@@ -8571,6 +8571,44 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                 ORDER BY t1.a;
              )",
              R"([[3];[7];[11]])"},
+
+            // A correlated EXISTS over a binding both of whose sides are non nullable. Control for
+            // the two cases below: t2.b never takes the value 3, so the rows of t1 with b == 3 have
+            // no match.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE EXISTS (SELECT 1 FROM `/Root/t2` as t2 WHERE t2.b == t1.b)
+                ORDER BY t1.a;
+             )",
+             R"([[1];[2];[4];[5];[6];[8];[9];[10];[12]])"},
+
+            // The same EXISTS over a binding whose inner column is nullable as well. "t2.e == null"
+            // is unknown for every row of t2, including the row where t2.e is itself null, so the
+            // outer row with a null e has no match and the null of t2 must not manufacture one.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE EXISTS (SELECT 1 FROM `/Root/t2` as t2 WHERE t2.e == t1.e)
+                ORDER BY t1.a;
+             )",
+             R"([[2];[3];[4];[5];[6];[7];[8];[9];[10];[11];[12]])"},
+
+            // The same binding under a scalar subquery whose aggregate answers null on an empty
+            // input, so the domain is not joined back. Only the outer row with a null e sees an
+            // empty subquery.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE (SELECT max(t2.c) FROM `/Root/t2` as t2 WHERE t2.e == t1.e) IS NULL
+                ORDER BY t1.a;
+             )",
+             R"([[1]])"},
+
+            // And the same binding under a count, which does have to join the domain back.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE (SELECT count(*) FROM `/Root/t2` as t2 WHERE t2.e == t1.e) == 0
+                ORDER BY t1.a;
+             )",
+             R"([[1]])"},
         };
 
         for (ui32 i = 0; i < cases.size(); ++i) {

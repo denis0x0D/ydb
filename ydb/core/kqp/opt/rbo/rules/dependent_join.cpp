@@ -312,7 +312,17 @@ TIntrusivePtr<IOperator> TEliminateDependentJoinDomainRule::SimpleMatchAndApply(
     TVector<TMapElement> bindingElements;
     bindingElements.reserve(addDependencies->Dependencies.size());
     for (const auto& iu : addDependencies->Dependencies) {
-        bindingElements.emplace_back(iu, MakeColumnAccess(bindings.at(iu), filter->Pos, &ctx.ExprCtx, &props));
+        const auto& source = bindings.at(iu);
+        bindingElements.emplace_back(iu, MakeColumnAccess(source, filter->Pos, &ctx.ExprCtx, &props));
+
+        // "d = r" is true exactly when r is not null and r is not distinct from d, and the join that
+        // puts the subplan result back tests the second half only. It used to test both, because it
+        // compared with a plain equality, but a null binding is a value of the domain and the join
+        // has to match it. So the half the join no longer rejects is kept here, where the predicate
+        // this binding was extracted from used to reject it.
+        if (IsNullableIU(correlatedInput, source)) {
+            restConjuncts.push_back(MakeUnaryCallable("Exists", MakeColumnAccess(source, filter->Pos, &ctx.ExprCtx, &props)));
+        }
     }
 
     TIntrusivePtr<IOperator> newBody = MakeIntrusive<TOpMap>(correlatedInput, filter->Pos, bindingElements);
