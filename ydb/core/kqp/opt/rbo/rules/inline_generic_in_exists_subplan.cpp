@@ -255,8 +255,17 @@ TIntrusivePtr<IOperator> TInlineGenericInExistsSubplanRule::SimpleMatchAndApply(
             auto nonEmptyIU = MakeUniqueInternalIU(props.InternalVarIdx, usedIUs);
             TVector<TMapElement> statsElements;
             statsElements.emplace_back(hasNullIU, MakeBinaryPredicate(">", column(rowCountIU), column(valueCountIU)));
-            statsElements.emplace_back(nonEmptyIU, MakeBinaryPredicate(">", column(rowCountIU),
-                                                                       MakeConstant("Uint64", "0", filter->Pos, &ctx.ExprCtx)));
+            if (statsKeys.empty()) {
+                // A global aggregate produces its row even over an empty input, so the count is the
+                // only thing that tells an empty subquery apart from a non empty one.
+                statsElements.emplace_back(nonEmptyIU, MakeBinaryPredicate(">", column(rowCountIU),
+                                                                           MakeConstant("Uint64", "0", filter->Pos, &ctx.ExprCtx)));
+            } else {
+                // Grouped instead, so a group exists exactly where the subquery produced a row and
+                // the count is never zero inside one. The empty bindings are the ones the join below
+                // finds nothing for, and the Coalesce over this column is what turns them into false.
+                statsElements.emplace_back(nonEmptyIU, MakeConstant("Bool", "true", filter->Pos, &ctx.ExprCtx));
+            }
             auto statsMap = MakeIntrusive<TOpMap>(statsAggregate, filter->Pos, statsElements);
 
             // At most one row per binding of the correlation, so this cannot duplicate outer rows
