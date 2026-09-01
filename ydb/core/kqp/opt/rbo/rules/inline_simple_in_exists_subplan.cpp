@@ -35,9 +35,12 @@ TIntrusivePtr<IOperator> TInlineSimpleInExistsSubplanRule::SimpleMatchAndApply(c
     for (conjunctIdx = 0; conjunctIdx < conjuncts.size(); conjunctIdx++) {
         auto maybeSubplan = conjuncts[conjunctIdx].GetExpressionBody();
 
+        // Negation belongs to the conjunct we end up picking, so it has to be scoped to this
+        // iteration. A leading Not over an unrelated predicate must not invert a later subplan.
+        bool conjunctNegated = false;
         if (TCoNot::Match(maybeSubplan.Get())) {
             maybeSubplan = maybeSubplan->ChildPtr(0);
-            negated = true;
+            conjunctNegated = true;
         }
         if (TCoMember::Match(maybeSubplan.Get())) {
             auto name = TString(maybeSubplan->ChildPtr(1)->Content());
@@ -45,6 +48,7 @@ TIntrusivePtr<IOperator> TInlineSimpleInExistsSubplanRule::SimpleMatchAndApply(c
             if (const auto* entry = props.Subplans.Find(iu)) {
                 if (entry->Type == ESubplanType::IN_SUBPLAN || entry->Type == ESubplanType::EXISTS) {
                     subplanEntry = entry;
+                    negated = conjunctNegated;
                     break;
                 }
             }
@@ -59,6 +63,18 @@ TIntrusivePtr<IOperator> TInlineSimpleInExistsSubplanRule::SimpleMatchAndApply(c
     Y_ENSURE(subplanEntry);
     auto subplan = CastOperator<IOperator>(subplanEntry->Plan);
     const bool useDependentJoin = HasFreeCorrelation(subplan, subplanEntry->DependentIUs);
+
+    // A negated IN is three valued: when either side may be null, "has no matching row" and
+    // "unknown" are different answers, and a two valued anti join cannot tell them apart. Decline
+    // here so TInlineGenericInExistsSubplanRule handles it with a mark join that carries the null.
+    // The single column condition mirrors the three valued path of that rule.
+    if (negated && subplanEntry->Type == ESubplanType::IN_SUBPLAN && subplanEntry->Tuple.size() == 1) {
+        const auto& leftInput = filter->GetInput();
+        const auto subplanIUs = useDependentJoin ? GetSubplanResultIUs(subplan) : subplan->GetOutputIUs();
+        if (subplanIUs.empty() || IsNullableIU(leftInput, subplanEntry->Tuple[0]) || IsNullableIU(subplan, subplanIUs[0])) {
+            return input;
+        }
+    }
 
     // Simple rewrite into left only/ left semi.
     if (subplanEntry->Type == ESubplanType::IN_SUBPLAN || useDependentJoin) {

@@ -484,6 +484,15 @@ TExprNode::TPtr TPhysicalJoinBuilder::BuildPhysicalJoin(TExprNode::TPtr leftInpu
         joinAlgo = NKikimr::NKqp::EJoinAlgoType::GraceJoin;
     }
 
+    // The CBO picks a join algo before TRewriteJoinToIndexLookupJoinRule gets to run, and that rule
+    // may decline, for example when the right side is shared with another consumer. What is left is
+    // still an ordinary join, so build it with a general algorithm instead of failing the query.
+    if (joinAlgo != NKikimr::NKqp::EJoinAlgoType::MapJoin && joinAlgo != NKikimr::NKqp::EJoinAlgoType::GraceJoin &&
+        joinAlgo != NKikimr::NKqp::EJoinAlgoType::ReverseBlockJoin) {
+        YQL_CLOG(DEBUG, CoreDq) << "Join algo " << static_cast<int>(joinAlgo) << " has no physical implementation here, falling back to GraceJoin";
+        joinAlgo = NKikimr::NKqp::EJoinAlgoType::GraceJoin;
+    }
+
     const auto leftInputType = Join->GetLeftInput()->GetTypeAnn()->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
     const auto rightInputType = Join->GetRightInput()->GetTypeAnn()->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
     TModifyKeysList remapLeft;

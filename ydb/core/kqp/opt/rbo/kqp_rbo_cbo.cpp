@@ -142,16 +142,33 @@ bool IsUsablePointPrefix(const TOpRead::TRangeInfo& ranges, const TVector<TStrin
     return ranges.ExpectedMaxPoints.Defined() && *ranges.ExpectedMaxPoints <= pointsLimit;
 }
 
+// TRewriteJoinToIndexLookupJoinRule rebuilds both sides of the join, so it declines when an
+// operator it has to rewrite is shared with another consumer. Mirror that here: otherwise the CBO
+// stamps LookupJoin on a join the rule will refuse to build, and physical conversion is left with
+// an algo it cannot implement.
+bool IsSingleConsumerRel(const std::shared_ptr<IBaseOptimizerNode>& node) {
+    if (node->Kind != EOptimizerNodeKind::RelNodeType) {
+        // An intermediate join result does not exist as an operator yet; it is built fresh when the
+        // CBO tree is inlined, so it always has exactly one consumer.
+        return true;
+    }
+    const auto& op = std::static_pointer_cast<TRBORelOptimizerNode>(node)->Op;
+    return op->IsSingleConsumer();
+}
+
 bool IsLookupJoinApplicableDetailed(const std::shared_ptr<TRelOptimizerNode>& node, const TVector<TJoinColumn>& joinColumns, EJoinKind joinKind, const TKqpProviderContext& ctx) {
     auto rel = std::static_pointer_cast<TRBORelOptimizerNode>(node);
     auto rightInput = rel->Op;
     TIntrusivePtr<TOpFilter> rightFilter;
 
     if (rightInput->Kind == EOperator::Filter) {
+        if (!rightInput->IsSingleConsumer()) {
+            return false;
+        }
         rightFilter = CastOperator<TOpFilter>(rightInput);
         rightInput = rightFilter->GetInput();
     }
-    if (rightInput->Kind != EOperator::Source) {
+    if (rightInput->Kind != EOperator::Source || !rightInput->IsSingleConsumer()) {
         return false;
     }
 
@@ -220,7 +237,13 @@ bool IsLookupJoinApplicable(std::shared_ptr<IBaseOptimizerNode> left,
     EJoinKind joinKind,
     TKqpProviderContext& ctx
 ) {
-    Y_UNUSED(left, leftJoinKeys);
+    Y_UNUSED(leftJoinKeys);
+
+    // The rewrite turns the left side into a tuple of (row, lookup key), which it cannot do for an
+    // input that another operator also reads.
+    if (!IsSingleConsumerRel(left)) {
+        return false;
+    }
 
     if (!(right->Stats.StorageType == NKikimr::NKqp::EStorageType::RowStorage)) {
         return false;
