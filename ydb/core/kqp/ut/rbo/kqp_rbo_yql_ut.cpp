@@ -5349,6 +5349,194 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
         }
     }
 
+    void RunWindowFunctionsTest(const bool newRbo, const bool columnStore) {
+        NKikimrConfig::TAppConfig appConfig;
+        appConfig.MutableTableServiceConfig()->SetEnableNewRBO(newRbo);
+        appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
+        appConfig.MutableTableServiceConfig()->SetAllowOlapDataQuery(true);
+        appConfig.MutableTableServiceConfig()->SetDefaultLangVer(NYql::GetMaxLangVersion());
+        appConfig.MutableTableServiceConfig()->SetBackportMode(NKikimrConfig::TTableServiceConfig_EBackportMode_All);
+
+        TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
+        auto tableSession = kikimr.GetTableClient().CreateSession().GetValueSync().GetSession();
+        const TString schema = TStringBuilder() << R"(
+            CREATE TABLE `/Root/t1` (
+                a Int64 NOT NULL,
+                b Int64,
+                c Int64,
+                d Int64,
+                e Int64,
+                PRIMARY KEY (a)
+            )
+        )" << (columnStore ? " WITH (Store = Column);" : ";");
+        auto schemeResult = tableSession.ExecuteSchemeQuery(schema).GetValueSync();
+        UNIT_ASSERT_C(schemeResult.IsSuccess(), schemeResult.GetIssues().ToString());
+
+        const TVector<std::pair<TString, TString>> queries = {
+            {"partitioned rank", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT b, c, Sum(e) AS sales,
+                    Rank() OVER (PARTITION BY b ORDER BY Sum(e) DESC) AS rank_in_group
+                FROM `/Root/t1`
+                GROUP BY b, c;
+            )"},
+            {"partitioned sum", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT b, c, Sum(e) AS sales,
+                    Sum(Sum(e)) OVER (PARTITION BY b) AS total_sales
+                FROM `/Root/t1`
+                GROUP BY b, c;
+            )"},
+            {"partitioned average", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT b, c, Sum(e) AS sales,
+                    Avg(Sum(e)) OVER (PARTITION BY b) AS average_sales
+                FROM `/Root/t1`
+                GROUP BY b, c;
+            )"},
+           {"global rank", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT c, Sum(e) AS sales,
+                    Rank() OVER (ORDER BY Sum(e) ASC) AS global_rank
+                FROM `/Root/t1`
+                GROUP BY c;
+            )"},
+            {"rank with rollup partition expression", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT b, c, Sum(e) AS sales,
+                    Rank() OVER (
+                        PARTITION BY
+                            Grouping(b) + Grouping(c),
+                            CASE WHEN Grouping(c) == 0 THEN b ELSE NULL END
+                        ORDER BY Sum(e) ASC, c DESC
+                    ) AS rank_within_parent
+                FROM `/Root/t1`
+                GROUP BY ROLLUP(b, c);
+            )"},
+            {"cumulative sum", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT b, c, Sum(e) AS sales,
+                    Sum(Sum(e)) OVER (
+                        PARTITION BY b
+                        ORDER BY c
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                    ) AS cumulative_sales
+                FROM `/Root/t1`
+                GROUP BY b, c;
+            )"},
+            {"cumulative maximum of a e", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT b, c, e,
+                    Max(e) OVER (
+                        PARTITION BY b
+                        ORDER BY c
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                    ) AS cumulative_max
+                FROM `/Root/t1`
+            )"},
+            // TPC-DS q47, q57, q89 partition by four or five columns.
+            {"multi column partition", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT b, d, Sum(e) AS sales,
+                    Avg(Sum(e)) OVER (PARTITION BY b, d) AS avg_sales
+                FROM `/Root/t1`
+                GROUP BY b, d, c;
+            )"},
+            // TPC-DS q47, q57 order by two columns inside the window.
+            {"multi column order", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT b, c, d, Sum(e) AS sales,
+                    Rank() OVER (
+                        PARTITION BY b
+                        ORDER BY d ASC, c DESC
+                    ) AS rank_in_group
+                FROM `/Root/t1`
+                GROUP BY b, c, d;
+            )"},
+            // TPC-DS q51 uses two functions over one identical window specification.
+            {"two windows sharing a specification", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT b, c, e,
+                    Max(e) OVER (
+                        PARTITION BY b
+                        ORDER BY c
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                    ) AS running_max,
+                    Min(e) OVER (
+                        PARTITION BY b
+                        ORDER BY c
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                    ) AS running_min
+                FROM `/Root/t1`;
+            )"},
+            // TPC-DS q47, q57 mix two different window specifications in one select.
+            {"two windows with different specifications", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT b, c, Sum(e) AS sales,
+                    Avg(Sum(e)) OVER (PARTITION BY b) AS avg_sales,
+                    Rank() OVER (PARTITION BY b ORDER BY c) AS rank_in_group
+                FROM `/Root/t1`
+                GROUP BY b, c;
+            )"},
+            // TPC-DS q12, q20, q98 divide a plain aggregate by a window aggregate.
+            {"window result inside an expression", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT b, c,
+                    Sum(e) * 100 / Sum(Sum(e)) OVER (PARTITION BY b) AS revenue_ratio
+                FROM `/Root/t1`
+                GROUP BY b, c;
+            )"},
+            // TPC-DS q51 applies a window over a subquery that itself contains windows.
+            {"window over a windowed subquery", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT b, c, cumulative_sales,
+                    Max(cumulative_sales) OVER (
+                        PARTITION BY b
+                        ORDER BY c
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                    ) AS peak_cumulative_sales
+                FROM (
+                    SELECT b, c,
+                        Sum(Sum(e)) OVER (
+                            PARTITION BY b
+                            ORDER BY c
+                            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                        ) AS cumulative_sales
+                    FROM `/Root/t1`
+                    GROUP BY b, c
+                );
+            )"},
+        };
+
+        auto querySession = kikimr.GetQueryClient().GetSession().GetValueSync().GetSession();
+        for (const auto& [name, query] : queries) {
+            auto result = querySession.ExecuteQuery(query, NYdb::NQuery::TTxControl::NoTx(),
+                NYdb::NQuery::TExecuteQuerySettings().ExecMode(NQuery::EExecMode::Explain)).ExtractValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.IsSuccess(), !newRbo,
+                name << " on a " << (columnStore ? "column" : "row") << " table must "
+                     << (newRbo ? "fail with New RBO" : "succeed with the old optimizer")
+                     << ": " << result.GetIssues().ToString());
+        }
+    }
+
+    Y_UNIT_TEST_TWIN(WindowFunctionsUnsupportedByNewRbo, ColumnStore) {
+        RunWindowFunctionsTest(/*newRbo=*/false, ColumnStore);
+        RunWindowFunctionsTest(/*newRbo=*/true, ColumnStore);
+    }
+
     std::set<ui32> MakePerf_YqlSingleQuerySkipList(const EBenchType type, const ui32 queryId) {
         std::set<ui32> skipList;
         for (ui32 qId = 1, e = BenchmarkQueryCount[type]; qId <= e; ++qId) {
