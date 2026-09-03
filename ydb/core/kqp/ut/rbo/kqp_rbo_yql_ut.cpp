@@ -5349,6 +5349,116 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
         }
     }
 
+    void RunWindowFunctionsTest(const bool newRbo, const bool columnStore) {
+        NKikimrConfig::TAppConfig appConfig;
+        appConfig.MutableTableServiceConfig()->SetEnableNewRBO(newRbo);
+        appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
+        appConfig.MutableTableServiceConfig()->SetAllowOlapDataQuery(true);
+        appConfig.MutableTableServiceConfig()->SetDefaultLangVer(NYql::GetMaxLangVersion());
+        appConfig.MutableTableServiceConfig()->SetBackportMode(NKikimrConfig::TTableServiceConfig_EBackportMode_All);
+
+        TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
+        auto tableSession = kikimr.GetTableClient().CreateSession().GetValueSync().GetSession();
+        const TString schema = TStringBuilder() << R"(
+            CREATE TABLE `/Root/window_input` (
+                id Int64 NOT NULL,
+                group_id Int64,
+                order_id Int64,
+                value Int64,
+                PRIMARY KEY (id)
+            )
+        )" << (columnStore ? " WITH (Store = Column);" : ";");
+        auto schemeResult = tableSession.ExecuteSchemeQuery(schema).GetValueSync();
+        UNIT_ASSERT_C(schemeResult.IsSuccess(), schemeResult.GetIssues().ToString());
+
+        const TVector<std::pair<TString, TString>> queries = {
+            {"partitioned rank", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT group_id, order_id, Sum(value) AS sales,
+                    Rank() OVER (PARTITION BY group_id ORDER BY Sum(value) DESC) AS rank_in_group
+                FROM `/Root/window_input`
+                GROUP BY group_id, order_id;
+            )"},
+            {"partitioned sum", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT group_id, order_id, Sum(value) AS sales,
+                    Sum(Sum(value)) OVER (PARTITION BY group_id) AS total_sales
+                FROM `/Root/window_input`
+                GROUP BY group_id, order_id;
+            )"},
+            {"partitioned average", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT group_id, order_id, Sum(value) AS sales,
+                    Avg(Sum(value)) OVER (PARTITION BY group_id) AS average_sales
+                FROM `/Root/window_input`
+                GROUP BY group_id, order_id;
+            )"},
+           {"global rank", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT order_id, Sum(value) AS sales,
+                    Rank() OVER (ORDER BY Sum(value) ASC) AS global_rank
+                FROM `/Root/window_input`
+                GROUP BY order_id;
+            )"},
+            {"rank with rollup partition expression", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT group_id, order_id, Sum(value) AS sales,
+                    Rank() OVER (
+                        PARTITION BY
+                            Grouping(group_id) + Grouping(order_id),
+                            CASE WHEN Grouping(order_id) == 0 THEN group_id ELSE NULL END
+                        ORDER BY Sum(value) ASC, order_id DESC
+                    ) AS rank_within_parent
+                FROM `/Root/window_input`
+                GROUP BY ROLLUP(group_id, order_id);
+            )"},
+            {"cumulative sum", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT group_id, order_id, Sum(value) AS sales,
+                    Sum(Sum(value)) OVER (
+                        PARTITION BY group_id
+                        ORDER BY order_id
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                    ) AS cumulative_sales
+                FROM `/Root/window_input`
+                GROUP BY group_id, order_id;
+            )"},
+            {"cumulative maximum of a value", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT group_id, order_id, value,
+                    Max(value) OVER (
+                        PARTITION BY group_id
+                        ORDER BY order_id
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                    ) AS cumulative_max
+                FROM `/Root/window_input`
+            )"},
+        };
+
+        auto querySession = kikimr.GetQueryClient().GetSession().GetValueSync().GetSession();
+        for (const auto& [name, query] : queries) {
+            auto result = querySession.ExecuteQuery(query, NYdb::NQuery::TTxControl::NoTx(),
+                NYdb::NQuery::TExecuteQuerySettings().ExecMode(NQuery::EExecMode::Explain)).ExtractValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.IsSuccess(), !newRbo,
+                name << " on a " << (columnStore ? "column" : "row") << " table must "
+                     << (newRbo ? "fail with New RBO" : "succeed with the old optimizer")
+                     << ": " << result.GetIssues().ToString());
+            return;
+        }
+    }
+
+    Y_UNIT_TEST_TWIN(WindowFunctionsUnsupportedByNewRbo, ColumnStore) {
+        RunWindowFunctionsTest(/*newRbo=*/false, ColumnStore);
+        //RunWindowFunctionsTest(/*newRbo=*/true, ColumnStore);
+    }
+
     std::set<ui32> MakePerf_YqlSingleQuerySkipList(const EBenchType type, const ui32 queryId) {
         std::set<ui32> skipList;
         for (ui32 qId = 1, e = BenchmarkQueryCount[type]; qId <= e; ++qId) {
