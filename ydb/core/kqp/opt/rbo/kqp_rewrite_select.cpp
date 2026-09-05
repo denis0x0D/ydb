@@ -1012,6 +1012,205 @@ TExprNode::TPtr RewriteSublinks(TExprNode::TPtr& node, TExprContext& ctx, const 
     return node;
 }
 
+struct TWindowSelect {
+    TExprNode::TPtr Projection;
+    TExprNode::TPtr Aggregates;
+    TExprNode::TPtr Windows;
+    TExprNode::TPtr Sort;
+    THashMap<const TExprNode*, TString> AggregateColumns;
+    THashMap<const TExprNode*, TString> WindowColumns;
+    TVector<std::pair<TExprNode::TPtr, TExprNode::TPtr>> Calls;
+    TVector<std::pair<TInfoUnit, TExprNode::TPtr>> Groups;
+    TVector<TInfoUnit> GroupingColumns;
+};
+
+TString MakeWindowColumn(ui64& counter, TStringBuf kind) {
+    return TStringBuilder() << "_rbo_window_" << kind << "_" << counter++ << "";
+}
+
+TExprNode::TPtr WindowMember(TExprNode::TPtr row, const TString& column, TExprContext& ctx) {
+    return ctx.NewCallable(row->Pos(), "Member", {row, ctx.NewAtom(row->Pos(), column)});
+}
+
+TExprNode::TPtr RewriteWindowExpression(const TExprNode::TPtr& node, const TExprNode::TPtr& oldRow,
+    const TExprNode::TPtr& row, const TWindowSelect& windows, TExprContext& ctx, bool replaceWindows = true) {
+    if (node == oldRow) {
+        return row;
+    }
+    if (const auto found = windows.AggregateColumns.find(node.Get()); found != windows.AggregateColumns.end()) {
+        return WindowMember(row, found->second, ctx);
+    }
+    if (replaceWindows) {
+        if (const auto found = windows.WindowColumns.find(node.Get()); found != windows.WindowColumns.end()) {
+            return WindowMember(row, found->second, ctx);
+        }
+    }
+    if (node->IsCallable("YqlGrouping")) {
+        TExprNode::TPtr result;
+        for (const auto& group : node->Children()) {
+            const auto index = FromString<ui32>(group->Child(2)->Content());
+            Y_ENSURE(index < windows.GroupingColumns.size(), "Invalid GROUPING reference in window query");
+            auto bit = WindowMember(row, windows.GroupingColumns[index].GetFullName(), ctx);
+            result = result ? ctx.NewCallable(node->Pos(), "+", {
+                ctx.NewCallable(node->Pos(), "*", {result, ctx.NewCallable(node->Pos(), "Uint64", {ctx.NewAtom(node->Pos(), "2")})}), bit}) : bit;
+        }
+        return result;
+    }
+    if (node->IsCallable("YqlGroupRef")) {
+        return WindowMember(row, GetColumnNameFromGroupRef(node, windows.Groups), ctx);
+    }
+    if (node->IsCallable("YqlSelect")) {
+        return node;
+    }
+    auto children = node->ChildrenList();
+    bool changed = false;
+    for (auto& child : children) {
+        auto rewritten = RewriteWindowExpression(child, oldRow, row, windows, ctx, replaceWindows);
+        changed |= rewritten != child;
+        child = std::move(rewritten);
+    }
+    return changed ? ctx.ChangeChildren(*node, std::move(children)) : node;
+}
+
+TWindowSelect PrepareWindowSelect(TExprNode::TPtr projection, TExprNode::TPtr windows, TExprNode::TPtr sort,
+    const TVector<std::pair<TInfoUnit, TExprNode::TPtr>>& groups, ui64& counter, TExprContext& ctx) {
+    TWindowSelect result;
+    result.Projection = projection;
+    result.Windows = windows;
+    result.Sort = sort;
+    result.Groups = groups;
+    const auto pos = projection->Pos();
+    for (size_t index = 0; index < groups.size(); ++index) {
+        result.GroupingColumns.emplace_back(MakeWindowColumn(counter, "grouping"));
+    }
+    TExprNode::TListType aggregates;
+    auto collect = [&](const TExprNode::TPtr& lambda) {
+        Y_ENSURE(lambda->IsLambda() && lambda->Head().ChildrenSize() == 1, "Expected window row lambda");
+        for (const auto& aggregate : CollectAggregations(lambda->TailPtr())) {
+            if (!result.AggregateColumns.contains(aggregate.Get())) {
+                const auto name = MakeWindowColumn(counter, "aggregate");
+                result.AggregateColumns[aggregate.Get()] = name;
+                aggregates.push_back(ctx.NewCallable(pos, "YqlResultItem", {
+                    ctx.NewAtom(pos, name), ctx.NewCallable(pos, "Void", {}),
+                    ctx.NewLambda(pos, lambda->HeadPtr(), TExprNode::TPtr(aggregate))}));
+            }
+        }
+        VisitExpr(lambda->TailPtr(), [&](const TExprNode::TPtr& call) {
+            if (call->IsCallable({"YqlWin", "YqlAggWin"})) {
+                if (!result.WindowColumns.contains(call.Get())) {
+                    result.WindowColumns[call.Get()] = MakeWindowColumn(counter, "result");
+                    result.Calls.emplace_back(call, lambda->Head().HeadPtr());
+                }
+            }
+            return !call->IsCallable("YqlSelect");
+        });
+    };
+    for (const auto& item : projection->Tail().Children()) {
+        collect(item->TailPtr());
+    }
+    for (const auto& definition : windows->Tail().Children()) {
+        for (const auto& key : definition->Child(2)->Children()) {
+            collect(key->TailPtr());
+        }
+        for (const auto& key : definition->Child(3)->Children()) {
+            collect(key->ChildPtr(1));
+        }
+    }
+    if (sort) {
+        for (const auto& key : sort->Tail().Children()) {
+            collect(key->ChildPtr(1));
+        }
+    }
+    // A grouped query still needs an aggregate operator when it contains only ranking.
+    if (aggregates.empty() && !groups.empty()) {
+        const auto row = ctx.NewArgument(pos, "group_row");
+        aggregates.push_back(ctx.NewCallable(pos, "YqlResultItem", {
+            ctx.NewAtom(pos, MakeWindowColumn(counter, "count")), ctx.NewCallable(pos, "Void", {}),
+            ctx.NewLambda(pos, ctx.NewArguments(pos, {row}),
+                ctx.NewCallable(pos, "YqlAgg", {ctx.NewAtom(pos, "count"), ctx.NewList(pos, {})}))}));
+    }
+    result.Aggregates = ctx.NewList(pos, {projection->HeadPtr(), ctx.NewList(pos, std::move(aggregates))});
+    return result;
+}
+
+TExprNode::TPtr AddWindowGroupingColumns(TExprNode::TPtr input, const TWindowSelect& windows,
+    const THashSet<ui32>& present, TExprContext& ctx) {
+    TVector<TExprNode::TPtr> elements;
+    for (ui32 index = 0; index < windows.GroupingColumns.size(); ++index) {
+        const auto row = ctx.NewArgument(input->Pos(), "group_row");
+        const auto flag = ctx.NewCallable(input->Pos(), "Uint64", {ctx.NewAtom(input->Pos(), present.contains(index) ? "0" : "1")});
+        elements.push_back(Build<TKqpOpMapElementLambda>(ctx, input->Pos())
+            .Input(input).Variable().Value(windows.GroupingColumns[index].GetFullName()).Build()
+            .Lambda(ctx.NewLambda(input->Pos(), ctx.NewArguments(input->Pos(), {row}), TExprNode::TPtr(flag)))
+            .ForceOptional().Value("False").Build().Done().Ptr());
+    }
+    if (elements.empty()) {
+        return input;
+    }
+    return Build<TKqpOpMap>(ctx, input->Pos()).Input(input).MapElements().Add(elements).Build()
+        .Project().Value("false").Build().Done().Ptr();
+}
+
+TExprNode::TPtr RewriteWindowLambda(const TExprNode::TPtr& lambda, const TWindowSelect& windows, TExprContext& ctx) {
+    const auto row = ctx.NewArgument(lambda->Pos(), "window_row");
+    return ctx.NewLambda(lambda->Pos(), ctx.NewArguments(lambda->Pos(), {row}),
+        RewriteWindowExpression(lambda->TailPtr(), lambda->Head().HeadPtr(), row, windows, ctx));
+}
+
+TExprNode::TPtr AppendWindowOperators(TExprNode::TPtr input, TWindowSelect& windows, ui64& counter, TExprContext& ctx) {
+    const auto pos = input->Pos();
+    for (const auto& definition : windows.Windows->Tail().Children()) {
+        const auto row = ctx.NewArgument(pos, "window_row");
+        TExprNode::TListType functions;
+        for (const auto& [call, argument] : windows.Calls) {
+            if (call->Child(1)->Content() == definition->Head().Content()) {
+                functions.push_back(ctx.NewList(pos, {
+                    ctx.NewAtom(pos, windows.WindowColumns.at(call.Get())),
+                    RewriteWindowExpression(call, argument, row, windows, ctx, false)}));
+            }
+        }
+        if (functions.empty()) {
+            continue;
+        }
+        TVector<TExprNode::TPtr> elements;
+        TExprNode::TListType keys;
+        TExprNode::TListType sort;
+        auto materialize = [&](const TExprNode::TPtr& lambda, TStringBuf kind) {
+            const auto name = MakeWindowColumn(counter, kind);
+            elements.push_back(Build<TKqpOpMapElementLambda>(ctx, pos).Input(input)
+                .Variable().Value(name).Build().Lambda(RewriteWindowLambda(lambda, windows, ctx))
+                .ForceOptional().Value("False").Build().Done().Ptr());
+            return ctx.NewAtom(pos, name);
+        };
+        for (const auto& key : definition->Child(2)->Children()) {
+            keys.push_back(materialize(key->TailPtr(), "partition"));
+        }
+        for (const auto& key : definition->Child(3)->Children()) {
+            sort.push_back(ctx.NewList(pos, {materialize(key->ChildPtr(1), "order"), key->ChildPtr(2), key->ChildPtr(3)}));
+        }
+        if (!elements.empty()) {
+            input = Build<TKqpOpMap>(ctx, pos).Input(input).MapElements().Add(elements).Build()
+                .Project().Value("false").Build().Done().Ptr();
+        }
+        input = ctx.NewCallable(pos, "KqpOpWindow", {
+            input, ctx.NewList(pos, std::move(keys)), ctx.NewList(pos, std::move(sort)), definition->TailPtr(),
+            ctx.NewLambda(pos, ctx.NewArguments(pos, {row}), ctx.NewCallable(pos, "AsStruct", std::move(functions)))});
+    }
+    auto projection = windows.Projection->Tail().ChildrenList();
+    for (auto& item : projection) {
+        item = ctx.ChangeChild(*item, item->ChildrenSize() - 1, RewriteWindowLambda(item->TailPtr(), windows, ctx));
+    }
+    windows.Projection = ctx.ChangeChild(*windows.Projection, 1, ctx.NewList(pos, std::move(projection)));
+    if (windows.Sort) {
+        auto sort = windows.Sort->Tail().ChildrenList();
+        for (auto& item : sort) {
+            item = ctx.ChangeChild(*item, 1, RewriteWindowLambda(item->ChildPtr(1), windows, ctx));
+        }
+        windows.Sort = ctx.ChangeChild(*windows.Sort, 1, ctx.NewList(pos, std::move(sort)));
+    }
+    return input;
+}
+
 } // anonymous namespace
 
 TExprNode::TPtr RewriteSelect(const TExprNode::TPtr& input, TExprContext& ctx, const TTypeAnnotationContext& typeCtx, const TKqpOptimizeContext& kqpCtx,
@@ -1294,7 +1493,9 @@ TExprNode::TPtr RewriteSelect(const TExprNode::TPtr& input, TExprContext& ctx, c
         TVector<TVector<TVector<TString>>> groupBySets;
 
         // Some additional information needed to build an aggregation pipeline.
-        const bool distinctAll = !!GetSetting(setItem->Tail(), "distinct_all");
+        const auto windowSetting = GetSetting(setItem->Tail(), "window");
+        const bool windowDistinct = windowSetting && !!GetSetting(setItem->Tail(), "distinct_all");
+        const bool distinctAll = !windowSetting && !!GetSetting(setItem->Tail(), "distinct_all");
 
         // Group sets layout:
         //            group_sets
@@ -1377,6 +1578,13 @@ TExprNode::TPtr RewriteSelect(const TExprNode::TPtr& input, TExprContext& ctx, c
 
         auto result = GetSetting(setItem->Tail(), "result");
         Y_ENSURE(result || values, "New RBO expects either 'values' or 'result' at a set item");
+
+        std::optional<TWindowSelect> windows;
+        if (windowSetting) {
+            windows = PrepareWindowSelect(result, windowSetting, GetSetting(setItem->Tail(), "sort"),
+                                                  groupByKeysExpressionsMap, uniqueAggColumnId, ctx);
+            result = windows->Aggregates;
+        }
         
         // Process all aggregations in result item.
         ProcessAggregationsInResultItems(result, aggregationUniqueColNames, expressionsMapPreAgg, groupByKeysExpressionsMap, aggregationTraits,
@@ -1441,6 +1649,11 @@ TExprNode::TPtr RewriteSelect(const TExprNode::TPtr& input, TExprContext& ctx, c
                     std::move(aggregationTraitsForSet),
                     std::move(distinctAggregationTraitsPostAggregateForSet), havingFilterLambda, std::move(expressionsMapPostAggForSet), ctx, node->Pos());
 
+                if (windows) {
+                    aggregationForGroupSetResultExpr = AddWindowGroupingColumns(
+                        aggregationForGroupSetResultExpr, *windows, indexInGroupBySet, ctx);
+                }
+
                 if (rollupResultExpr) {
                     // clang-format off
                     rollupResultExpr = Build<TKqpOpSetOp>(ctx, node->Pos())
@@ -1461,6 +1674,18 @@ TExprNode::TPtr RewriteSelect(const TExprNode::TPtr& input, TExprContext& ctx, c
             resultExpr = BuildAggregationPipeline(resultExpr, std::move(expressionsMapPreAgg), std::move(groupByKeysExpressionsMap),
                                                   std::move(aggregationTraits), std::move(distinctAggregationTraitsPostAggregate), havingFilterLambda,
                                                   std::move(expressionsMapPostAgg), ctx, node->Pos());
+            if (windows) {
+                THashSet<ui32> present;
+                for (ui32 index = 0; index < windows->Groups.size(); ++index) {
+                    present.insert(index);
+                }
+                resultExpr = AddWindowGroupingColumns(resultExpr, *windows, present, ctx);
+            }
+        }
+
+        if (windows) {
+            resultExpr = AppendWindowOperators(resultExpr, *windows, uniqueAggColumnId, ctx);
+            result = windows->Projection;
         }
 
         finalColumnOrder.clear();
@@ -1576,7 +1801,7 @@ TExprNode::TPtr RewriteSelect(const TExprNode::TPtr& input, TExprContext& ctx, c
         }
 
         // Sort clause may contain extra columns that we need to keep in the projection in order for sort to work
-        auto sort = GetSetting(setItem->Tail(), "sort");
+        auto sort = windows ? windows->Sort : GetSetting(setItem->Tail(), "sort");
         if (sort) {
             auto sortDependencies = GetSortDependencies(sort, groupByKeysExpressionsMap);
             for (const auto& iu : sortDependencies) {
@@ -1603,6 +1828,14 @@ TExprNode::TPtr RewriteSelect(const TExprNode::TPtr& input, TExprContext& ctx, c
             .Build()
         .Done().Ptr();
         // clang-format on
+
+        if (windowDistinct) {
+            TVector<TInfoUnit> distinctKeys;
+            for (const auto& column : finalProjection) {
+                distinctKeys.emplace_back(column);
+            }
+            setItemPtr = BuildAggregate(setItemPtr, {}, distinctKeys, true, ctx, node->Pos());
+        }
 
         if (sort) {
             setItemPtr = BuildSort(setItemPtr, sort, groupByKeysExpressionsMap, ctx);

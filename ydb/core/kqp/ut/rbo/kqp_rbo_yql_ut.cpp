@@ -5349,9 +5349,10 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
         }
     }
 
-    void RunWindowFunctionsTest(const bool newRbo, const bool columnStore) {
+    TVector<TString> RunWindowFunctionsTest(const bool newRbo, const bool columnStore, const bool populate = true) {
         NKikimrConfig::TAppConfig appConfig;
         appConfig.MutableTableServiceConfig()->SetEnableNewRBO(newRbo);
+        appConfig.MutableTableServiceConfig()->SetEnableNewRBOPhysicalStagePeephole(true);
         appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
         appConfig.MutableTableServiceConfig()->SetAllowOlapDataQuery(true);
         appConfig.MutableTableServiceConfig()->SetDefaultLangVer(NYql::GetMaxLangVersion());
@@ -5367,9 +5368,29 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                 value Int64,
                 PRIMARY KEY (id)
             )
-        )" << (columnStore ? " WITH (Store = Column);" : ";");
+        )" << (columnStore ? " WITH (Store = Column, AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 4);" : " WITH (UNIFORM_PARTITIONS = 4);");
         auto schemeResult = tableSession.ExecuteSchemeQuery(schema).GetValueSync();
         UNIT_ASSERT_C(schemeResult.IsSuccess(), schemeResult.GetIssues().ToString());
+
+        if (populate) {
+            NYdb::TValueBuilder rows;
+            rows.BeginList();
+            const TVector<std::tuple<i64, std::optional<i64>, std::optional<i64>, std::optional<i64>>> data = {
+                {1, 1, 1, 10}, {2, 1, 1, 20}, {3, 1, 2, 30}, {4, 1, 3, std::nullopt},
+                {5, 2, 1, 5}, {6, 2, 2, 15}, {7, std::nullopt, 1, 7},
+                {8, std::nullopt, 2, std::nullopt}, {9, 2, 2, -5}, {10, 2, std::nullopt, 10}};
+            for (const auto& [id, group, order, value] : data) {
+                rows.AddListItem().BeginStruct()
+                    .AddMember("id").Int64((id - 5) * (i64{1} << 60))
+                    .AddMember("group_id").OptionalInt64(group)
+                    .AddMember("order_id").OptionalInt64(order)
+                    .AddMember("value").OptionalInt64(value)
+                    .EndStruct();
+            }
+            rows.EndList();
+            const auto upsert = kikimr.GetTableClient().BulkUpsert("/Root/window_input", rows.Build()).GetValueSync();
+            UNIT_ASSERT_C(upsert.IsSuccess(), upsert.GetIssues().ToString());
+        }
 
         const TVector<std::pair<TString, TString>> queries = {
             {"partitioned rank", R"(
@@ -5378,7 +5399,8 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                 SELECT group_id, order_id, Sum(value) AS sales,
                     Rank() OVER (PARTITION BY group_id ORDER BY Sum(value) DESC) AS rank_in_group
                 FROM `/Root/window_input`
-                GROUP BY group_id, order_id;
+                GROUP BY group_id, order_id
+                ORDER BY group_id, order_id;
             )"},
             {"partitioned sum", R"(
                 PRAGMA YqlSelect = "force";
@@ -5386,7 +5408,8 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                 SELECT group_id, order_id, Sum(value) AS sales,
                     Sum(Sum(value)) OVER (PARTITION BY group_id) AS total_sales
                 FROM `/Root/window_input`
-                GROUP BY group_id, order_id;
+                GROUP BY group_id, order_id
+                ORDER BY group_id, order_id;
             )"},
             {"partitioned average", R"(
                 PRAGMA YqlSelect = "force";
@@ -5394,7 +5417,8 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                 SELECT group_id, order_id, Sum(value) AS sales,
                     Avg(Sum(value)) OVER (PARTITION BY group_id) AS average_sales
                 FROM `/Root/window_input`
-                GROUP BY group_id, order_id;
+                GROUP BY group_id, order_id
+                ORDER BY group_id, order_id;
             )"},
            {"global rank", R"(
                 PRAGMA YqlSelect = "force";
@@ -5402,7 +5426,8 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                 SELECT order_id, Sum(value) AS sales,
                     Rank() OVER (ORDER BY Sum(value) ASC) AS global_rank
                 FROM `/Root/window_input`
-                GROUP BY order_id;
+                GROUP BY order_id
+                ORDER BY order_id;
             )"},
             {"rank with rollup partition expression", R"(
                 PRAGMA YqlSelect = "force";
@@ -5415,7 +5440,8 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                         ORDER BY Sum(value) ASC, order_id DESC
                     ) AS rank_within_parent
                 FROM `/Root/window_input`
-                GROUP BY ROLLUP(group_id, order_id);
+                GROUP BY ROLLUP(group_id, order_id)
+                ORDER BY group_id, order_id, sales, rank_within_parent;
             )"},
             {"cumulative sum", R"(
                 PRAGMA YqlSelect = "force";
@@ -5427,7 +5453,8 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                     ) AS cumulative_sales
                 FROM `/Root/window_input`
-                GROUP BY group_id, order_id;
+                GROUP BY group_id, order_id
+                ORDER BY group_id, order_id;
             )"},
             {"cumulative maximum of a value", R"(
                 PRAGMA YqlSelect = "force";
@@ -5435,28 +5462,74 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                 SELECT group_id, order_id, value,
                     Max(value) OVER (
                         PARTITION BY group_id
-                        ORDER BY order_id
+                        ORDER BY order_id, id
                         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                     ) AS cumulative_max
                 FROM `/Root/window_input`
+                ORDER BY group_id, order_id, id;
+            )"},
+            {"aggregate used only by window ordering", R"(
+                PRAGMA YqlSelect = "force";
+                SELECT group_id, order_id,
+                    Rank() OVER (PARTITION BY group_id ORDER BY Sum(value) DESC) AS position
+                FROM `/Root/window_input`
+                GROUP BY group_id, order_id
+                HAVING Count(*) > 0
+                ORDER BY group_id, order_id;
+            )"},
+            {"multiple windows and projection expression", R"(
+                PRAGMA YqlSelect = "force";
+                SELECT id,
+                    Sum(value) OVER (PARTITION BY group_id) + 1 AS total,
+                    Rank() OVER (ORDER BY value DESC) AS global,
+                    Max(value) OVER (PARTITION BY group_id ORDER BY order_id, id ROWS UNBOUNDED PRECEDING) AS running
+                FROM `/Root/window_input` ORDER BY id;
+            )"},
+            {"named window and bounded rows", R"(
+                PRAGMA YqlSelect = "force";
+                SELECT id, Sum(value) OVER w AS sum, Avg(value) OVER w AS avg
+                FROM `/Root/window_input`
+                WINDOW w AS (PARTITION BY group_id ORDER BY order_id, id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING)
+                ORDER BY id;
+            )"},
+            {"distinct after window", R"(
+                PRAGMA YqlSelect = "force";
+                SELECT DISTINCT group_id, Sum(value) OVER (PARTITION BY group_id) AS total
+                FROM `/Root/window_input` ORDER BY group_id;
             )"},
         };
 
         auto querySession = kikimr.GetQueryClient().GetSession().GetValueSync().GetSession();
+        TVector<TString> results;
         for (const auto& [name, query] : queries) {
             auto result = querySession.ExecuteQuery(query, NYdb::NQuery::TTxControl::NoTx(),
-                NYdb::NQuery::TExecuteQuerySettings().ExecMode(NQuery::EExecMode::Explain)).ExtractValueSync();
-            UNIT_ASSERT_VALUES_EQUAL_C(result.IsSuccess(), !newRbo,
-                name << " on a " << (columnStore ? "column" : "row") << " table must "
-                     << (newRbo ? "fail with New RBO" : "succeed with the old optimizer")
-                     << ": " << result.GetIssues().ToString());
-            return;
+                NYdb::NQuery::TExecuteQuerySettings().CollectQueryStats(NQuery::EStatsMode::Full)).ExtractValueSync();
+            UNIT_ASSERT_C(result.IsSuccess(), name << ", new RBO: " << newRbo << ": " << result.GetIssues().ToString());
+            results.push_back(FormatResultSetYson(result.GetResultSet(0)));
+            if (newRbo) {
+                const TString plan = *result.GetStats()->GetPlan();
+                UNIT_ASSERT_C(plan.Contains("Window"), name << ": " << plan);
+            }
+        }
+        if (newRbo) {
+            const auto [success, failed] = GetNewRBOCompileCounters(kikimr);
+            UNIT_ASSERT_VALUES_EQUAL(failed, 0);
+            UNIT_ASSERT_C(success >= queries.size(), success);
+        }
+        return results;
+    }
+
+    Y_UNIT_TEST_TWIN(WindowFunctions, ColumnStore) {
+        const auto expected = RunWindowFunctionsTest(false, ColumnStore);
+        const auto actual = RunWindowFunctionsTest(true, ColumnStore);
+        UNIT_ASSERT_VALUES_EQUAL(actual.size(), expected.size());
+        for (size_t index = 0; index < expected.size(); ++index) {
+            UNIT_ASSERT_VALUES_EQUAL_C(actual[index], expected[index], "Window case " << index);
         }
     }
 
-    Y_UNIT_TEST_TWIN(WindowFunctionsUnsupportedByNewRbo, ColumnStore) {
-        RunWindowFunctionsTest(/*newRbo=*/false, ColumnStore);
-        //RunWindowFunctionsTest(/*newRbo=*/true, ColumnStore);
+    Y_UNIT_TEST_TWIN(WindowFunctionsEmpty, ColumnStore) {
+        UNIT_ASSERT_VALUES_EQUAL(RunWindowFunctionsTest(true, ColumnStore, false), RunWindowFunctionsTest(false, ColumnStore, false));
     }
 
     std::set<ui32> MakePerf_YqlSingleQuerySkipList(const EBenchType type, const ui32 queryId) {

@@ -1,6 +1,7 @@
 #include "kqp_rbo_physical_op_builder.h"
 #include "kqp_rbo_physical_convertion_utils.h"
 #include "kqp_rbo_physical_sort_builder.h"
+#include "kqp_rbo_physical_window.h"
 #include "kqp_rbo_physical_aggregation_builder.h"
 #include "kqp_rbo_physical_map_builder.h"
 #include "kqp_rbo_physical_union_all_builder.h"
@@ -198,6 +199,17 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
             stages[opStageId] = currentStageBody;
             stagePos[opStageId] = op->Pos;
             YQL_CLOG(TRACE, CoreDq) << "Converted Limit " << opStageId;
+        } else if (op->Kind == EOperator::Window) {
+            auto [argument, input] = graph.GenerateStageInput(stageInputCounter, op->Pos, ctx);
+            stageArgs[opStageId].push_back(argument);
+            currentStageBody = BuildPhysicalWindow(*CastOperator<TOpWindow>(op), input, rboCtx);
+            currentStageBody = NPhysicalConvertionUtils::ExtractMembers(
+                currentStageBody, ctx, NPhysicalConvertionUtils::GetLiveOutputIUs(*op));
+            if (!op->IsSingleConsumer()) {
+                currentStageBody = NPhysicalConvertionUtils::BuildMultiConsumerHandler(currentStageBody, op->GetNumOfConsumers(), ctx, op->Pos);
+            }
+            stages[opStageId] = currentStageBody;
+            stagePos[opStageId] = op->Pos;
         } else if (op->Kind == EOperator::Sort) {
             auto sort = CastOperator<TOpSort>(op);
             if (!currentStageBody) {

@@ -21,6 +21,10 @@ namespace {
 THashSet<TString> notAllowedDataTypeForSafeCast{"JsonDocument", "DyNumber"};
 
 bool IsSuitableToExtractExpr(const TExprNode::TPtr &input) {
+    // Window calls are evaluated over partitions, including calls without row arguments.
+    if (input->IsCallable({"YqlWin", "YqlAggWin"})) {
+        return false;
+    }
     if (auto maybeSafeCast = TExprBase(input).Maybe<TCoSafeCast>()) {
         auto maybeDataType = maybeSafeCast.Cast().Type().Maybe<TCoDataType>();
         if (!maybeDataType) {

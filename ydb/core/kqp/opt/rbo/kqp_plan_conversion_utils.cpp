@@ -308,6 +308,8 @@ TIntrusivePtr<IOperator> PlanConverter::ExprNodeToOperator(TExprNode::TPtr node)
         result = ConvertTKqpOpProject(node);
     } else if (NYql::NNodes::TKqpOpSetOp::Match(node.Get())) {
         result = ConvertTKqpOpSetOp(node);
+    } else if (TKqpOpWindow::Match(node.Get())) {
+        result = ConvertTKqpOpWindow(node);
     } else if (NYql::NNodes::TKqpOpSort::Match(node.Get())) {
         result = ConvertTKqpOpSort(node);
     } else if (NYql::NNodes::TKqpOpAggregate::Match(node.Get())) {
@@ -586,6 +588,22 @@ TIntrusivePtr<IOperator> PlanConverter::ConvertTKqpOpLimit(TExprNode::TPtr node)
 TIntrusivePtr<IOperator> PlanConverter::ConvertTKqpOpProject(TExprNode::TPtr node) {
     auto opProject = TKqpOpProject(node);
     return ExprNodeToOperator(opProject.Input().Ptr());
+}
+
+TIntrusivePtr<IOperator> PlanConverter::ConvertTKqpOpWindow(TExprNode::TPtr node) {
+    const auto window = TKqpOpWindow(node);
+    TVector<TInfoUnit> keys;
+    TVector<TSortElement> sort;
+    for (const auto& key : window.Keys()) {
+        keys.emplace_back(key.StringValue());
+    }
+    for (const auto& item : window.Sort().Ref().Children()) {
+        sort.emplace_back(TInfoUnit(TString(item->Child(0)->Content())),
+                             item->Child(1)->Content() == "asc", item->Child(2)->Content() == "first");
+    }
+    return MakeIntrusive<TOpWindow>(ExprNodeToOperator(window.Input().Ptr()), node->Pos(),
+        std::move(keys), std::move(sort), window.Frame().Ptr(),
+        TExpression(window.Functions().Ptr(), &Ctx));
 }
 
 TIntrusivePtr<IOperator> PlanConverter::ConvertTKqpOpSort(TExprNode::TPtr node) {

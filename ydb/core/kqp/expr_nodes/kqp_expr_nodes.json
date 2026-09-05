@@ -1043,6 +1043,18 @@
             "ListBase" : "TKqpOpAggregationTraits"
         },
         {
+            "Name": "TKqpOpWindow",
+            "Base": "TCallable",
+            "Match": {"Type": "Callable", "Name": "KqpOpWindow"},
+            "Children": [
+                {"Index": 0, "Name": "Input", "Type": "TExprBase"},
+                {"Index": 1, "Name": "Keys", "Type": "TCoAtomList"},
+                {"Index": 2, "Name": "Sort", "Type": "TExprList"},
+                {"Index": 3, "Name": "Frame", "Type": "TExprList"},
+                {"Index": 4, "Name": "Functions", "Type": "TCoLambda"}
+            ]
+        },
+        {
             "Name": "TKqpOpAggregate",
             "Base": "TCallable",
             "Match" : {"Type": "Callable", "Name": "KqpOpAggregate"},

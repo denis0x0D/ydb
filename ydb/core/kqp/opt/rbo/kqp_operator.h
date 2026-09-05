@@ -22,7 +22,7 @@ namespace NKqp {
 
 using namespace NYql;
 
-enum EOperator : ui32 { EmptySource, Source, Map, AddDependencies, Filter, Join, DependentJoin, Aggregate, Limit, Sort, UnionAll, TableLookup, IndexLookupJoin, CBOTree, Root };
+enum EOperator : ui32 { EmptySource, Source, Map, AddDependencies, Filter, Join, DependentJoin, Aggregate, Limit, Sort, Window, UnionAll, TableLookup, IndexLookupJoin, CBOTree, Root };
 
 // clang-format off
 #define PHASE_ENUM(X) \
@@ -579,6 +579,32 @@ struct TOpAggregationTraits {
     TInfoUnit ResultColName;
     bool Distinct;
     bool Unwrap;
+};
+
+class TOpWindow: public IUnaryOperator {
+public:
+    TOpWindow(TIntrusivePtr<IOperator> input, TPositionHandle pos,
+                  TVector<TInfoUnit> keys, TVector<TSortElement> sort,
+                  TExprNode::TPtr frame, TExpression functions);
+
+    TVector<TInfoUnit> GetUsedIUs(TPlanProps& props) override;
+    TVector<std::reference_wrapper<const TExpression>> GetExpressions() const override;
+    void PropagateLiveness(ILivenessContext& ctx) override;
+    bool PropagateNameConstraints() override;
+    void RenameUsedIUs(const THashMap<TInfoUnit, TInfoUnit, TInfoUnit::THashFunction>& renames, TExprContext& ctx) override;
+    void ComputeMetadata(TRBOContext& ctx, TPlanProps& props) override;
+    TString GetExplainName() const override { return "Window"; }
+    TString ToString(TExprContext& ctx) override;
+    NJson::TJsonValue ToJson(ui32 flags) override;
+
+    TVector<TInfoUnit> Keys;
+    TVector<TSortElement> Sort;
+    TExprNode::TPtr Frame;
+    TExpression Functions;
+    TVector<TInfoUnit> Results;
+
+protected:
+    void ComputeOutputIUs() override;
 };
 
 class TOpAggregate: public IUnaryOperator {

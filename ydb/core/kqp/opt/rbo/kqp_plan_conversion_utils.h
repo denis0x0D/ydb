@@ -28,6 +28,7 @@ class PlanConverter {
     TIntrusivePtr<IOperator> ConvertTKqpOpLimit(TExprNode::TPtr node);
     TIntrusivePtr<IOperator> ConvertTKqpOpProject(TExprNode::TPtr node);
     TIntrusivePtr<IOperator> ConvertTKqpOpSetOp(TExprNode::TPtr node);
+    TIntrusivePtr<IOperator> ConvertTKqpOpWindow(TExprNode::TPtr node);
     TIntrusivePtr<IOperator> ConvertTKqpOpSort(TExprNode::TPtr node);
     TIntrusivePtr<IOperator> ConvertTKqpOpAggregate(TExprNode::TPtr node);
     TIntrusivePtr<IOperator> ConvertTKqpInfuseDependents(TExprNode::TPtr node);

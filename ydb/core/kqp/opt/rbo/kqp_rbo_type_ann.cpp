@@ -525,6 +525,28 @@ TStatus ComputeTypes(TIntrusivePtr<TOpLimit> limit, TRBOContext& ctx) {
     return TStatus::Ok;
 }
 
+TStatus ComputeWindowTypes(TIntrusivePtr<TOpWindow> window, TRBOContext& ctx) {
+    const auto* row = window->GetInput()->Type->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
+    auto& lambda = window->Functions.Node;
+    if (!UpdateLambdaAllArgumentsTypes(lambda, {row}, ctx.ExprCtx)) {
+        return TStatus::Error;
+    }
+    ctx.TypeAnnTransformer.Rewind();
+    TStatus status;
+    do {
+        status = ctx.TypeAnnTransformer.Transform(lambda, lambda, ctx.ExprCtx);
+    } while (status == TStatus::Repeat);
+    if (status != TStatus::Ok) {
+        return status;
+    }
+    auto items = row->GetItems();
+    for (const auto* item : lambda->GetTypeAnn()->Cast<TStructExprType>()->GetItems()) {
+        items.push_back(item);
+    }
+    window->Type = ctx.ExprCtx.MakeType<TListExprType>(ctx.ExprCtx.MakeType<TStructExprType>(items));
+    return TStatus::Ok;
+}
+
 TStatus ComputeTypes(TIntrusivePtr<TOpSort> sort, TRBOContext& ctx) {
     Y_UNUSED(ctx);
     auto inputType = sort->GetInput()->Type;
@@ -667,6 +689,9 @@ TStatus ComputeTypes(TIntrusivePtr<IOperator> op, TRBOContext& ctx, TPlanProps& 
     }
     else if(MatchOperator<TOpLimit>(op)) {
         return ComputeTypes(CastOperator<TOpLimit>(op), ctx);
+    }
+    else if (MatchOperator<TOpWindow>(op)) {
+        return ComputeWindowTypes(CastOperator<TOpWindow>(op), ctx);
     }
     else if (MatchOperator<TOpSort>(op)) {
         return ComputeTypes(CastOperator<TOpSort>(op), ctx);

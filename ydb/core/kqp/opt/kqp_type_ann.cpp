@@ -3166,6 +3166,37 @@ TStatus AnnotateOpSortElement(const TExprNode::TPtr& input, TExprContext& ctx) {
     return TStatus::Ok;
 }
 
+TStatus AnnotateOpWindow(const TExprNode::TPtr& input, TExprContext& ctx) {
+    const auto* inputType = input->Head().GetTypeAnn();
+    if (!EnsureListType(input->Head(), ctx)) {
+        return TStatus::Error;
+    }
+    const auto* row = inputType->Cast<TListExprType>()->GetItemType();
+    if (!EnsureStructType(input->Pos(), *row, ctx)) {
+        return TStatus::Error;
+    }
+    auto& functions = input->ChildRef(TKqpOpWindow::idx_Functions);
+    if (!UpdateLambdaAllArgumentsTypes(functions, {row}, ctx)) {
+        return TStatus::Error;
+    }
+    if (!functions->GetTypeAnn()) {
+        return TStatus::Repeat;
+    }
+    if (!EnsureStructType(functions->Pos(), *functions->GetTypeAnn(), ctx)) {
+        return TStatus::Error;
+    }
+    auto items = row->Cast<TStructExprType>()->GetItems();
+    for (const auto* item : functions->GetTypeAnn()->Cast<TStructExprType>()->GetItems()) {
+        items.push_back(item);
+    }
+    const auto* output = ctx.MakeType<TStructExprType>(items);
+    if (!output->Validate(input->Pos(), ctx)) {
+        return TStatus::Error;
+    }
+    input->SetTypeAnn(ctx.MakeType<TListExprType>(output));
+    return TStatus::Ok;
+}
+
 TStatus AnnotateOpSort(const TExprNode::TPtr& input, TExprContext& ctx) {
     Y_UNUSED(ctx);
     const TTypeAnnotationNode* inputType = input->ChildPtr(TKqpOpSort::idx_Input)->GetTypeAnn();
@@ -3350,6 +3381,7 @@ public:
         AddHandler({TKqpOpSetOp::CallableName()}, Hndl(&AnnotateOpSetOp));
         AddHandler({TKqpOpLimit::CallableName()}, Hndl(&AnnotateOpLimit));
         AddHandler({TKqpOpSortElement::CallableName()}, Hndl(&AnnotateOpSortElement));
+        AddHandler({TKqpOpWindow::CallableName()}, Hndl(&AnnotateOpWindow));
         AddHandler({TKqpOpSort::CallableName()}, Hndl(&AnnotateOpSort));
         AddHandler({TKqpOpReplaceAlias::CallableName()}, Hndl(&AnnotateOpReplaceAlias));
         AddHandler({TKqpOpAggregate::CallableName()}, Hndl(&AnnotateOpAggregate));

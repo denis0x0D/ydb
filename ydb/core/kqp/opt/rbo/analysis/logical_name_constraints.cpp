@@ -365,6 +365,12 @@ bool TOpMap::PropagateNameConstraints() {
     return PropagateForbidden(GetInput(), childForbidden);
 }
 
+bool TOpWindow::PropagateNameConstraints() {
+    auto forbidden = GetForbidden(this);
+    forbidden.UnionWith(MakeInfoUnitSet(Results));
+    return PropagateForbidden(GetInput(), forbidden);
+}
+
 bool TOpAggregate::PropagateNameConstraints() {
     return false;
 }

@@ -4,6 +4,7 @@ SRCS(
     kqp_expression.cpp
     kqp_olap_expr_inspection.cpp
     kqp_operator.cpp
+    kqp_window.cpp
     kqp_plan_conversion_utils.cpp
     kqp_plan_to_json.cpp
     kqp_rbo_compute_statistics.cpp

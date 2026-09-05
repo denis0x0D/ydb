@@ -171,6 +171,19 @@ bool TAssignStagesRule::MatchAndApply(TIntrusivePtr<IOperator>& input, TRBOConte
             input->Props.StageId = prevStageId;
         }
         YQL_CLOG(TRACE, CoreDq) << "Assign stages map/filter";
+    } else if (input->Kind == EOperator::Window) {
+        Y_ENSURE(ctx.KqpCtx.Config->GetEnableNewRBOPhysicalStagePeephole(),
+                 "Window functions in new RBO require EnableNewRBOPhysicalStagePeephole");
+        const auto window = CastOperator<TOpWindow>(input);
+        const auto previous = *window->GetInput()->Props.StageId;
+        const auto stage = props.StageGraph.AddStage();
+        window->Props.StageId = stage;
+        const auto output = props.StageGraph.GetOutputIndex(previous);
+        if (window->Keys.empty()) {
+            props.StageGraph.Connect(previous, stage, MakeIntrusive<TUnionAllConnection>(output));
+        } else {
+            props.StageGraph.Connect(previous, stage, MakeIntrusive<TShuffleConnection>(window->Keys, output));
+        }
     } else if (input->Kind == EOperator::Sort) {
         auto sort = CastOperator<TOpSort>(input);
         const auto newStageId = props.StageGraph.AddStage();
