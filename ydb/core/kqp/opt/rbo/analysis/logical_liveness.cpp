@@ -356,6 +356,23 @@ void TOpAggregate::PropagateLiveness(ILivenessContext& ctx) {
     ctx.AddLiveInput(this, 0, inputLive);
 }
 
+// A window passes its input through, so everything live above it stays live, plus the
+// columns the window itself reads.
+void TOpWindow::PropagateLiveness(ILivenessContext& ctx) {
+    TInfoUnitSet inputLive = ctx.GetLiveOut(this);
+    for (const auto& func : WindowFuncs) {
+        inputLive.erase(func.ResultColName);
+    }
+    AddInfoUnits(inputLive, PartitionKeys);
+    for (const auto& sortElement : SortElements) {
+        AddInfoUnit(inputLive, sortElement.SortColumn);
+    }
+    for (const auto& func : WindowFuncs) {
+        AddInfoUnits(inputLive, func.Arguments);
+    }
+    ctx.AddLiveInput(this, 0, inputLive);
+}
+
 void TOpCBOTree::PropagateLiveness(ILivenessContext& ctx) {
     for (ui32 childIndex = 0; childIndex < Children.size(); ++childIndex) {
         ctx.AddLiveInput(this, childIndex, MakeInfoUnitSet(Children[childIndex]->GetOutputIUs()));
