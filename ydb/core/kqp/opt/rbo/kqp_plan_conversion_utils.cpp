@@ -312,6 +312,8 @@ TIntrusivePtr<IOperator> PlanConverter::ExprNodeToOperator(TExprNode::TPtr node)
         result = ConvertTKqpOpSort(node);
     } else if (NYql::NNodes::TKqpOpAggregate::Match(node.Get())) {
         result = ConvertTKqpOpAggregate(node);
+    } else if (NYql::NNodes::TKqpOpWindow::Match(node.Get())) {
+        result = ConvertTKqpOpWindow(node);
     } else if (NYql::NNodes::TKqpOpReplaceAlias::Match(node.Get())) {
         result = ConvertTKqpOpReplaceAlias(node);
     } else {
@@ -637,6 +639,57 @@ TIntrusivePtr<IOperator> PlanConverter::ConvertTKqpOpAggregate(TExprNode::TPtr n
 
     const bool distinctAll = opAggregate.DistinctAll() == "True" ? true : false;
     return MakeIntrusive<TOpAggregate>(input, opAggTraitsList, keyColumns, EOpPhase::Undefined, distinctAll, node->Pos());
+}
+
+TIntrusivePtr<IOperator> PlanConverter::ConvertTKqpOpWindow(TExprNode::TPtr node) {
+    const auto opWindow = TKqpOpWindow(node);
+    const auto input = ExprNodeToOperator(opWindow.Input().Ptr());
+    auto output = input;
+
+    TVector<TOpWindowFunc> windowFuncs;
+    for (const auto& func : opWindow.WindowFuncs()) {
+        TVector<TInfoUnit> arguments;
+        for (const auto& argument : func.Arguments()) {
+            arguments.push_back(TInfoUnit(TString(argument)));
+        }
+        windowFuncs.emplace_back(TString(func.Function()), WindowFuncKindFromString(TString(func.Kind())), arguments,
+                                 TInfoUnit(TString(func.ResultColName())));
+    }
+
+    TVector<TInfoUnit> partitionKeys;
+    for (const auto& key : opWindow.PartitionKeys()) {
+        partitionKeys.push_back(TInfoUnit(TString(key)));
+    }
+
+    // Sort keys that are not plain columns are hoisted into a map below the window, the same
+    // way ConvertTKqpOpSort does it, because the physical form can only reference columns.
+    TVector<TSortElement> sortElements;
+    TVector<TMapElement> mapElements;
+    for (const auto& el : opWindow.SortExpressions()) {
+        TInfoUnit column;
+        if (auto member = el.Lambda().Body().Maybe<TCoMember>()) {
+            column = TInfoUnit(member.Cast().Name().StringValue());
+        } else {
+            const TString newName = "_rbo_arg_" + std::to_string(PlanProps.InternalVarIdx++);
+            column = TInfoUnit(newName);
+            mapElements.emplace_back(column, TExpression(el.Lambda().Ptr(), &Ctx));
+        }
+        sortElements.push_back(TSortElement(column, el.Direction().StringValue() == "asc", el.NullsFirst().StringValue() == "first"));
+    }
+
+    if (mapElements.size()) {
+        output = MakeIntrusive<TOpMap>(input, input->Pos, mapElements);
+    }
+
+    const auto frameNode = opWindow.Frame();
+    TOpWindowFrame frame;
+    frame.Type = WindowFrameTypeFromString(TString(frameNode.FrameType()));
+    frame.BeginKind = WindowFrameBoundFromString(TString(frameNode.BeginKind()));
+    frame.BeginValue = FromString<ui64>(TString(frameNode.BeginValue()));
+    frame.EndKind = WindowFrameBoundFromString(TString(frameNode.EndKind()));
+    frame.EndValue = FromString<ui64>(TString(frameNode.EndValue()));
+
+    return MakeIntrusive<TOpWindow>(output, node->Pos(), windowFuncs, partitionKeys, sortElements, frame);
 }
 
 TIntrusivePtr<IOperator> PlanConverter::ConvertTKqpOpReplaceAlias(TExprNode::TPtr node) {

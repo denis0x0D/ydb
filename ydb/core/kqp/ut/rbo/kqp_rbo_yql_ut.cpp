@@ -5349,7 +5349,11 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
         }
     }
 
-    void RunWindowFunctionsTest(const bool newRbo, const bool columnStore) {
+    // Executes every window query under the requested optimizer. `results` receives one
+    // formatted result set per query, empty for a query the optimizer could not compile,
+    // and `issues` receives one entry per such failure.
+    void RunWindowFunctionsTest(const bool newRbo, const bool columnStore, TVector<TString>& names, TVector<TString>& results,
+                                TVector<TString>& issues) {
         NKikimrConfig::TAppConfig appConfig;
         appConfig.MutableTableServiceConfig()->SetEnableNewRBO(newRbo);
         appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
@@ -5372,6 +5376,62 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
         auto schemeResult = tableSession.ExecuteSchemeQuery(schema).GetValueSync();
         UNIT_ASSERT_C(schemeResult.IsSuccess(), schemeResult.GetIssues().ToString());
 
+        // The data is chosen so that every window edge case shows up in the results:
+        // partitions of different sizes, ties in the order key and in the ordering
+        // aggregate, NULL measures, a partition whose measures are all NULL, a NULL
+        // partition key, a NULL order key and a NULL secondary partition key.
+        // BulkUpsert is used because the New RBO cannot compile 'values' set items yet.
+        {
+            // a, b (partition), c (order), d (second partition), e (measure); nullopt is NULL.
+            using TCell = std::optional<i64>;
+            const TVector<std::tuple<i64, TCell, TCell, TCell, TCell>> rowData = {
+                { 1, 1,       10,       100,      5},           // ordinary partition
+                { 2, 1,       20,       100,      3},
+                { 3, 1,       20,       200,      7},           // tie on the order key c
+                { 4, 1,       30,       200,      std::nullopt}, // NULL measure inside a partition
+                { 5, 1,       40,       100,      5},           // tie on the measure e
+                { 6, 2,       10,       100,      -2},          // negative measure
+                { 7, 2,       20,       100,      0},           // zero measure
+                { 8, 2,       30,       200,      8},
+                { 9, 3,       10,       100,      std::nullopt}, // partition where every measure is NULL
+                {10, 3,       20,       100,      std::nullopt},
+                {11, 4,       10,       100,      42},          // single row partition
+                {12, std::nullopt, 10,  100,      1},           // NULL partition key ...
+                {13, std::nullopt, 20,  100,      2},           // ... both rows form one partition
+                {14, 5,       std::nullopt, 100,  3},           // NULL order key
+                {15, 5,       10,       100,      4},
+                {16, 5,       10,       200,      6},           // tie on c, split by the second key d
+                {17, 6,       10,       std::nullopt, 9},       // NULL secondary partition key
+                {18, 6,       20,       std::nullopt, 11},
+                {19, 6,       30,       100,      13},
+                {20, 7,       10,       100,      1000000000},  // large measure
+            };
+
+            NYdb::TValueBuilder rows;
+            rows.BeginList();
+            for (const auto& [a, b, c, d, e] : rowData) {
+                auto addCell = [](NYdb::TValueBuilder& builder, const TString& name, const TCell& cell) {
+                    builder.AddMember(name);
+                    if (cell) {
+                        builder.BeginOptional().Int64(*cell).EndOptional();
+                    } else {
+                        builder.EmptyOptional(NYdb::EPrimitiveType::Int64);
+                    }
+                };
+                rows.AddListItem().BeginStruct();
+                rows.AddMember("a").Int64(a);
+                addCell(rows, "b", b);
+                addCell(rows, "c", c);
+                addCell(rows, "d", d);
+                addCell(rows, "e", e);
+                rows.EndStruct();
+            }
+            rows.EndList();
+
+            auto seedResult = kikimr.GetTableClient().BulkUpsert("/Root/t1", rows.Build()).GetValueSync();
+            UNIT_ASSERT_C(seedResult.IsSuccess(), seedResult.GetIssues().ToString());
+        }
+
         const TVector<std::pair<TString, TString>> queries = {
             {"partitioned rank", R"(
                 PRAGMA YqlSelect = "force";
@@ -5379,7 +5439,8 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                 SELECT b, c, Sum(e) AS sales,
                     Rank() OVER (PARTITION BY b ORDER BY Sum(e) DESC) AS rank_in_group
                 FROM `/Root/t1`
-                GROUP BY b, c;
+                GROUP BY b, c
+                ORDER BY b, c;
             )"},
             {"partitioned sum", R"(
                 PRAGMA YqlSelect = "force";
@@ -5387,7 +5448,8 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                 SELECT b, c, Sum(e) AS sales,
                     Sum(Sum(e)) OVER (PARTITION BY b) AS total_sales
                 FROM `/Root/t1`
-                GROUP BY b, c;
+                GROUP BY b, c
+                ORDER BY b, c;
             )"},
             {"partitioned average", R"(
                 PRAGMA YqlSelect = "force";
@@ -5395,7 +5457,8 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                 SELECT b, c, Sum(e) AS sales,
                     Avg(Sum(e)) OVER (PARTITION BY b) AS average_sales
                 FROM `/Root/t1`
-                GROUP BY b, c;
+                GROUP BY b, c
+                ORDER BY b, c;
             )"},
            {"global rank", R"(
                 PRAGMA YqlSelect = "force";
@@ -5403,7 +5466,8 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                 SELECT c, Sum(e) AS sales,
                     Rank() OVER (ORDER BY Sum(e) ASC) AS global_rank
                 FROM `/Root/t1`
-                GROUP BY c;
+                GROUP BY c
+                ORDER BY c;
             )"},
             {"rank with rollup partition expression", R"(
                 PRAGMA YqlSelect = "force";
@@ -5416,7 +5480,8 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                         ORDER BY Sum(e) ASC, c DESC
                     ) AS rank_within_parent
                 FROM `/Root/t1`
-                GROUP BY ROLLUP(b, c);
+                GROUP BY ROLLUP(b, c)
+                ORDER BY b, c, sales;
             )"},
             {"cumulative sum", R"(
                 PRAGMA YqlSelect = "force";
@@ -5428,18 +5493,20 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                     ) AS cumulative_sales
                 FROM `/Root/t1`
-                GROUP BY b, c;
+                GROUP BY b, c
+                ORDER BY b, c;
             )"},
-            {"cumulative maximum of a e", R"(
+            {"cumulative maximum of a value", R"(
                 PRAGMA YqlSelect = "force";
 
-                SELECT b, c, e,
+                SELECT a, b, c, e,
                     Max(e) OVER (
                         PARTITION BY b
                         ORDER BY c
                         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                     ) AS cumulative_max
                 FROM `/Root/t1`
+                ORDER BY a;
             )"},
             // TPC-DS q47, q57, q89 partition by four or five columns.
             {"multi column partition", R"(
@@ -5448,7 +5515,8 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                 SELECT b, d, Sum(e) AS sales,
                     Avg(Sum(e)) OVER (PARTITION BY b, d) AS avg_sales
                 FROM `/Root/t1`
-                GROUP BY b, d, c;
+                GROUP BY b, d, c
+                ORDER BY b, d, sales;
             )"},
             // TPC-DS q47, q57 order by two columns inside the window.
             {"multi column order", R"(
@@ -5460,13 +5528,14 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                         ORDER BY d ASC, c DESC
                     ) AS rank_in_group
                 FROM `/Root/t1`
-                GROUP BY b, c, d;
+                GROUP BY b, c, d
+                ORDER BY b, c, d;
             )"},
             // TPC-DS q51 uses two functions over one identical window specification.
             {"two windows sharing a specification", R"(
                 PRAGMA YqlSelect = "force";
 
-                SELECT b, c, e,
+                SELECT a, b, c, e,
                     Max(e) OVER (
                         PARTITION BY b
                         ORDER BY c
@@ -5477,7 +5546,8 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                         ORDER BY c
                         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                     ) AS running_min
-                FROM `/Root/t1`;
+                FROM `/Root/t1`
+                ORDER BY a;
             )"},
             // TPC-DS q47, q57 mix two different window specifications in one select.
             {"two windows with different specifications", R"(
@@ -5487,7 +5557,8 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                     Avg(Sum(e)) OVER (PARTITION BY b) AS avg_sales,
                     Rank() OVER (PARTITION BY b ORDER BY c) AS rank_in_group
                 FROM `/Root/t1`
-                GROUP BY b, c;
+                GROUP BY b, c
+                ORDER BY b, c;
             )"},
             // TPC-DS q12, q20, q98 divide a plain aggregate by a window aggregate.
             {"window result inside an expression", R"(
@@ -5496,7 +5567,8 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                 SELECT b, c,
                     Sum(e) * 100 / Sum(Sum(e)) OVER (PARTITION BY b) AS revenue_ratio
                 FROM `/Root/t1`
-                GROUP BY b, c;
+                GROUP BY b, c
+                ORDER BY b, c;
             )"},
             // TPC-DS q51 applies a window over a subquery that itself contains windows.
             {"window over a windowed subquery", R"(
@@ -5517,24 +5589,104 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                         ) AS cumulative_sales
                     FROM `/Root/t1`
                     GROUP BY b, c
-                );
+                )
+                ORDER BY b, c;
+            )"},
+            // TPC-DS q44, q47, q49, q53, q57, q63, q67, q89 filter on the window result.
+            // The predicate must not be pushed below the window operator.
+            {"filter on a window result", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT * FROM (
+                    SELECT b, c, Sum(e) AS sales,
+                        Rank() OVER (PARTITION BY b ORDER BY Sum(e) DESC) AS rank_in_group
+                    FROM `/Root/t1`
+                    GROUP BY b, c
+                ) WHERE rank_in_group <= 10
+                ORDER BY b, c;
+            )"},
+            // TPC-DS q44, q53, q67 sort and limit above the window.
+            {"sort and limit above a window", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT b, c, sales, rank_in_group FROM (
+                    SELECT b, c, Sum(e) AS sales,
+                        Rank() OVER (PARTITION BY b ORDER BY Sum(e) DESC) AS rank_in_group
+                    FROM `/Root/t1`
+                    GROUP BY b, c
+                ) ORDER BY rank_in_group, sales, b, c LIMIT 100;
+            )"},
+            // TPC-DS q44, q47, q49, q51 join on a window result.
+            {"join on a window result", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT x.b AS b, x.rank_in_group AS asc_rank, y.rank_in_group AS desc_rank
+                FROM (
+                    SELECT b, c, Rank() OVER (PARTITION BY b ORDER BY c ASC) AS rank_in_group
+                    FROM `/Root/t1`
+                ) AS x
+                JOIN (
+                    SELECT b, c, Rank() OVER (PARTITION BY b ORDER BY c DESC) AS rank_in_group
+                    FROM `/Root/t1`
+                ) AS y
+                ON x.b == y.b AND x.rank_in_group == y.rank_in_group
+                ORDER BY b, asc_rank;
+            )"},
+            // TPC-DS q44, q49 use two windows that have an order but no partition.
+            {"two global windows in one select", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT a, b, c,
+                    Rank() OVER (ORDER BY c ASC) AS asc_rank,
+                    Rank() OVER (ORDER BY c DESC) AS desc_rank
+                FROM `/Root/t1`
+                ORDER BY a;
             )"},
         };
 
-        auto querySession = kikimr.GetQueryClient().GetSession().GetValueSync().GetSession();
+        // A fresh session per query: a fatal compilation error tears the session down, and a
+        // shared session would report every later query as "Session not found".
         for (const auto& [name, query] : queries) {
-            auto result = querySession.ExecuteQuery(query, NYdb::NQuery::TTxControl::NoTx(),
-                NYdb::NQuery::TExecuteQuerySettings().ExecMode(NQuery::EExecMode::Explain)).ExtractValueSync();
-            UNIT_ASSERT_VALUES_EQUAL_C(result.IsSuccess(), !newRbo,
-                name << " on a " << (columnStore ? "column" : "row") << " table must "
-                     << (newRbo ? "fail with New RBO" : "succeed with the old optimizer")
-                     << ": " << result.GetIssues().ToString());
+            auto querySession = kikimr.GetQueryClient().GetSession().GetValueSync().GetSession();
+            auto result = querySession.ExecuteQuery(query, NYdb::NQuery::TTxControl::BeginTx().CommitTx()).ExtractValueSync();
+            names.push_back(name);
+            if (result.IsSuccess()) {
+                results.push_back(TString{FormatResultSetYson(result.GetResultSet(0))});
+            } else {
+                results.push_back({});
+                issues.push_back(TStringBuilder() << name << ": " << result.GetIssues().ToString());
+            }
         }
     }
 
+    // Set this once the New RBO can compile window functions. Until then the test only
+    // records that every query is rejected; afterwards the New RBO must return exactly the
+    // same rows as the old optimizer for every query.
+    static constexpr bool NewRboSupportsWindowFunctions = false;
+
     Y_UNIT_TEST_TWIN(WindowFunctionsUnsupportedByNewRbo, ColumnStore) {
-        RunWindowFunctionsTest(/*newRbo=*/false, ColumnStore);
-        RunWindowFunctionsTest(/*newRbo=*/true, ColumnStore);
+        TVector<TString> oldNames, oldResults, oldIssues;
+        RunWindowFunctionsTest(/*newRbo=*/false, ColumnStore, oldNames, oldResults, oldIssues);
+        UNIT_ASSERT_VALUES_EQUAL_C(oldIssues.size(), 0, "The old optimizer must run every window query: "
+                                                            << JoinSeq("; ", oldIssues));
+
+        TVector<TString> newNames, newResults, newIssues;
+        RunWindowFunctionsTest(/*newRbo=*/true, ColumnStore, newNames, newResults, newIssues);
+
+        if (!NewRboSupportsWindowFunctions) {
+            UNIT_ASSERT_VALUES_EQUAL_C(newIssues.size(), oldNames.size(),
+                                       "Every window query is still expected to fail with the New RBO");
+            return;
+        }
+
+        UNIT_ASSERT_VALUES_EQUAL_C(newIssues.size(), 0, "The New RBO must run every window query: "
+                                                            << JoinSeq("; ", newIssues));
+        UNIT_ASSERT_VALUES_EQUAL(oldResults.size(), newResults.size());
+        for (ui32 i = 0; i < oldResults.size(); ++i) {
+            UNIT_ASSERT_VALUES_EQUAL_C(newResults[i], oldResults[i],
+                                       "New RBO returned different rows for '" << oldNames[i] << "' on a "
+                                                                               << (ColumnStore ? "column" : "row") << " table");
+        }
     }
 
     std::set<ui32> MakePerf_YqlSingleQuerySkipList(const EBenchType type, const ui32 queryId) {

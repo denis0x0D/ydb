@@ -3226,6 +3226,49 @@ TStatus AnnotateOpAggregate(const TExprNode::TPtr& input, TExprContext& ctx) {
     return TStatus::Ok;
 }
 
+// A window emits every input column plus one column per function. Aggregates over a frame
+// are optional because the frame may hold only NULLs; ranking functions produce Uint64.
+TStatus AnnotateOpWindow(const TExprNode::TPtr& input, TExprContext& ctx) {
+    const auto inputType = input->ChildPtr(TKqpOpWindow::idx_Input)->GetTypeAnn();
+    const auto* structType = inputType->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
+    auto opWindow = TKqpOpWindow(input);
+    auto pos = input->Pos();
+
+    TVector<const TItemExprType*> newItemTypes(structType->GetItems().begin(), structType->GetItems().end());
+
+    for (const auto& func : opWindow.WindowFuncs()) {
+        const auto function = TString(func.Function());
+        const auto resultColName = TString(func.ResultColName());
+        const TTypeAnnotationNode* resultType = nullptr;
+
+        if (TString(func.Kind()) == "Native") {
+            resultType = ctx.MakeType<TDataExprType>(EDataSlot::Uint64);
+        } else {
+            Y_ENSURE(func.Arguments().Size() == 1, "Window aggregate expects a single argument");
+            const auto* argType = structType->FindItemType(TString(func.Arguments().Item(0)));
+            Y_ENSURE(argType, "Unknown window function argument");
+
+            if (function == "count") {
+                resultType = ctx.MakeType<TDataExprType>(EDataSlot::Uint64);
+            } else if (function == "sum") {
+                Y_ENSURE(GetSumResultType(pos, *argType, resultType, ctx), "Unsupported type for sum over a window.");
+            } else if (function == "avg" || function == "variance_1_1") {
+                Y_ENSURE(GetAvgResultType(pos, *argType, resultType, ctx), "Unsupported type for avg over a window.");
+            } else {
+                resultType = argType;
+            }
+            if (!resultType->IsOptionalOrNull()) {
+                resultType = ctx.MakeType<TOptionalExprType>(resultType);
+            }
+        }
+
+        newItemTypes.push_back(ctx.MakeType<TItemExprType>(resultColName, resultType));
+    }
+
+    input->SetTypeAnn(ctx.MakeType<TListExprType>(ctx.MakeType<TStructExprType>(newItemTypes)));
+    return TStatus::Ok;
+}
+
 TStatus AnnotateOpRoot(const TExprNode::TPtr& input, TExprContext& ctx) {
     Y_UNUSED(ctx);
     const TTypeAnnotationNode* inputType = input->ChildPtr(TKqpOpRoot::idx_Input)->GetTypeAnn();
@@ -3353,6 +3396,7 @@ public:
         AddHandler({TKqpOpSort::CallableName()}, Hndl(&AnnotateOpSort));
         AddHandler({TKqpOpReplaceAlias::CallableName()}, Hndl(&AnnotateOpReplaceAlias));
         AddHandler({TKqpOpAggregate::CallableName()}, Hndl(&AnnotateOpAggregate));
+        AddHandler({TKqpOpWindow::CallableName()}, Hndl(&AnnotateOpWindow));
         AddHandler({TKqpOpRoot::CallableName()}, Hndl(&AnnotateOpRoot));
     }
 
