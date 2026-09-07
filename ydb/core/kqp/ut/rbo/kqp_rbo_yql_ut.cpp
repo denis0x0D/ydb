@@ -5549,6 +5549,53 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                 FROM `/Root/t1`
                 ORDER BY a;
             )"},
+            // Only a named window puts several functions into one TOpWindow: every inline
+            // OVER clause gets a fresh generated name, so identical inline specifications
+            // still build one operator each.
+            {"named window shared by several functions", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT a, b, c, e,
+                    Rank() OVER w AS rank_in_group,
+                    Max(e) OVER w AS running_max,
+                    Sum(e) OVER w AS running_sum
+                FROM `/Root/t1`
+                WINDOW w AS (
+                    PARTITION BY b
+                    ORDER BY c, a
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                )
+                ORDER BY a;
+            )"},
+            // The same, over aggregates, which is the shape TPC-DS uses.
+            {"named window shared by several functions over aggregates", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT b, c, Sum(e) AS sales,
+                    Rank() OVER w AS rank_in_group,
+                    Sum(Sum(e)) OVER w AS running_sales,
+                    Max(Sum(e)) OVER w AS running_max
+                FROM `/Root/t1`
+                GROUP BY b, c
+                WINDOW w AS (
+                    PARTITION BY b
+                    ORDER BY c
+                )
+                ORDER BY b, c;
+            )"},
+            // An unordered named window covers the whole partition, so both functions read
+            // the same UnboundedPreceding..UnboundedFollowing frame.
+            {"named window without an order", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT b, c, Sum(e) AS sales,
+                    Avg(Sum(e)) OVER w AS avg_sales,
+                    Sum(Sum(e)) OVER w AS total_sales
+                FROM `/Root/t1`
+                GROUP BY b, c
+                WINDOW w AS (PARTITION BY b)
+                ORDER BY b, c;
+            )"},
             // TPC-DS q47, q57 mix two different window specifications in one select.
             {"two windows with different specifications", R"(
                 PRAGMA YqlSelect = "force";
