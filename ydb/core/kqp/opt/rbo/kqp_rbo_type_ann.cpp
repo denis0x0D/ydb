@@ -600,9 +600,13 @@ TStatus ComputeTypes(TIntrusivePtr<TOpWindow> window, TRBOContext& ctx) {
             const auto* argType = structType->FindItemType(func.Arguments[0].GetFullName());
             Y_ENSURE(argType, "Unknown window function argument " << func.Arguments[0].GetFullName());
 
+            // Count is the one aggregate that never yields NULL: an empty frame counts zero.
             if (func.Function == "count") {
-                resultType = ctx.ExprCtx.MakeType<TDataExprType>(EDataSlot::Uint64);
-            } else if (func.Function == "sum") {
+                itemTypes.push_back(ctx.ExprCtx.MakeType<TItemExprType>(func.ResultColName.GetFullName(),
+                                                                        ctx.ExprCtx.MakeType<TDataExprType>(EDataSlot::Uint64)));
+                continue;
+            }
+            if (func.Function == "sum") {
                 Y_ENSURE(GetSumResultType(window->Pos, *argType, resultType, ctx.ExprCtx), "Unsupported type for sum over a window");
             } else if (func.Function == "avg" || func.Function == "variance_1_1") {
                 Y_ENSURE(GetAvgResultType(window->Pos, *argType, resultType, ctx.ExprCtx), "Unsupported type for avg over a window");

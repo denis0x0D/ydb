@@ -3312,9 +3312,12 @@ TStatus AnnotateOpWindow(const TExprNode::TPtr& input, TExprContext& ctx) {
             const auto* argType = structType->FindItemType(TString(func.Arguments().Item(0)));
             Y_ENSURE(argType, "Unknown window function argument");
 
+            // Count is the one aggregate that never yields NULL: an empty frame counts zero.
             if (function == "count") {
-                resultType = ctx.MakeType<TDataExprType>(EDataSlot::Uint64);
-            } else if (function == "sum") {
+                newItemTypes.push_back(ctx.MakeType<TItemExprType>(resultColName, ctx.MakeType<TDataExprType>(EDataSlot::Uint64)));
+                continue;
+            }
+            if (function == "sum") {
                 Y_ENSURE(GetSumResultType(pos, *argType, resultType, ctx), "Unsupported type for sum over a window.");
             } else if (function == "avg" || function == "variance_1_1") {
                 Y_ENSURE(GetAvgResultType(pos, *argType, resultType, ctx), "Unsupported type for avg over a window.");

@@ -5502,10 +5502,118 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                 SELECT a, b, c, e,
                     Max(e) OVER (
                         PARTITION BY b
-                        ORDER BY c
+                        ORDER BY c, a
                         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                     ) AS cumulative_max
                 FROM `/Root/t1`
+                ORDER BY a;
+            )"},
+            // Explicit finite frames. Every one of these orders by (c, a) so that the order is
+            // total inside a partition and the expected rows do not depend on how ties are
+            // broken. Max is included next to Sum because a running accumulator can undo a Sum
+            // by subtraction but can never drop a row from a Max.
+            {"sliding frame ending at the current row", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT a, b, c, e,
+                    Sum(e) OVER w AS sliding_sum,
+                    Max(e) OVER w AS sliding_max
+                FROM `/Root/t1`
+                WINDOW w AS (
+                    PARTITION BY b
+                    ORDER BY c, a
+                    ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
+                )
+                ORDER BY a;
+            )"},
+            {"centred frame", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT a, b, c, e,
+                    Sum(e) OVER w AS centred_sum,
+                    Max(e) OVER w AS centred_max
+                FROM `/Root/t1`
+                WINDOW w AS (
+                    PARTITION BY b
+                    ORDER BY c, a
+                    ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING
+                )
+                ORDER BY a;
+            )"},
+            {"forward looking frame", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT a, b, c, e,
+                    Sum(e) OVER w AS ahead_sum,
+                    Min(e) OVER w AS ahead_min
+                FROM `/Root/t1`
+                WINDOW w AS (
+                    PARTITION BY b
+                    ORDER BY c, a
+                    ROWS BETWEEN 1 FOLLOWING AND 3 FOLLOWING
+                )
+                ORDER BY a;
+            )"},
+            // The frame ends before the current row, so the accumulator trails one row behind.
+            {"trailing frame", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT a, b, c, e,
+                    Sum(e) OVER w AS trailing_sum,
+                    Max(e) OVER w AS trailing_max
+                FROM `/Root/t1`
+                WINDOW w AS (
+                    PARTITION BY b
+                    ORDER BY c, a
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                )
+                ORDER BY a;
+            )"},
+            {"suffix frame", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT a, b, c, e,
+                    Sum(e) OVER w AS suffix_sum,
+                    Max(e) OVER w AS suffix_max
+                FROM `/Root/t1`
+                WINDOW w AS (
+                    PARTITION BY b
+                    ORDER BY c, a
+                    ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
+                )
+                ORDER BY a;
+            )"},
+            // Written out explicitly, this is the same whole-partition frame an unordered
+            // window gets by default.
+            {"explicit whole partition frame", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT a, b, c, e,
+                    Sum(e) OVER w AS partition_sum,
+                    Max(e) OVER w AS partition_max
+                FROM `/Root/t1`
+                WINDOW w AS (
+                    PARTITION BY b
+                    ORDER BY c, a
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+                )
+                ORDER BY a;
+            )"},
+            // RANGE runs to the last peer row, so rows tied on c must all get the same value.
+            // Ordering by c alone leaves ties on purpose: b=1 has two rows with c=20 and b=5
+            // has two with c=10, plus a NULL c that forms its own peer group.
+            {"range frame with ties", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT a, b, c, e,
+                    Sum(e) OVER w AS range_sum,
+                    Count(e) OVER w AS range_count
+                FROM `/Root/t1`
+                WINDOW w AS (
+                    PARTITION BY b
+                    ORDER BY c
+                    RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                )
                 ORDER BY a;
             )"},
             // TPC-DS q47, q57, q89 partition by four or five columns.
@@ -5538,12 +5646,12 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                 SELECT a, b, c, e,
                     Max(e) OVER (
                         PARTITION BY b
-                        ORDER BY c
+                        ORDER BY c, a
                         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                     ) AS running_max,
                     Min(e) OVER (
                         PARTITION BY b
-                        ORDER BY c
+                        ORDER BY c, a
                         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                     ) AS running_min
                 FROM `/Root/t1`
@@ -5643,6 +5751,7 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
             // The predicate must not be pushed below the window operator.
             {"filter on a window result", R"(
                 PRAGMA YqlSelect = "force";
+                PRAGMA OrderedColumns;
 
                 SELECT * FROM (
                     SELECT b, c, Sum(e) AS sales,
@@ -5706,12 +5815,32 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
         }
     }
 
-    // Set this once the New RBO can compile window functions. Until then the test only
-    // records that every query is rejected; afterwards the New RBO must return exactly the
-    // same rows as the old optimizer for every query.
-    static constexpr bool NewRboSupportsWindowFunctions = false;
+    // Window queries the New RBO cannot lower yet. Everything outside this set has to run and
+    // return exactly the rows the old optimizer returns, so the set only ever shrinks; a query
+    // listed here that starts working fails the test too, which keeps the list honest.
+    const THashSet<TString> WindowQueriesNotLoweredYet{
+        // Aggregates over a whole partition need the frame to be folded and broadcast.
+        "partitioned sum",
+        "partitioned average",
+        "multi column partition",
+        "named window without an order",
+        "two windows with different specifications",
+        "window result inside an expression",
+        "explicit whole partition frame",
+        "suffix frame",
+        // Frames that do not run from the partition start to the current row need a row queue.
+        "sliding frame ending at the current row",
+        "centred frame",
+        "forward looking frame",
+        "trailing frame",
+        // A RANGE frame runs to the last peer row, which a per-row chain cannot express.
+        "range frame with ties",
+        "named window shared by several functions over aggregates",
+        // Grouping() is not supported yet.
+        "rank with rollup partition expression",
+    };
 
-    Y_UNIT_TEST_TWIN(WindowFunctionsUnsupportedByNewRbo, ColumnStore) {
+    Y_UNIT_TEST_TWIN(WindowFunctions, ColumnStore) {
         TVector<TString> oldNames, oldResults, oldIssues;
         RunWindowFunctionsTest(/*newRbo=*/false, ColumnStore, oldNames, oldResults, oldIssues);
         UNIT_ASSERT_VALUES_EQUAL_C(oldIssues.size(), 0, "The old optimizer must run every window query: "
@@ -5719,20 +5848,21 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
 
         TVector<TString> newNames, newResults, newIssues;
         RunWindowFunctionsTest(/*newRbo=*/true, ColumnStore, newNames, newResults, newIssues);
+        UNIT_ASSERT_VALUES_EQUAL(oldNames.size(), newNames.size());
 
-        if (!NewRboSupportsWindowFunctions) {
-            UNIT_ASSERT_VALUES_EQUAL_C(newIssues.size(), oldNames.size(),
-                                       "Every window query is still expected to fail with the New RBO");
-            return;
-        }
-
-        UNIT_ASSERT_VALUES_EQUAL_C(newIssues.size(), 0, "The New RBO must run every window query: "
+        const TString table = ColumnStore ? "column" : "row";
+        for (ui32 i = 0; i < oldNames.size(); ++i) {
+            const auto& name = oldNames[i];
+            const bool lowered = !newResults[i].empty();
+            if (WindowQueriesNotLoweredYet.contains(name)) {
+                UNIT_ASSERT_C(!lowered, "'" << name << "' now runs with the New RBO on a " << table
+                                            << " table, remove it from WindowQueriesNotLoweredYet");
+                continue;
+            }
+            UNIT_ASSERT_C(lowered, "The New RBO must run '" << name << "' on a " << table << " table: "
                                                             << JoinSeq("; ", newIssues));
-        UNIT_ASSERT_VALUES_EQUAL(oldResults.size(), newResults.size());
-        for (ui32 i = 0; i < oldResults.size(); ++i) {
             UNIT_ASSERT_VALUES_EQUAL_C(newResults[i], oldResults[i],
-                                       "New RBO returned different rows for '" << oldNames[i] << "' on a "
-                                                                               << (ColumnStore ? "column" : "row") << " table");
+                                       "New RBO returned different rows for '" << name << "' on a " << table << " table");
         }
     }
 
