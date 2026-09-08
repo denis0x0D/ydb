@@ -30,10 +30,13 @@ public:
 
     TExprNode::TPtr BuildPhysicalOp(TExprNode::TPtr input) override;
 
-    // A single pass works when every aggregate reads a frame that starts at the partition
-    // boundary and ends no later than the current row. Ranking functions never read the frame,
-    // so a window that only ranks always qualifies whatever the frame says.
-    static bool CanBuildStreamingWindow(const TOpWindow& window);
+    // Two frames are lowered. A running frame, which starts at the partition boundary and ends
+    // no later than the current row, folds as the rows stream by. A whole partition frame gives
+    // every row the same value, so the partition is folded once and the result broadcast.
+    // Ranking functions never read the frame, so they always qualify for the running path.
+    static bool CanBuildWindow(const TOpWindow& window);
+    // True when the whole partition folds to one value that every row shares.
+    static bool UsesBroadcast(const TOpWindow& window);
 
 private:
     void Prepare(const TVector<TInfoUnit>& inputs);
@@ -44,9 +47,25 @@ private:
     TExprNode::TPtr BuildKeyExtractorLambda() const;
     TExprNode::TPtr BuildGroupSwitchLambda() const;
 
+    // Running frame: fold and emit per row.
     TExprNode::TPtr BuildChain(TExprNode::TPtr wideFlow) const;
     TExprNode::TPtr BuildChainLambda(bool update) const;
     TExprNode::TPtr BuildExpandFromChain(TExprNode::TPtr chained) const;
+
+    // Whole partition frame: collect the partition, fold it once, then map it back.
+    TExprNode::TPtr BuildBroadcast(TExprNode::TPtr wideFlow) const;
+    TExprNode::TPtr BuildFoldLambda(bool update) const;
+    TExprNode::TPtr BuildExpandFromStructs(TExprNode::TPtr list) const;
+
+    // One accumulator value for a function. A null previousState builds the initial value.
+    TExprNode::TPtr BuildAccumulator(const TOpWindowFunc& func, ui32 funcIndex, TExprNode::TPtr itemArg, TExprNode::TPtr previousState,
+                                     TExprNode::TPtr sortKeyChanged, TVector<std::pair<TString, TExprNode::TPtr>>& stateMembers) const;
+    // The column a function produces, computed from its accumulator.
+    TExprNode::TPtr BuildResultFromAccumulator(const TOpWindowFunc& func, TExprNode::TPtr accumulator) const;
+    // Average accumulates into a Double, except for Decimal which keeps its own scale at a
+    // wider precision and is divided and cast back at the end.
+    TExprNode::TPtr BuildAvgAccumulatorDataType(const TInfoUnit& column) const;
+    TExprNode::TPtr BuildAvgAccumulatorType(const TInfoUnit& column) const;
 
     // Members of the struct the chain carries between rows.
     TString AccumulatorName(ui32 funcIndex) const;
@@ -66,4 +85,6 @@ private:
     // The wide layout the chopper handler produces: the input columns then one per function.
     TVector<TInfoUnit> OutputLayout;
     bool NeedsPeerKey = false;
+    // True when the frame covers the whole partition, so every row gets the same value.
+    bool WholePartition = false;
 };

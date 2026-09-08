@@ -11,7 +11,7 @@ namespace {
 
 // Aggregates whose running value can be folded with a constant amount of state.
 bool IsStreamingAggregate(const TString& function) {
-    return function == "sum" || function == "min" || function == "max" || function == "count";
+    return function == "sum" || function == "min" || function == "max" || function == "count" || function == "avg";
 }
 
 bool IsRankingFunction(const TString& function) {
@@ -20,22 +20,74 @@ bool IsRankingFunction(const TString& function) {
 
 } // anonymous namespace
 
-bool TPhysicalWindowBuilder::CanBuildStreamingWindow(const TOpWindow& window) {
-    const auto& frame = window.GetFrame();
-    const bool runningFrame = frame.Type == EWindowFrameType::Rows && frame.BeginKind == EWindowFrameBound::UnboundedPreceding &&
-                              (frame.EndKind == EWindowFrameBound::CurrentRow ||
-                               (frame.EndKind == EWindowFrameBound::Following && frame.EndValue == 0));
+namespace {
+
+bool IsDecimal(const TTypeAnnotationNode* type) {
+    if (type->IsOptionalOrNull()) {
+        type = type->Cast<TOptionalExprType>()->GetItemType();
+    }
+    return type->GetKind() == ETypeAnnotationKind::Data && type->Cast<TDataExprType>()->GetName().starts_with("Decimal");
+}
+
+// Precision and scale of a Decimal, whatever optional wrapping it carries.
+std::pair<TString, TString> DecimalParams(const TTypeAnnotationNode* type) {
+    if (type->IsOptionalOrNull()) {
+        type = type->Cast<TOptionalExprType>()->GetItemType();
+    }
+    const auto* params = dynamic_cast<const TDataExprParamsType*>(type);
+    Y_ENSURE(params, "Expected a Decimal type");
+    return {TString(params->GetParamOne()), TString(params->GetParamTwo())};
+}
+
+bool IsRunningFrame(const TOpWindowFrame& frame) {
+    return frame.Type == EWindowFrameType::Rows && frame.BeginKind == EWindowFrameBound::UnboundedPreceding &&
+           (frame.EndKind == EWindowFrameBound::CurrentRow ||
+            (frame.EndKind == EWindowFrameBound::Following && frame.EndValue == 0));
+}
+
+bool IsWholePartitionFrame(const TOpWindowFrame& frame) {
+    return frame.Type == EWindowFrameType::Rows && frame.BeginKind == EWindowFrameBound::UnboundedPreceding &&
+           frame.EndKind == EWindowFrameBound::UnboundedFollowing;
+}
+
+} // anonymous namespace
+
+// Ranking reads the row's position, which only the chain can supply, so a window that ranks has
+// to take the chain whatever its frame says. That is also why a ranking function never rules a
+// window out on frame grounds: it does not read the frame at all.
+bool TPhysicalWindowBuilder::UsesBroadcast(const TOpWindow& window) {
+    if (!IsWholePartitionFrame(window.GetFrame())) {
+        return false;
+    }
+    for (const auto& func : window.GetWindowFuncs()) {
+        if (func.Kind == EWindowFuncKind::Native) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool TPhysicalWindowBuilder::CanBuildWindow(const TOpWindow& window) {
+    const bool running = IsRunningFrame(window.GetFrame());
+    const bool broadcast = UsesBroadcast(window);
+
+    const auto* inputType = window.GetInput()->Type;
+    const auto* structType = inputType ? inputType->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>() : nullptr;
 
     for (const auto& func : window.GetWindowFuncs()) {
         if (func.Kind == EWindowFuncKind::Native) {
-            // Rank(expr) ranks by an explicit expression instead of the window order, which the
-            // single pass below does not implement.
+            // Rank(expr) ranks by an explicit expression, which the chain does not implement.
             if (!IsRankingFunction(func.Function) || !func.Arguments.empty()) {
                 return false;
             }
             continue;
         }
-        if (!IsStreamingAggregate(func.Function) || !runningFrame) {
+        // An aggregate folds row by row, so outside the broadcast path its frame has to run from
+        // the partition boundary to the current row.
+        if (!IsStreamingAggregate(func.Function) || !(running || broadcast)) {
+            return false;
+        }
+        if (func.Function == "avg" && (!structType || func.Arguments.empty())) {
             return false;
         }
     }
@@ -58,6 +110,7 @@ void TPhysicalWindowBuilder::Prepare(const TVector<TInfoUnit>& inputs) {
         NeedsPeerKey = NeedsPeerKey || func.Function == "rank" || func.Function == "denserank";
     }
     NeedsPeerKey = NeedsPeerKey && !Window->GetSortElements().empty();
+    WholePartition = UsesBroadcast(*Window);
 }
 
 ui32 TPhysicalWindowBuilder::IndexOf(const TInfoUnit& column) const {
@@ -212,6 +265,277 @@ TExprNode::TPtr TPhysicalWindowBuilder::BuildGroupSwitchLambda() const {
     return Ctx.NewLambda(Pos, Ctx.NewArguments(Pos, std::move(args)), std::move(body));
 }
 
+TExprNode::TPtr TPhysicalWindowBuilder::BuildAvgAccumulatorDataType(const TInfoUnit& column) const {
+    const auto* itemType = InputItemType(column);
+    if (!IsDecimal(itemType)) {
+        return Ctx.Builder(Pos).Callable("DataType").Atom(0, "Double").Seal().Build();
+    }
+    // 35 is the precision the aggregate accumulator uses, so that summing cannot overflow the
+    // declared precision before the division brings it back.
+    const auto [precision, scale] = DecimalParams(itemType);
+    Y_UNUSED(precision);
+    // clang-format off
+    return Ctx.Builder(Pos)
+        .Callable("DataType")
+            .Atom(0, "Decimal")
+            .Atom(1, "35")
+            .Atom(2, scale)
+        .Seal().Build();
+    // clang-format on
+}
+
+TExprNode::TPtr TPhysicalWindowBuilder::BuildAvgAccumulatorType(const TInfoUnit& column) const {
+    // clang-format off
+    return Ctx.Builder(Pos)
+        .Callable("TupleType")
+            .Add(0, BuildAvgAccumulatorDataType(column))
+            .Callable(1, "DataType")
+                .Atom(0, "Uint64")
+            .Seal()
+        .Seal().Build();
+    // clang-format on
+}
+
+TExprNode::TPtr TPhysicalWindowBuilder::BuildAccumulator(const TOpWindowFunc& func, ui32 funcIndex, TExprNode::TPtr itemArg,
+                                                         TExprNode::TPtr previousState, TExprNode::TPtr sortKeyChanged,
+                                                         TVector<std::pair<TString, TExprNode::TPtr>>& stateMembers) const {
+    const bool update = static_cast<bool>(previousState);
+    const auto accName = AccumulatorName(funcIndex);
+
+    if (func.Kind == EWindowFuncKind::Native) {
+        if (!update) {
+            // The first row of a partition is row one and opens the first peer group.
+            if (func.Function == "rank") {
+                stateMembers.emplace_back(PositionName(funcIndex), BuildUint64(1));
+            }
+            return BuildUint64(1);
+        }
+        if (func.Function == "rownumber") {
+            return Ctx.Builder(Pos).Callable("Inc").Add(0, Member(previousState, accName)).Seal().Build();
+        }
+        if (func.Function == "denserank") {
+            // clang-format off
+            return Ctx.Builder(Pos)
+                .Callable("If")
+                    .Add(0, sortKeyChanged)
+                    .Callable(1, "Inc")
+                        .Add(0, Member(previousState, accName))
+                    .Seal()
+                    .Add(2, Member(previousState, accName))
+                .Seal().Build();
+            // clang-format on
+        }
+        // A new peer group takes the position of its first row as its rank, so the position has
+        // to be advanced before it is read.
+        auto position = Ctx.Builder(Pos).Callable("Inc").Add(0, Member(previousState, PositionName(funcIndex))).Seal().Build();
+        stateMembers.emplace_back(PositionName(funcIndex), position);
+        // clang-format off
+        return Ctx.Builder(Pos)
+            .Callable("If")
+                .Add(0, sortKeyChanged)
+                .Add(1, position)
+                .Add(2, Member(previousState, accName))
+            .Seal().Build();
+        // clang-format on
+    }
+
+    const auto& argument = func.Arguments.front();
+    auto value = Member(itemArg, argument.GetFullName());
+    const bool isOptional = InputItemType(argument)->IsOptionalOrNull();
+
+    if (func.Function == "count") {
+        if (!update) {
+            // clang-format off
+            return isOptional
+                ? Ctx.Builder(Pos).Callable("AggrCountInit").Add(0, value).Seal().Build()
+                : BuildUint64(1);
+            // clang-format on
+        }
+        // clang-format off
+        return isOptional
+            ? Ctx.Builder(Pos).Callable("AggrCountUpdate").Add(0, value).Add(1, Member(previousState, accName)).Seal().Build()
+            : Ctx.Builder(Pos).Callable("Inc").Add(0, Member(previousState, accName)).Seal().Build();
+        // clang-format on
+    }
+
+    if (func.Function == "sum") {
+        // clang-format off
+        auto casted = MakeOptional(Ctx.Builder(Pos)
+            .Callable("SafeCast")
+                .Add(0, value)
+                .Add(1, BuildSumCastTarget(argument))
+            .Seal().Build(), isOptional);
+        return update
+            ? Ctx.Builder(Pos)
+                .Callable("AggrAdd")
+                    .Add(0, Member(previousState, accName))
+                    .Add(1, casted)
+                .Seal().Build()
+            : casted;
+        // clang-format on
+    }
+
+    if (func.Function == "avg") {
+        // The accumulator is an optional (sum, count) pair: NULL until a row contributes, which
+        // is also what an average over nothing but NULLs has to return.
+        auto accType = BuildAvgAccumulatorType(argument);
+        auto accData = BuildAvgAccumulatorDataType(argument);
+        auto nothing = Ctx.Builder(Pos).Callable("Nothing").Callable(0, "OptionalType").Add(0, accType).Seal().Seal().Build();
+
+        // clang-format off
+        auto firstPair = [&](TExprNode::TPtr present) {
+            return Ctx.Builder(Pos)
+                .Callable("Just")
+                    .List(0)
+                        .Callable(0, "SafeCast")
+                            .Add(0, present)
+                            .Add(1, accData)
+                        .Seal()
+                        .Callable(1, "Uint64").Atom(0, "1").Seal()
+                    .Seal()
+                .Seal().Build();
+        };
+        // clang-format on
+
+        if (!update) {
+            if (!isOptional) {
+                return firstPair(value);
+            }
+            auto initArg = Ctx.NewArgument(Pos, "avg_init");
+            auto initLambda = Ctx.NewLambda(Pos, Ctx.NewArguments(Pos, {initArg}), firstPair(initArg));
+            // clang-format off
+            return Ctx.Builder(Pos)
+                .Callable("IfPresent")
+                    .Add(0, value)
+                    .Add(1, initLambda)
+                    .Add(2, nothing)
+                .Seal().Build();
+            // clang-format on
+        }
+
+        auto previous = Member(previousState, accName);
+        // clang-format off
+        auto addTo = [&](TExprNode::TPtr state, TExprNode::TPtr present) {
+            return Ctx.Builder(Pos)
+                .Callable("Just")
+                    .List(0)
+                        .Callable(0, "AggrAdd")
+                            .Callable(0, "Nth").Add(0, state).Atom(1, "0").Seal()
+                            .Callable(1, "SafeCast")
+                                .Add(0, present)
+                                .Add(1, accData)
+                            .Seal()
+                        .Seal()
+                        .Callable(1, "Inc")
+                            .Callable(0, "Nth").Add(0, state).Atom(1, "1").Seal()
+                        .Seal()
+                    .Seal()
+                .Seal().Build();
+        };
+        // clang-format on
+
+        auto valueArg = Ctx.NewArgument(Pos, "avg_value");
+        auto stateArg = Ctx.NewArgument(Pos, "avg_state");
+        auto withValue = Ctx.NewLambda(Pos, Ctx.NewArguments(Pos, {stateArg}), addTo(stateArg, valueArg));
+        // clang-format off
+        auto merged = Ctx.Builder(Pos)
+            .Callable("IfPresent")
+                .Add(0, previous)
+                .Add(1, withValue)
+                .Add(2, firstPair(valueArg))
+            .Seal().Build();
+        // clang-format on
+
+        if (!isOptional) {
+            return Ctx.ReplaceNode(std::move(merged), *valueArg, value);
+        }
+        auto outer = Ctx.NewLambda(Pos, Ctx.NewArguments(Pos, {valueArg}), std::move(merged));
+        // clang-format off
+        return Ctx.Builder(Pos)
+            .Callable("IfPresent")
+                .Add(0, value)
+                .Add(1, outer)
+                .Add(2, previous)
+            .Seal().Build();
+        // clang-format on
+    }
+
+    auto current = MakeOptional(value, isOptional);
+    // clang-format off
+    return update
+        ? Ctx.Builder(Pos)
+            .Callable(func.Function == "min" ? "AggrMin" : "AggrMax")
+                .Add(0, Member(previousState, accName))
+                .Add(1, current)
+            .Seal().Build()
+        : current;
+    // clang-format on
+}
+
+TExprNode::TPtr TPhysicalWindowBuilder::BuildResultFromAccumulator(const TOpWindowFunc& func, TExprNode::TPtr accumulator) const {
+    if (func.Kind == EWindowFuncKind::Native || func.Function != "avg") {
+        return accumulator;
+    }
+
+    const auto& argument = func.Arguments.front();
+    const auto* itemType = InputItemType(argument);
+    const bool decimal = IsDecimal(itemType);
+
+    auto pairArg = Ctx.NewArgument(Pos, "avg_result");
+    auto sum = Ctx.Builder(Pos).Callable("Nth").Add(0, pairArg).Atom(1, "0").Seal().Build();
+    auto count = Ctx.Builder(Pos).Callable("Nth").Add(0, pairArg).Atom(1, "1").Seal().Build();
+
+    TExprNode::TPtr resultType;
+    TExprNode::TPtr value;
+    if (decimal) {
+        // Back to the precision the column was declared with.
+        const auto [precision, scale] = DecimalParams(itemType);
+        // clang-format off
+        resultType = Ctx.Builder(Pos)
+            .Callable("DataType")
+                .Atom(0, "Decimal")
+                .Atom(1, precision)
+                .Atom(2, scale)
+            .Seal().Build();
+        value = Ctx.Builder(Pos)
+            .Callable("SafeCast")
+                .Callable(0, "DecimalDiv")
+                    .Add(0, sum)
+                    .Add(1, count)
+                .Seal()
+                .Add(1, resultType)
+            .Seal().Build();
+        // clang-format on
+    } else {
+        resultType = Ctx.Builder(Pos).Callable("DataType").Atom(0, "Double").Seal().Build();
+        // clang-format off
+        value = Ctx.Builder(Pos)
+            .Callable("Div")
+                .Add(0, sum)
+                .Add(1, count)
+            .Seal().Build();
+        // clang-format on
+    }
+
+    // clang-format off
+    auto divide = Ctx.Builder(Pos)
+        .Callable("Just")
+            .Add(0, value)
+        .Seal().Build();
+
+    return Ctx.Builder(Pos)
+        .Callable("IfPresent")
+            .Add(0, accumulator)
+            .Add(1, Ctx.NewLambda(Pos, Ctx.NewArguments(Pos, {pairArg}), std::move(divide)))
+            .Callable(2, "Nothing")
+                .Callable(0, "OptionalType")
+                    .Add(0, resultType)
+                .Seal()
+            .Seal()
+        .Seal().Build();
+    // clang-format on
+}
+
 // Chain1Map emits, for every row, a tuple of the output row and the state carried to the next
 // row. The init lambda sees only the row; the update lambda also sees the tuple emitted for the
 // previous row and reads its second element.
@@ -259,93 +583,9 @@ TExprNode::TPtr TPhysicalWindowBuilder::BuildChainLambda(bool update) const {
     const auto& funcs = Window->GetWindowFuncs();
     for (ui32 f = 0; f < funcs.size(); ++f) {
         const auto& func = funcs[f];
-        const auto accName = AccumulatorName(f);
-        TExprNode::TPtr accumulator;
-
-        if (func.Kind == EWindowFuncKind::Native) {
-            if (!update) {
-                // The first row of a partition is row one and opens the first peer group.
-                accumulator = BuildUint64(1);
-                if (func.Function == "rank") {
-                    stateMembers.emplace_back(PositionName(f), BuildUint64(1));
-                }
-            } else if (func.Function == "rownumber") {
-                accumulator = Ctx.Builder(Pos).Callable("Inc").Add(0, Member(previousState, accName)).Seal().Build();
-            } else if (func.Function == "denserank") {
-                // clang-format off
-                accumulator = Ctx.Builder(Pos)
-                    .Callable("If")
-                        .Add(0, sortKeyChanged)
-                        .Callable(1, "Inc")
-                            .Add(0, Member(previousState, accName))
-                        .Seal()
-                        .Add(2, Member(previousState, accName))
-                    .Seal().Build();
-                // clang-format on
-            } else {
-                // A new peer group takes the position of its first row as its rank, so the
-                // position has to be advanced before it is read.
-                auto position = Ctx.Builder(Pos).Callable("Inc").Add(0, Member(previousState, PositionName(f))).Seal().Build();
-                // clang-format off
-                accumulator = Ctx.Builder(Pos)
-                    .Callable("If")
-                        .Add(0, sortKeyChanged)
-                        .Add(1, position)
-                        .Add(2, Member(previousState, accName))
-                    .Seal().Build();
-                // clang-format on
-                stateMembers.emplace_back(PositionName(f), position);
-            }
-        } else {
-            const auto& argument = func.Arguments.front();
-            auto value = Member(itemArg, argument.GetFullName());
-            const bool isOptional = InputItemType(argument)->IsOptionalOrNull();
-
-            if (func.Function == "count") {
-                if (!update) {
-                    // clang-format off
-                    accumulator = isOptional
-                        ? Ctx.Builder(Pos).Callable("AggrCountInit").Add(0, value).Seal().Build()
-                        : BuildUint64(1);
-                    // clang-format on
-                } else {
-                    // clang-format off
-                    accumulator = isOptional
-                        ? Ctx.Builder(Pos).Callable("AggrCountUpdate").Add(0, value).Add(1, Member(previousState, accName)).Seal().Build()
-                        : Ctx.Builder(Pos).Callable("Inc").Add(0, Member(previousState, accName)).Seal().Build();
-                    // clang-format on
-                }
-            } else if (func.Function == "sum") {
-                // clang-format off
-                auto casted = MakeOptional(Ctx.Builder(Pos)
-                    .Callable("SafeCast")
-                        .Add(0, value)
-                        .Add(1, BuildSumCastTarget(argument))
-                    .Seal().Build(), isOptional);
-                accumulator = update
-                    ? Ctx.Builder(Pos)
-                        .Callable("AggrAdd")
-                            .Add(0, Member(previousState, accName))
-                            .Add(1, casted)
-                        .Seal().Build()
-                    : casted;
-                // clang-format on
-            } else {
-                auto current = MakeOptional(value, isOptional);
-                // clang-format off
-                accumulator = update
-                    ? Ctx.Builder(Pos)
-                        .Callable(func.Function == "min" ? "AggrMin" : "AggrMax")
-                            .Add(0, Member(previousState, accName))
-                            .Add(1, current)
-                        .Seal().Build()
-                    : current;
-                // clang-format on
-            }
-        }
-
-        stateMembers.emplace_back(accName, accumulator);
-        outputMembers.emplace_back(func.ResultColName.GetFullName(), accumulator);
+        auto accumulator = BuildAccumulator(func, f, itemArg, previousState, sortKeyChanged, stateMembers);
+        stateMembers.emplace_back(AccumulatorName(f), accumulator);
+        outputMembers.emplace_back(func.ResultColName.GetFullName(), BuildResultFromAccumulator(func, accumulator));
     }
 
     if (NeedsPeerKey) {
@@ -405,8 +645,103 @@ TExprNode::TPtr TPhysicalWindowBuilder::BuildChain(TExprNode::TPtr wideFlow) con
     return BuildExpandFromChain(chained);
 }
 
+// The fold that produces one state for a whole partition. Fold1 seeds the state from the first
+// row and then folds the rest, so the two lambdas are the same accumulators the chain uses.
+TExprNode::TPtr TPhysicalWindowBuilder::BuildFoldLambda(bool update) const {
+    auto itemArg = Ctx.NewArgument(Pos, "fold_item");
+    TExprNode::TListType args{itemArg};
+
+    TExprNode::TPtr previousState;
+    if (update) {
+        previousState = Ctx.NewArgument(Pos, "fold_state");
+        args.push_back(previousState);
+    }
+
+    TVector<std::pair<TString, TExprNode::TPtr>> stateMembers;
+    const auto& funcs = Window->GetWindowFuncs();
+    for (ui32 f = 0; f < funcs.size(); ++f) {
+        stateMembers.emplace_back(AccumulatorName(f), BuildAccumulator(funcs[f], f, itemArg, previousState, nullptr, stateMembers));
+    }
+
+    return Ctx.NewLambda(Pos, Ctx.NewArguments(Pos, std::move(args)), BuildStruct(stateMembers));
+}
+
+TExprNode::TPtr TPhysicalWindowBuilder::BuildExpandFromStructs(TExprNode::TPtr list) const {
+    // clang-format off
+    return Ctx.Builder(Pos)
+        .Callable("ExpandMap")
+            .Callable(0, "ToFlow")
+                .Add(0, list)
+            .Seal()
+            .Lambda(1)
+                .Param("win_row")
+                .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                    for (ui32 i = 0; i < OutputLayout.size(); ++i) {
+                        parent
+                            .Callable(i, "Member")
+                                .Arg(0, "win_row")
+                                .Atom(1, OutputLayout[i].GetFullName())
+                            .Seal();
+                    }
+                    return parent;
+                })
+            .Seal()
+        .Seal().Build();
+    // clang-format on
+}
+
+// A frame that spans the partition gives every row the same value, so the rows are collected
+// once, folded to a single state, and then read a second time to attach that state. The state is
+// bound as a lambda argument rather than referenced inside the map, so the fold runs once.
+TExprNode::TPtr TPhysicalWindowBuilder::BuildBroadcast(TExprNode::TPtr wideFlow) const {
+    auto narrow = NPhysicalConvertionUtils::BuildNarrowMapForWideInput(wideFlow, Inputs, Ctx);
+    auto rows = Ctx.Builder(Pos).Callable("Collect").Add(0, narrow).Seal().Build();
+
+    // clang-format off
+    auto folded = Ctx.Builder(Pos)
+        .Callable("Fold1")
+            .Add(0, rows)
+            .Add(1, BuildFoldLambda(/*update=*/false))
+            .Add(2, BuildFoldLambda(/*update=*/true))
+        .Seal().Build();
+    // clang-format on
+
+    auto stateArg = Ctx.NewArgument(Pos, "win_partition_state");
+    auto rowArg = Ctx.NewArgument(Pos, "win_partition_row");
+
+    TVector<std::pair<TString, TExprNode::TPtr>> outputMembers;
+    for (const auto& column : Inputs) {
+        outputMembers.emplace_back(column.GetFullName(), Member(rowArg, column.GetFullName()));
+    }
+    const auto& funcs = Window->GetWindowFuncs();
+    for (ui32 f = 0; f < funcs.size(); ++f) {
+        outputMembers.emplace_back(funcs[f].ResultColName.GetFullName(),
+                                   BuildResultFromAccumulator(funcs[f], Member(stateArg, AccumulatorName(f))));
+    }
+
+    auto rowLambda = Ctx.NewLambda(Pos, Ctx.NewArguments(Pos, {rowArg}), BuildStruct(outputMembers));
+    // clang-format off
+    auto attach = Ctx.Builder(Pos)
+        .Callable("OrderedMap")
+            .Add(0, rows)
+            .Add(1, rowLambda)
+        .Seal().Build();
+
+    auto perState = Ctx.NewLambda(Pos, Ctx.NewArguments(Pos, {stateArg}), std::move(attach));
+    auto result = Ctx.Builder(Pos)
+        .Callable("OrderedFlatMap")
+            .Callable(0, "ToList")
+                .Add(0, folded)
+            .Seal()
+            .Add(1, perState)
+        .Seal().Build();
+    // clang-format on
+
+    return BuildExpandFromStructs(result);
+}
+
 TExprNode::TPtr TPhysicalWindowBuilder::BuildPhysicalOp(TExprNode::TPtr input) {
-    Y_ENSURE(CanBuildStreamingWindow(*Window), "This window cannot be evaluated by a single forward pass");
+    Y_ENSURE(CanBuildWindow(*Window), "This window frame is not supported yet");
 
     Prepare(NPhysicalConvertionUtils::GetLiveInputIUs(*Window, 0));
 
@@ -431,7 +766,7 @@ TExprNode::TPtr TPhysicalWindowBuilder::BuildPhysicalOp(TExprNode::TPtr input) {
 
     if (Window->GetPartitionKeys().empty()) {
         // A window with no partition keys sees the whole stage as one partition.
-        input = BuildChain(input);
+        input = WholePartition ? BuildBroadcast(input) : BuildChain(input);
     } else {
         TExprNode::TListType handlerArgs;
         for (ui32 i = 0; i < Window->GetPartitionKeys().size(); ++i) {
@@ -439,7 +774,8 @@ TExprNode::TPtr TPhysicalWindowBuilder::BuildPhysicalOp(TExprNode::TPtr input) {
         }
         auto flowArg = Ctx.NewArgument(Pos, "chop_flow");
         handlerArgs.push_back(flowArg);
-        auto handler = Ctx.NewLambda(Pos, Ctx.NewArguments(Pos, std::move(handlerArgs)), BuildChain(flowArg));
+        auto handler = Ctx.NewLambda(Pos, Ctx.NewArguments(Pos, std::move(handlerArgs)),
+                                     WholePartition ? BuildBroadcast(flowArg) : BuildChain(flowArg));
 
         // clang-format off
         input = Ctx.Builder(Pos)

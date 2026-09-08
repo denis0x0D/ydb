@@ -5370,6 +5370,7 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                 c Int64,
                 d Int64,
                 e Int64,
+                f Decimal(22,9),
                 PRIMARY KEY (a)
             )
         )" << (columnStore ? " WITH (Store = Column);" : ";");
@@ -5424,6 +5425,14 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                 addCell(rows, "c", c);
                 addCell(rows, "d", d);
                 addCell(rows, "e", e);
+                // f mirrors e as a Decimal, including its NULLs, so an average over f can be
+                // checked against the same partitions as an average over e.
+                rows.AddMember("f");
+                if (e) {
+                    rows.BeginOptional().Decimal(NYdb::TDecimalValue(TStringBuilder() << *e << ".5", 22, 9)).EndOptional();
+                } else {
+                    rows.EmptyOptional(NYdb::TTypeBuilder().Decimal(NYdb::TDecimalType(22, 9)).Build());
+                }
                 rows.EndStruct();
             }
             rows.EndList();
@@ -5704,6 +5713,17 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                 WINDOW w AS (PARTITION BY b)
                 ORDER BY b, c;
             )"},
+            // Decimal keeps its own precision through an average, unlike the Double accumulator
+            // every other numeric type uses.
+            {"decimal average", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT a, b, f,
+                    Avg(f) OVER (PARTITION BY b) AS avg_f,
+                    Sum(f) OVER (PARTITION BY b) AS sum_f
+                FROM `/Root/t1`
+                ORDER BY a;
+            )"},
             // TPC-DS q47, q57 mix two different window specifications in one select.
             {"two windows with different specifications", R"(
                 PRAGMA YqlSelect = "force";
@@ -5819,14 +5839,8 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
     // return exactly the rows the old optimizer returns, so the set only ever shrinks; a query
     // listed here that starts working fails the test too, which keeps the list honest.
     const THashSet<TString> WindowQueriesNotLoweredYet{
-        // Aggregates over a whole partition need the frame to be folded and broadcast.
-        "partitioned sum",
-        "partitioned average",
-        "multi column partition",
-        "named window without an order",
-        "two windows with different specifications",
-        "window result inside an expression",
-        "explicit whole partition frame",
+        // A frame that ends after the current row but does not span the whole partition still
+        // needs a row queue.
         "suffix frame",
         // Frames that do not run from the partition start to the current row need a row queue.
         "sliding frame ending at the current row",
