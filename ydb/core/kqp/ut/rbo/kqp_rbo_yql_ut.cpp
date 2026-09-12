@@ -5887,14 +5887,8 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
     }
 
     const THashSet<TString> WindowQueriesNotLoweredYet{
-        // Aggregates over a whole partition need the frame to be folded and broadcast.
-        "partitioned sum",
-        "partitioned average",
-        "multi column partition",
-        "named window without an order",
-        "two windows with different specifications",
-        "window result inside an expression",
-        "explicit whole partition frame",
+        // A frame that ends after the current row but does not span the whole partition still
+        // needs a row queue.
         "suffix frame",
         // Frames that do not run from the partition start to the current row need a row queue.
         "sliding frame ending at the current row",

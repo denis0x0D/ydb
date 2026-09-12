@@ -17,6 +17,8 @@ public:
 
     TExprNode::TPtr BuildPhysicalOp(TExprNode::TPtr input) override;
     static bool CanBuildWindow(const TOpWindow& window);
+    // True when the whole partition folds to one value that every row shares.
+    static bool UsesWholePartition(const TOpWindow& window);
 
 private:
     void Prepare(const TVector<TInfoUnit>& inputs);
@@ -29,6 +31,13 @@ private:
 
     TExprNode::TPtr BuildChain(TExprNode::TPtr wideFlow) const;
     TExprNode::TPtr BuildChainLambda(bool update) const;
+    // One accumulator value for a function. A null previousState builds the initial value.
+    TExprNode::TPtr BuildAccumulator(const TOpWindowFunc& func, ui32 funcIndex, TExprNode::TPtr itemArg, TExprNode::TPtr previousState,
+                                     TExprNode::TPtr sortKeyChanged, TVector<std::pair<TString, TExprNode::TPtr>>& stateMembers) const;
+    // Whole partition frame: collect the partition, fold it once, then map it back.
+    TExprNode::TPtr BuildWholePartition(TExprNode::TPtr wideFlow) const;
+    TExprNode::TPtr BuildFoldLambda(bool update) const;
+    TExprNode::TPtr BuildExpandFromStructs(TExprNode::TPtr list) const;
     TExprNode::TPtr BuildExpandFromChain(TExprNode::TPtr chained) const;
 
     TString AccumulatorName(ui32 funcIndex) const;
@@ -50,4 +59,6 @@ private:
     const TStructExprType* InputStruct = nullptr;
     TVector<TInfoUnit> OutputLayout;
     bool NeedsPeerKey = false;
+    // True when the frame covers the whole partition, so every row gets the same value.
+    bool WholePartition = false;
 };
