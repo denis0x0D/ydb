@@ -18,6 +18,8 @@ public:
     TExprNode::TPtr BuildPhysicalOp(TExprNode::TPtr input) override;
     static bool CanBuildWindow(const TOpWindow& window);
     static bool UsesWholePartition(const TOpWindow& window);
+    // True when a RANGE frame makes an aggregate report its peer group's final value.
+    static bool UsesRangeCarry(const TOpWindow& window);
 
 private:
     void Prepare(const TVector<TInfoUnit>& inputs);
@@ -34,6 +36,8 @@ private:
                                      TExprNode::TPtr sortKeyChanged, TVector<std::pair<TString, TExprNode::TPtr>>& stateMembers) const;
     TExprNode::TPtr BuildWholePartition(TExprNode::TPtr wideFlow) const;
     TExprNode::TPtr BuildFoldLambda(bool update) const;
+    // RANGE frame: the chain, then each peer group's last value carried back over the group.
+    TExprNode::TPtr BuildRangeCarry(TExprNode::TPtr wideFlow) const;
     TExprNode::TPtr BuildExpandFromStructs(TExprNode::TPtr list) const;
     TExprNode::TPtr BuildExpandFromChain(TExprNode::TPtr chained) const;
 
@@ -57,4 +61,6 @@ private:
     TVector<TInfoUnit> OutputLayout;
     bool NeedsPeerKey = false;
     bool WholePartition = false;
+    // True when the frame is RANGE and an aggregate has to see its whole peer group.
+    bool RangeCarry = false;
 };

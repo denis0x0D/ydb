@@ -5896,8 +5896,6 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
         "forward looking frame",
         "trailing frame",
         // A RANGE frame runs to the last peer row, which a per-row chain cannot express.
-        "range frame with ties",
-        "named window shared by several functions over aggregates",
         // Grouping() is not supported yet.
         "rank with rollup partition expression",
     };
