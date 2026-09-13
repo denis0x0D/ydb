@@ -1445,7 +1445,7 @@ THashMap<TString, const TTypeAnnotationNode*> TPhysicalAggregationBuilder::GetIn
     return colTypeMap;
 }
 
-TExprNode::TPtr TPhysicalAggregationBuilder::BuildPhysicalOp(const NPhysicalConvertionUtils::TStageBody& input, std::optional<i64> memLimit) {
+NPhysicalConvertionUtils::TStageBody TPhysicalAggregationBuilder::BuildPhysicalOp(const NPhysicalConvertionUtils::TStageBody& input, std::optional<i64> memLimit) {
     // We get input columns based on key columns and aggregation traits.
     const TVector<TString> inputColumns = GetInputColumns();
     // Just a full names of key columns.
@@ -1487,22 +1487,60 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildPhysicalOp(const NPhysicalConv
     .Build();
     // clang-format on
 
+    // Scalar aggregation over a possibly empty input needs the struct-based Condense machinery
+    // to emit its default row, so that case keeps the narrow path. Everything else - grouped
+    // aggregation in any phase, and scalar aggregation in the intermediate phase - can hand the
+    // combiner's wide output straight to the next operator.
+    const bool needsCondense = IsScalarAggregation() && aggregationPhase != EOpPhase::Intermediate;
+    if (!needsCondense) {
+        TVector<TString> outputFields;
+        if (!isDistinct) {
+            outputFields = keyFields;
+        }
+        for (const auto& aggTraits : phyAggregationTraitsList) {
+            outputFields.push_back(aggTraits.StateFieldName);
+        }
+
+        const auto liveOutputs = NPhysicalConvertionUtils::BuildNameSet(
+            NPhysicalConvertionUtils::GetLiveOutputIUs(*Aggregate));
+
+        TVector<TInfoUnit> allColumns;
+        TVector<TInfoUnit> keptColumns;
+        allColumns.reserve(outputFields.size());
+        for (const auto& field : outputFields) {
+            auto name = field;
+            if (const auto it = renameMap.find(name); it != renameMap.end()) {
+                name = it->second;
+            }
+            allColumns.emplace_back(name);
+            if (liveOutputs.contains(name)) {
+                keptColumns.emplace_back(name);
+            }
+        }
+
+        // With PruneUnusedOutputs the combiner already emits only the live columns.
+        const TVector<TInfoUnit>& combinerLayout = PruneUnusedOutputs ? keptColumns : allColumns;
+        auto output = wideCombiner;
+        if (combinerLayout != keptColumns) {
+            output = NPhysicalConvertionUtils::BuildWideProjection(output, combinerLayout, keptColumns, Ctx);
+        }
+
+        YQL_CLOG(TRACE, CoreDq) << "[NEW RBO Physical aggregation] " << KqpExprToPrettyString(TExprBase(output), Ctx);
+        return NPhysicalConvertionUtils::TStageBody::Wide(output, std::move(keptColumns));
+    }
+
     auto physicalAggregation =
         BuildNarrowMapForPhysicalAggregationOutput(wideCombiner, keyFields, phyAggregationTraitsList, renameMap, isDistinct, aggregationPhase);
-
-    // For scalar aggregation result we need to wrap it with Condense.
-    if (IsScalarAggregation() && aggregationPhase != EOpPhase::Intermediate) {
-        physicalAggregation =
-            BuildCondenseForAggregationOutputWithEmptyKeys(physicalAggregation, phyAggregationTraitsList, renameMap, aggregationPhase);
-    }
+    physicalAggregation =
+        BuildCondenseForAggregationOutputWithEmptyKeys(physicalAggregation, phyAggregationTraitsList, renameMap, aggregationPhase);
 
     YQL_CLOG(TRACE, CoreDq) << "[NEW RBO Physical aggregation] " << KqpExprToPrettyString(TExprBase(physicalAggregation), Ctx);
     // clang-format off
-    return Ctx.Builder(Pos)
+    return NPhysicalConvertionUtils::TStageBody::Narrow(Ctx.Builder(Pos)
         .Callable("FromFlow")
             .Add(0, physicalAggregation)
         .Seal()
-    .Build();
+    .Build());
     // clang-format on
 }
 

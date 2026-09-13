@@ -595,12 +595,79 @@ bool IsCompatibleWithBlocks(TPositionHandle pos, const TStructExprType& type, TE
     return resolveStatus == IArrowResolver::OK;
 }
 
+// When a stage body already ends in FromFlow(NarrowMap(<wide>, lambda)) and that lambda packs
+// wide slot i into exactly the field named by outputItemType item i, the ExpandMap emitted below
+// would do nothing but undo the NarrowMap. Reuse the wide flow instead of emitting the round trip.
+TExprNode::TPtr TryReuseAlreadyWideBody(const TExprNode::TPtr& body, const TStructExprType& outputItemType) {
+    if (!body->IsCallable("FromFlow")) {
+        return {};
+    }
+    const auto& narrowMap = body->Head();
+    if (!narrowMap.IsCallable("NarrowMap") || narrowMap.ChildrenSize() != 2) {
+        return {};
+    }
+    const auto& lambda = narrowMap.Tail();
+    if (!lambda.IsLambda()) {
+        return {};
+    }
+    const auto& args = lambda.Head();
+    const auto& asStruct = lambda.Tail();
+    if (!asStruct.IsCallable("AsStruct")) {
+        return {};
+    }
+
+    const auto& items = outputItemType.GetItems();
+    if (asStruct.ChildrenSize() != items.size() || args.ChildrenSize() != items.size()) {
+        return {};
+    }
+
+    TNodeMap<ui32> argSlot;
+    for (ui32 i = 0; i < args.ChildrenSize(); ++i) {
+        argSlot[args.Child(i)] = i;
+    }
+
+    THashMap<TStringBuf, ui32> nameToSlot;
+    for (ui32 i = 0; i < asStruct.ChildrenSize(); ++i) {
+        const auto& tuple = *asStruct.Child(i);
+        if (tuple.ChildrenSize() != 2) {
+            return {};
+        }
+        const auto slot = argSlot.find(&tuple.Tail());
+        if (slot == argSlot.cend()) {
+            // field is an expression, not a bare slot - not a plain repack
+            return {};
+        }
+        nameToSlot[tuple.Head().Content()] = slot->second;
+    }
+
+    for (ui32 i = 0; i < items.size(); ++i) {
+        const auto it = nameToSlot.find(items[i]->GetName());
+        if (it == nameToSlot.cend() || it->second != i) {
+            return {};
+        }
+    }
+
+    return narrowMap.HeadPtr();
+}
+
 TDqPhyStage RebuildStageOutputAsWide(const TDqPhyStage& stage, const TStructExprType& outputItemType, TExprContext& ctx)
 {
     TCoLambda program(ctx.DeepCopyLambda(stage.Program().Ref()));
 
     auto stageSettings = TDqStageSettings::Parse(stage);
     YQL_CLOG(INFO, CoreDq) << "Enabled wide channels for stage with logical id = " << stageSettings.LogicalId;
+
+    if (auto alreadyWide = TryReuseAlreadyWideBody(program.Body().Ptr(), outputItemType)) {
+        return Build<TDqPhyStage>(ctx, stage.Pos())
+            .InitFrom(stage)
+            .Program()
+                .Args(program.Args())
+                .Body(ctx.NewCallable(program.Body().Pos(), "FromFlow", {std::move(alreadyWide)}))
+            .Build()
+            .Settings(TDqStageSettings::New(stage).SetWideChannels(outputItemType).BuildNode(ctx, stage.Pos()))
+            .Outputs(stage.Outputs())
+            .Done();
+    }
 
     // convert stream to wide stream
     auto resultStream = ctx.Builder(program.Body().Pos())
