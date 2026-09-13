@@ -140,4 +140,61 @@ TExprNode::TPtr BuildNarrowMapForWideInput(TExprNode::TPtr input, const TVector<
     .Build();
     // clang-format on
 }
+
+/**
+ * Rearranges a wide flow so that its slots are exactly `to`, taken from `from` by name.
+ * `to` must be a permutation of a subset of `from`.
+ */
+TExprNode::TPtr BuildWideProjection(TExprNode::TPtr input, const TVector<TInfoUnit>& from, const TVector<TInfoUnit>& to, TExprContext& ctx);
+
+/**
+ * Body of a physical stage while it is assembled operator by operator.
+ *
+ * Operators are emitted bottom-up and most of them are wide internally (WideMap,
+ * WideFilter, WideSort, WideCombiner). Handing the body between two such operators in
+ * wide form avoids emitting a NarrowMap/ExpandMap pair per operator that peephole would
+ * only have to fuse away again, which costs one fixpoint round and a full re-annotation
+ * of the stage lambda per layer.
+ *
+ * The narrow form - a stream of structs - is what stage arguments, connections and the
+ * operators with no wide counterpart (Take/Skip, Switch, Extend) work with.
+ */
+class TStageBody {
+public:
+    TStageBody() = default;
+
+    static TStageBody Narrow(TExprNode::TPtr stream) {
+        TStageBody body;
+        body.NarrowStream = std::move(stream);
+        return body;
+    }
+
+    // `columns` names the slots of `flow`, in order.
+    static TStageBody Wide(TExprNode::TPtr flow, TVector<TInfoUnit> columns) {
+        TStageBody body;
+        body.WideFlow = std::move(flow);
+        body.WideColumns = std::move(columns);
+        return body;
+    }
+
+    explicit operator bool() const {
+        return bool(NarrowStream) || bool(WideFlow);
+    }
+
+    // Wide flow whose slots are exactly `columns`. Expands the narrow form, or permutes
+    // the wide one, only when the layout does not already match.
+    TExprNode::TPtr AsWide(const TVector<TInfoUnit>& columns, TExprContext& ctx) const;
+
+    // Stream of structs holding the columns this body currently carries.
+    TExprNode::TPtr AsNarrow(TExprContext& ctx) const;
+
+private:
+    TExprNode::TPtr NarrowStream;
+    TExprNode::TPtr WideFlow;
+    TVector<TInfoUnit> WideColumns;
+};
+
+// The Switch that fans a body out to several consumers works on narrow streams.
+TStageBody BuildMultiConsumerHandler(const TStageBody& input, const ui32 numConsumers, TExprContext& ctx, TPositionHandle pos);
+
 } // namespace NKikimr::NKqp::NPhysicalConvertionUtils

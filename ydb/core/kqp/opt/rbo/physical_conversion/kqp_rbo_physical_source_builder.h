@@ -13,7 +13,7 @@ public:
         , Read(read)
         , StageGUID(stageGUID) {}
 
-    TExprNode::TPtr BuildPhysicalOp() override;
+    NPhysicalConvertionUtils::TStageBody BuildPhysicalOp() override;
 
 private:
     TIntrusivePtr<TOpRead> Read;

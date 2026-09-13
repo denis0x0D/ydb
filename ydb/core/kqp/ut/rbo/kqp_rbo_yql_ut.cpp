@@ -8293,7 +8293,7 @@ FROM (
                 testContext.ExprCtx.NewArgument(pos, "left_input"),
                 testContext.ExprCtx.NewArgument(pos, "right_input"),
                 false,
-                testContext.TypeCtx);
+                testContext.TypeCtx).AsNarrow(testContext.ExprCtx);
 
         // Keep projections available to the full peephole until the selected lowering pass runs.
         TExprNode::TListType projections;
@@ -8344,7 +8344,7 @@ FROM (
                     testContext.ExprCtx.NewArgument(pos, "right_input"),
                     useBlockHashJoin,
                     testContext.TypeCtx
-                );
+                ).AsNarrow(testContext.ExprCtx);
         };
 
         auto physical = buildJoin(false);
@@ -8402,7 +8402,9 @@ FROM (
         UNIT_ASSERT(aggLiveOut.contains(TInfoUnit("sum_value")));
 
         auto physical = TPhysicalAggregationBuilder(aggregate, testContext.ExprCtx, pos)
-            .BuildPhysicalOp(testContext.ExprCtx.NewArgument(pos, "input"), std::nullopt);
+            .BuildPhysicalOp(
+                NPhysicalConvertionUtils::TStageBody::Narrow(testContext.ExprCtx.NewArgument(pos, "input")),
+                std::nullopt);
 
         TExprNode::TListType narrowMaps;
         CollectCallableNodes(physical, "NarrowMap", narrowMaps);

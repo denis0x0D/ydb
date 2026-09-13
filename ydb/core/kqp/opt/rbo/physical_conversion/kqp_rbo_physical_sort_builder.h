@@ -8,14 +8,14 @@ using namespace NYql::NNodes;
 using namespace NKikimr;
 using namespace NKikimr::NKqp;
 
-class TPhysicalSortBuilder: public TPhysicalUnaryOpBuilder {
+class TPhysicalSortBuilder: public TPhysicalWideUnaryOpBuilder {
 public:
     TPhysicalSortBuilder(TIntrusivePtr<TOpSort> sort, TExprContext& ctx, TPositionHandle pos)
-        : TPhysicalUnaryOpBuilder(ctx, pos)
+        : TPhysicalWideUnaryOpBuilder(ctx, pos)
         , Sort(sort) {
     }
 
-    TExprNode::TPtr BuildPhysicalOp(TExprNode::TPtr input) override;
+    NPhysicalConvertionUtils::TStageBody BuildPhysicalOp(const NPhysicalConvertionUtils::TStageBody& input) override;
 
 private:
     TVector<TExprNode::TPtr> BuildSortKeysForWideSort(const TVector<TInfoUnit>& inputs, const TVector<TSortElement>& sortElements);
