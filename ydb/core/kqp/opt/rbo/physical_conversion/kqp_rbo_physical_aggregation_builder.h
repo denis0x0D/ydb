@@ -48,7 +48,7 @@ public:
         , PruneUnusedOutputs(pruneUnusedOutputs) {
     }
 
-    TExprNode::TPtr BuildPhysicalOp(TExprNode::TPtr input, std::optional<i64> memLimit) override;
+    TExprNode::TPtr BuildPhysicalOp(const NPhysicalConvertionUtils::TStageBody& input, std::optional<i64> memLimit) override;
 
 private:
     // Following functions creates a 4 lambdas for physical aggregation:

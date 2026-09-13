@@ -67,7 +67,10 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
         rboCtx.TraceLog.stage("Physical AST generation");
     }
 
-    THashMap<ui32, TExprNode::TPtr> stages;
+    // Bodies are handed from one operator to the next in whichever form - wide flow or
+    // narrow stream - saves a conversion, and are materialized as narrow stage programs
+    // once every operator has been emitted.
+    THashMap<ui32, NPhysicalConvertionUtils::TStageBody> stageBodies;
     THashMap<ui32, TVector<TExprNode::TPtr>> stageArgs;
     THashMap<ui32, TPositionHandle> stagePos;
     auto& graph = root.PlanProps.StageGraph;
@@ -80,9 +83,9 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
         auto op = iter.Current;
         auto opStageId = *(op->Props.StageId);
 
-        TExprNode::TPtr currentStageBody;
-        if (stages.contains(opStageId)) {
-            currentStageBody = stages.at(opStageId);
+        NPhysicalConvertionUtils::TStageBody currentStageBody;
+        if (stageBodies.contains(opStageId)) {
+            currentStageBody = stageBodies.at(opStageId);
         }
 
         if (op->Kind == EOperator::EmptySource) {
@@ -90,13 +93,14 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
             listElements.push_back(Build<TCoAsStruct>(ctx, op->Pos).Done());
 
             // clang-format off
-            currentStageBody = Build<TCoIterator>(ctx, op->Pos)
-                .List<TCoAsList>()
-                    .Add(listElements)
-                .Build()
-            .Done().Ptr();
+            currentStageBody = NPhysicalConvertionUtils::TStageBody::Narrow(
+                Build<TCoIterator>(ctx, op->Pos)
+                    .List<TCoAsList>()
+                        .Add(listElements)
+                    .Build()
+                .Done().Ptr());
             // clang-format on
-            stages[opStageId] = currentStageBody;
+            stageBodies[opStageId] = currentStageBody;
             stagePos[opStageId] = op->Pos;
             YQL_CLOG(TRACE, CoreDq) << "Converted Empty Source " << opStageId;
         } else if (op->Kind == EOperator::Source) {
@@ -106,17 +110,18 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
 
             if (!opRead->IsSingleConsumer()) {
                 if (opRead->GetTableStorageType() == NYql::EStorageType::RowStorage) {
-                    auto existingStage = TDqPhyStage(currentStageBody);
+                    auto existingStage = TDqPhyStage(currentStageBody.AsNarrow(ctx));
                     auto switchBody = NPhysicalConvertionUtils::BuildMultiConsumerHandler(
                         existingStage.Program().Body().Ptr(), opRead->GetNumOfConsumers(), ctx, op->Pos);
                     // clang-format off
-                    currentStageBody = Build<TDqPhyStage>(ctx, op->Pos)
-                        .InitFrom(existingStage)
-                        .Program()
-                            .Args(existingStage.Program().Args())
-                            .Body(switchBody)
-                        .Build()
-                    .Done().Ptr();
+                    currentStageBody = NPhysicalConvertionUtils::TStageBody::Narrow(
+                        Build<TDqPhyStage>(ctx, op->Pos)
+                            .InitFrom(existingStage)
+                            .Program()
+                                .Args(existingStage.Program().Args())
+                                .Body(switchBody)
+                            .Build()
+                        .Done().Ptr());
                     // clang-format on
                 } else {
                     currentStageBody = NPhysicalConvertionUtils::BuildMultiConsumerHandler(
@@ -124,7 +129,7 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
                 }
             }
 
-            stages[opStageId] = currentStageBody;
+            stageBodies[opStageId] = currentStageBody;
             stagePos[opStageId] = op->Pos;
             YQL_CLOG(TRACE, CoreDq) << "Converted Read " << opStageId;
         } else if (op->Kind == EOperator::Filter) {
@@ -133,7 +138,7 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
             if (!currentStageBody) {
                 auto [stageArg, stageInput] = graph.GenerateStageInput(stageInputCounter, op->Pos, ctx);
                 stageArgs[opStageId].push_back(stageArg);
-                currentStageBody = stageInput;
+                currentStageBody = NPhysicalConvertionUtils::TStageBody::Narrow(stageInput);
             }
 
             currentStageBody = Build<TPhysicalFilterBuilder>(filter, ctx, op->Pos, currentStageBody);
@@ -142,7 +147,7 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
                 currentStageBody = NPhysicalConvertionUtils::BuildMultiConsumerHandler(currentStageBody, filter->GetNumOfConsumers(), ctx, op->Pos);
             }
 
-            stages[opStageId] = currentStageBody;
+            stageBodies[opStageId] = currentStageBody;
             stagePos[opStageId] = op->Pos;
             YQL_CLOG(TRACE, CoreDq) << "Converted Filter " << opStageId;
         } else if (op->Kind == EOperator::Map) {
@@ -151,7 +156,7 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
             if (!currentStageBody) {
                 auto [stageArg, stageInput] = graph.GenerateStageInput(stageInputCounter, op->Pos, ctx);
                 stageArgs[opStageId].push_back(stageArg);
-                currentStageBody = stageInput;
+                currentStageBody = NPhysicalConvertionUtils::TStageBody::Narrow(stageInput);
             }
 
             currentStageBody = Build<TPhysicalMapBuilder>(map, ctx, op->Pos, currentStageBody);
@@ -160,44 +165,49 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
                 currentStageBody = NPhysicalConvertionUtils::BuildMultiConsumerHandler(currentStageBody, map->GetNumOfConsumers(), ctx, op->Pos);
             }
 
-            stages[opStageId] = currentStageBody;
+            stageBodies[opStageId] = currentStageBody;
             stagePos[opStageId] = op->Pos;
             YQL_CLOG(TRACE, CoreDq) << "Converted Map " << opStageId;
         } else if (op->Kind == EOperator::Limit) {
             if (!currentStageBody) {
                 auto [stageArg, stageInput] = graph.GenerateStageInput(stageInputCounter, op->Pos, ctx);
                 stageArgs[opStageId].push_back(stageArg);
-                currentStageBody = stageInput;
+                currentStageBody = NPhysicalConvertionUtils::TStageBody::Narrow(stageInput);
             }
 
             auto limit = CastOperator<TOpLimit>(op);
 
+            // Take/Skip are generic over the sequence, so keep the body wide through the limit
+            // and express the projection as a wide map instead of ExtractMembers over structs.
+            const auto limitInputs = NPhysicalConvertionUtils::GetLiveInputIUs(*limit, 0);
+            auto limitBody = currentStageBody.AsWide(limitInputs, ctx);
             if (limit->HasOffset()) {
                 // clang-format off
-                currentStageBody = Build<TCoSkip>(ctx, op->Pos)
-                    .Input(currentStageBody)
+                limitBody = Build<TCoSkip>(ctx, op->Pos)
+                    .Input(limitBody)
                     .Count(limit->GetOffsetCond()->GetExpressionBody())
                 .Done().Ptr();
                 // clang-format on
             }
 
             // clang-format off
-            currentStageBody = Build<TCoTake>(ctx, op->Pos)
-                .Input(currentStageBody)
+            limitBody = Build<TCoTake>(ctx, op->Pos)
+                .Input(limitBody)
                 .Count(limit->LimitCond.GetExpressionBody())
             .Done().Ptr();
             // clang-format on
 
-            currentStageBody = NPhysicalConvertionUtils::ExtractMembers(
-                currentStageBody,
-                ctx,
-                NPhysicalConvertionUtils::GetLiveOutputIUs(*limit));
+            const auto limitLive = NPhysicalConvertionUtils::GetLiveOutputIUs(*limit);
+            if (limitLive != limitInputs) {
+                limitBody = NPhysicalConvertionUtils::BuildWideProjection(limitBody, limitInputs, limitLive, ctx);
+            }
+            currentStageBody = NPhysicalConvertionUtils::TStageBody::Wide(limitBody, limitLive);
 
             if (!limit->IsSingleConsumer()) {
                 currentStageBody = NPhysicalConvertionUtils::BuildMultiConsumerHandler(currentStageBody, limit->GetNumOfConsumers(), ctx, op->Pos);
             }
 
-            stages[opStageId] = currentStageBody;
+            stageBodies[opStageId] = currentStageBody;
             stagePos[opStageId] = op->Pos;
             YQL_CLOG(TRACE, CoreDq) << "Converted Limit " << opStageId;
         } else if (op->Kind == EOperator::Sort) {
@@ -205,7 +215,7 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
             if (!currentStageBody) {
                 auto [stageArg, stageInput] = graph.GenerateStageInput(stageInputCounter, op->Pos, ctx);
                 stageArgs[opStageId].push_back(stageArg);
-                currentStageBody = stageInput;
+                currentStageBody = NPhysicalConvertionUtils::TStageBody::Narrow(stageInput);
             }
             currentStageBody = Build<TPhysicalSortBuilder>(sort, ctx, op->Pos, currentStageBody);
 
@@ -213,7 +223,7 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
                 currentStageBody = NPhysicalConvertionUtils::BuildMultiConsumerHandler(currentStageBody, sort->GetNumOfConsumers(), ctx, op->Pos);
             }
 
-            stages[opStageId] = currentStageBody;
+            stageBodies[opStageId] = currentStageBody;
             stagePos[opStageId] = op->Pos;
             YQL_CLOG(TRACE, CoreDq) << "Converted Sort " << opStageId;
         } else if (op->Kind == EOperator::Window) {
@@ -221,7 +231,7 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
             if (!currentStageBody) {
                 auto [stageArg, stageInput] = graph.GenerateStageInput(stageInputCounter, op->Pos, ctx);
                 stageArgs[opStageId].push_back(stageArg);
-                currentStageBody = stageInput;
+                currentStageBody = NPhysicalConvertionUtils::TStageBody::Narrow(stageInput);
             }
             currentStageBody = Build<TPhysicalWindowBuilder>(window, ctx, op->Pos, currentStageBody);
 
@@ -229,7 +239,7 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
                 currentStageBody = NPhysicalConvertionUtils::BuildMultiConsumerHandler(currentStageBody, window->GetNumOfConsumers(), ctx, op->Pos);
             }
 
-            stages[opStageId] = currentStageBody;
+            stageBodies[opStageId] = currentStageBody;
             stagePos[opStageId] = op->Pos;
             YQL_CLOG(TRACE, CoreDq) << "Converted Window " << opStageId;
         } else if (op->Kind == EOperator::Join) {
@@ -247,7 +257,7 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
                 currentStageBody = NPhysicalConvertionUtils::BuildMultiConsumerHandler(currentStageBody, join->GetNumOfConsumers(), ctx, op->Pos);
             }
 
-            stages[opStageId] = currentStageBody;
+            stageBodies[opStageId] = currentStageBody;
             stagePos[opStageId] = op->Pos;
             YQL_CLOG(TRACE, CoreDq) << "Converted Join " << opStageId;
         } else if (op->Kind == EOperator::UnionAll) {
@@ -260,13 +270,14 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
                 inputs[childIndex] = input;
             }
 
-            currentStageBody = Build<TPhysicalUnionAllBuilder>(unionAll, ctx, op->Pos, inputs);
+            currentStageBody = NPhysicalConvertionUtils::TStageBody::Narrow(
+                Build<TPhysicalUnionAllBuilder>(unionAll, ctx, op->Pos, inputs));
 
             if (!unionAll->IsSingleConsumer()) {
                 currentStageBody = NPhysicalConvertionUtils::BuildMultiConsumerHandler(currentStageBody, unionAll->GetNumOfConsumers(), ctx, op->Pos);
             }
 
-            stages[opStageId] = currentStageBody;
+            stageBodies[opStageId] = currentStageBody;
             stagePos[opStageId] = op->Pos;
             YQL_CLOG(TRACE, CoreDq) << "Converted UnionAll " << opStageId;
         } else if (op->Kind == EOperator::Aggregate) {
@@ -275,7 +286,7 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
              if (!currentStageBody) {
                 auto [stageArg, stageInput] = graph.GenerateStageInput(stageInputCounter, op->Pos, ctx);
                 stageArgs[opStageId].push_back(stageArg);
-                currentStageBody = stageInput;
+                currentStageBody = NPhysicalConvertionUtils::TStageBody::Narrow(stageInput);
             }
 
             std::optional<i64> memLimit;
@@ -285,13 +296,14 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
 
             // The full physical-stage peephole performs this pruning later.
             const bool pruneUnusedOutputs = !rboCtx.KqpCtx.Config->GetEnableNewRBOPhysicalStagePeephole();
-            currentStageBody = TPhysicalAggregationBuilder(aggregate, ctx, op->Pos, pruneUnusedOutputs)
-                .BuildPhysicalOp(currentStageBody, memLimit);
+            currentStageBody = NPhysicalConvertionUtils::TStageBody::Narrow(
+                TPhysicalAggregationBuilder(aggregate, ctx, op->Pos, pruneUnusedOutputs)
+                    .BuildPhysicalOp(currentStageBody, memLimit));
             if (!aggregate->IsSingleConsumer()) {
                 currentStageBody = NPhysicalConvertionUtils::BuildMultiConsumerHandler(currentStageBody, aggregate->GetNumOfConsumers(), ctx, op->Pos);
             }
 
-            stages[opStageId] = currentStageBody;
+            stageBodies[opStageId] = currentStageBody;
             stagePos[opStageId] = op->Pos;
         } else if (op->Kind == EOperator::TableLookup) {
             auto lookup = CastOperator<TOpTableLookup>(op);
@@ -299,7 +311,7 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
             if (!currentStageBody) {
                 auto [stageArg, stageInput] = graph.GenerateStageInput(stageInputCounter, op->Pos, ctx);
                 stageArgs[opStageId].push_back(stageArg);
-                currentStageBody = stageInput;
+                currentStageBody = NPhysicalConvertionUtils::TStageBody::Narrow(stageInput);
             }
 
             if (lookup->IsJoin()) {
@@ -308,17 +320,18 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
                 auto* streamLookup = dynamic_cast<TStreamLookupConnection*>(connection.Get());
                 Y_ENSURE(streamLookup, "A table lookup in join mode must be fed by a stream lookup connection");
 
-                auto keys = NLookupJoinBuilder::BuildLookupKeys(*lookup, stages.at(inputStageId), ctx);
-                stages[inputStageId] = keys.InputStage;
+                auto keys = NLookupJoinBuilder::BuildLookupKeys(*lookup, stageBodies.at(inputStageId).AsNarrow(ctx), ctx);
+                stageBodies[inputStageId] = NPhysicalConvertionUtils::TStageBody::Narrow(keys.InputStage);
                 streamLookup->SetInputType(keys.InputType);
                 YQL_CLOG(TRACE, CoreDq) << "Converted TableLookupJoin " << opStageId;
             } else {
-                auto streamInput = Build<TCoToStream>(ctx, op->Pos).Input(currentStageBody).Done().Ptr();
+                auto streamInput = Build<TCoToStream>(ctx, op->Pos).Input(currentStageBody.AsNarrow(ctx)).Done().Ptr();
                 TVector<std::pair<TString, TString>> renames;
                 for (size_t i = 0; i < lookup->FetchColumns.size(); ++i) {
                     renames.emplace_back(lookup->FetchColumns[i], lookup->OutputIUs[i].GetFullName());
                 }
-                currentStageBody = NPhysicalConvertionUtils::BuildRenameMap(streamInput, renames, ctx);
+                currentStageBody = NPhysicalConvertionUtils::TStageBody::Narrow(
+                    NPhysicalConvertionUtils::BuildRenameMap(streamInput, renames, ctx));
 
                 if (!lookup->IsSingleConsumer()) {
                     currentStageBody = NPhysicalConvertionUtils::BuildMultiConsumerHandler(currentStageBody, lookup->GetNumOfConsumers(), ctx, op->Pos);
@@ -326,20 +339,21 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
                 YQL_CLOG(TRACE, CoreDq) << "Converted TableLookup " << opStageId;
             }
 
-            stages[opStageId] = currentStageBody;
+            stageBodies[opStageId] = currentStageBody;
             stagePos[opStageId] = op->Pos;
         } else if (op->Kind == EOperator::IndexLookupJoin) {
             auto lookupJoin = CastOperator<TOpIndexLookupJoin>(op);
             Y_ENSURE(currentStageBody, "A lookup join must share the stage of its table lookup");
 
-            currentStageBody = Build<TPhysicalIndexLookupJoinBuilder>(lookupJoin, ctx, op->Pos, currentStageBody);
+            currentStageBody = NPhysicalConvertionUtils::TStageBody::Narrow(
+                Build<TPhysicalIndexLookupJoinBuilder>(lookupJoin, ctx, op->Pos, currentStageBody.AsNarrow(ctx)));
 
             if (!lookupJoin->IsSingleConsumer()) {
                 currentStageBody =
                     NPhysicalConvertionUtils::BuildMultiConsumerHandler(currentStageBody, lookupJoin->GetNumOfConsumers(), ctx, op->Pos);
             }
 
-            stages[opStageId] = currentStageBody;
+            stageBodies[opStageId] = currentStageBody;
             stagePos[opStageId] = op->Pos;
             YQL_CLOG(TRACE, CoreDq) << "Converted IndexLookupJoin " << opStageId;
         } else if (op->Kind == EOperator::TableEffect) {
@@ -348,18 +362,25 @@ TExprNode::TPtr ConvertToPhysical(TOpRoot& root, TRBOContext& rboCtx) {
             if (!currentStageBody) {
                 auto [stageArg, stageInput] = graph.GenerateStageInput(stageInputCounter, op->Pos, ctx);
                 stageArgs[opStageId].push_back(stageArg);
-                currentStageBody = stageInput;
+                currentStageBody = NPhysicalConvertionUtils::TStageBody::Narrow(stageInput);
             }
 
-            currentStageBody = Build<TPhysicalTableEffectBuilder>(tableEffect, ctx, op->Pos, currentStageBody);
+            currentStageBody = NPhysicalConvertionUtils::TStageBody::Narrow(
+                Build<TPhysicalTableEffectBuilder>(tableEffect, ctx, op->Pos, currentStageBody.AsNarrow(ctx)));
 
-            stages[opStageId] = currentStageBody;
+            stageBodies[opStageId] = currentStageBody;
             stagePos[opStageId] = op->Pos;
             YQL_CLOG(TRACE, CoreDq) << "Converted TableEffect " << opStageId;
         }
         else {
             Y_ENSURE(false, "Could not generate physical plan");
         }
+    }
+
+    THashMap<ui32, TExprNode::TPtr> stages;
+    stages.reserve(stageBodies.size());
+    for (const auto& [id, body] : stageBodies) {
+        stages[id] = body.AsNarrow(ctx);
     }
 
     return TPhysicalQueryBuilder(root, std::move(graph), std::move(stages), std::move(stageArgs), std::move(stagePos), rboCtx).BuildPhysicalQuery();

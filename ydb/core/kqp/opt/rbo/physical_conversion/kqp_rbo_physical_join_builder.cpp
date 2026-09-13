@@ -107,6 +107,29 @@ TExprNode::TPtr TPhysicalJoinBuilder::BuildCrossJoin(TExprNode::TPtr leftInput, 
     // clang-format on
 }
 
+
+// Drops slots that are dead past the join, keeping the wide form. Emits nothing when the
+// layout already matches.
+static NPhysicalConvertionUtils::TStageBody MakeWideJoinOutput(TExprNode::TPtr wide, const TVector<TString>& layout,
+                                                               const THashSet<TString>& live, TExprContext& ctx) {
+    TVector<TInfoUnit> all;
+    all.reserve(layout.size());
+    for (const auto& name : layout) {
+        all.emplace_back(name);
+    }
+    TVector<TInfoUnit> kept;
+    kept.reserve(all.size());
+    for (const auto& column : all) {
+        if (live.contains(column.GetFullName())) {
+            kept.push_back(column);
+        }
+    }
+    if (kept.size() != all.size()) {
+        wide = NPhysicalConvertionUtils::BuildWideProjection(wide, all, kept, ctx);
+    }
+    return NPhysicalConvertionUtils::TStageBody::Wide(std::move(wide), std::move(kept));
+}
+
 TExprNode::TPtr TPhysicalJoinBuilder::PrepareJoinSide(TExprNode::TPtr input, const TVector<TInfoUnit>& colNames, TVector<TString>& joinKeys,
                                                       const TModifyKeysList& remap, const bool filterNulls) {
     // clang-format off
@@ -461,7 +484,7 @@ TExprNode::TPtr TPhysicalJoinBuilder::BuildGraceJoin(const TString& joinType, TE
     // clang-format on
 }
 
-TExprNode::TPtr TPhysicalJoinBuilder::BuildPhysicalJoin(TExprNode::TPtr leftInput, TExprNode::TPtr rightInput, bool useBlockHashJoin, const TTypeAnnotationContext& typesCtx) {
+NPhysicalConvertionUtils::TStageBody TPhysicalJoinBuilder::BuildPhysicalJoin(TExprNode::TPtr leftInput, TExprNode::TPtr rightInput, bool useBlockHashJoin, const TTypeAnnotationContext& typesCtx) {
     const TPhysicalOpProps& props = Join->Props;
     const auto leftIUs = NPhysicalConvertionUtils::GetLiveInputIUs(*Join, 0);
     const auto rightIUs = NPhysicalConvertionUtils::GetLiveInputIUs(*Join, 1);
@@ -641,23 +664,18 @@ TExprNode::TPtr TPhysicalJoinBuilder::BuildPhysicalJoin(TExprNode::TPtr leftInpu
             .Build()
         .Done().Ptr();
 
-        return Build<TCoFromFlow>(Ctx, Pos)
-            .Input(NPhysicalConvertionUtils::BuildNarrowMapForWideInput(phyJoin, inputs, joinOutputs, Ctx))
-        .Done().Ptr();
         // clang-format on
+        return MakeWideJoinOutput(phyJoin, inputs, joinOutputs, Ctx);
     }
 
-    // clang-format off
-    return Build<TCoFromFlow>(Ctx, Pos)
-        .Input(NPhysicalConvertionUtils::BuildNarrowMapForWideInput(phyJoin, joinOutputColumns, joinOutputs, Ctx))
-    .Done().Ptr();
-    // clang-format on
+    return MakeWideJoinOutput(phyJoin, joinOutputColumns, joinOutputs, Ctx);
 }
 
-TExprNode::TPtr TPhysicalJoinBuilder::BuildPhysicalOp(TExprNode::TPtr leftInput, TExprNode::TPtr rightInput, bool useBlockHashJoin, const TTypeAnnotationContext& typesCtx) {
+NPhysicalConvertionUtils::TStageBody TPhysicalJoinBuilder::BuildPhysicalOp(TExprNode::TPtr leftInput, TExprNode::TPtr rightInput, bool useBlockHashJoin, const TTypeAnnotationContext& typesCtx) {
     const auto joinKind = to_lower(Join->JoinKind);
     if (joinKind == "cross" && !useBlockHashJoin) {
-        return BuildCrossJoin(leftInput, rightInput);
+        // Cross join is built as a narrow FlatMap over structs.
+        return NPhysicalConvertionUtils::TStageBody::Narrow(BuildCrossJoin(leftInput, rightInput));
     }
 
     Y_ENSURE(joinKind == "inner" || joinKind == "left" || joinKind == "leftonly" || joinKind == "leftsemi" ||

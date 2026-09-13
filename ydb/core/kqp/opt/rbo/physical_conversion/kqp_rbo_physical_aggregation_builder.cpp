@@ -1445,7 +1445,7 @@ THashMap<TString, const TTypeAnnotationNode*> TPhysicalAggregationBuilder::GetIn
     return colTypeMap;
 }
 
-TExprNode::TPtr TPhysicalAggregationBuilder::BuildPhysicalOp(TExprNode::TPtr input, std::optional<i64> memLimit) {
+TExprNode::TPtr TPhysicalAggregationBuilder::BuildPhysicalOp(const NPhysicalConvertionUtils::TStageBody& input, std::optional<i64> memLimit) {
     // We get input columns based on key columns and aggregation traits.
     const TVector<TString> inputColumns = GetInputColumns();
     // Just a full names of key columns.
@@ -1465,18 +1465,19 @@ TExprNode::TPtr TPhysicalAggregationBuilder::BuildPhysicalOp(TExprNode::TPtr inp
     // Here we want to create a internal physical aggregation traits.
     BuildPhysicalAggregationTraits(inputColumns, keyFields, inputFields, phyAggregationTraitsList, renameMap, inputType, outputType);
 
-    // clang-format off
-    input = Ctx.Builder(Pos)
-        .Callable("ToFlow")
-            .Add(0, input)
-        .Seal()
-    .Build();
-    // clang-format on
+    // The combiner works on a wide flow, so take the body wide directly: narrowing here only
+    // to re-expand would emit a ToFlow/ExpandMap pair for peephole to fold back out again.
+    TVector<TInfoUnit> inputColumnIUs;
+    inputColumnIUs.reserve(inputColumns.size());
+    for (const auto& column : inputColumns) {
+        inputColumnIUs.emplace_back(column);
+    }
+    auto wideInput = input.AsWide(inputColumnIUs, Ctx);
 
     // clang-format off
     auto wideCombiner = Ctx.Builder(Pos)
         .Callable(PhysicalAggregationName)
-            .Add(0, NPhysicalConvertionUtils::BuildExpandMapForNarrowInput(input, inputColumns, Ctx))
+            .Add(0, wideInput)
             .Add(1, memoryLimit)
             .Add(2, BuildKeyExtractorLambda(keyFields, inputColumns))
             .Add(3, BuildInitHandlerLambda(keyFields, inputFields, phyAggregationTraitsList))

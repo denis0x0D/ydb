@@ -29,7 +29,7 @@ THashMap<TString, TString> BuildOutputToPhysicalColumnMap(const TOpRead& read) {
 
 } // anonymous namespace
 
-TExprNode::TPtr TPhysicalSourceBuilder::BuildPhysicalOp() {
+NPhysicalConvertionUtils::TStageBody TPhysicalSourceBuilder::BuildPhysicalOp() {
     TExprNode::TPtr source;
     TVector<TExprNode::TPtr> columns;
     for (const auto& column : Read->Columns) {
@@ -88,7 +88,9 @@ TExprNode::TPtr TPhysicalSourceBuilder::BuildPhysicalOp() {
                 .Settings(NYql::NDq::TDqStageSettings::New(StageGUID).BuildNode(Ctx, Pos))
             .Done().Ptr();
             // clang-format on
-            break;
+
+            YQL_CLOG(TRACE, CoreDq) << "[NEW RBO Physical source] " << KqpExprToPrettyString(TExprBase(source), Ctx);
+            return NPhysicalConvertionUtils::TStageBody::Narrow(source);
         }
         case NYql::EStorageType::ColumnStorage: {
             // clang-format off
@@ -139,20 +141,12 @@ TExprNode::TPtr TPhysicalSourceBuilder::BuildPhysicalOp() {
             .Done().Ptr();
             // clang-format on
 
-            auto narrowMap = NPhysicalConvertionUtils::BuildNarrowMapForWideInput(flowNonBlockRead, Read->OutputIUs, Ctx);
-
-            // clang-format off
-            source = Build<TCoFromFlow>(Ctx, Pos)
-                .Input(narrowMap)
-            .Done().Ptr();
-            // clang-format on
-            break;
+            YQL_CLOG(TRACE, CoreDq) << "[NEW RBO Physical source] " << KqpExprToPrettyString(TExprBase(flowNonBlockRead), Ctx);
+            return NPhysicalConvertionUtils::TStageBody::Wide(flowNonBlockRead, Read->OutputIUs);
         }
         default:
             Y_ENSURE(false, "Unsupported table source type.");
     }
 
-    YQL_CLOG(TRACE, CoreDq) << "[NEW RBO Physical source] " << KqpExprToPrettyString(TExprBase(source), Ctx);
-
-    return source;
+    Y_UNREACHABLE();
 }

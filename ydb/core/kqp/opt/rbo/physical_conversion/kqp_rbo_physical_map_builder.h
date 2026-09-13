@@ -8,14 +8,14 @@ using namespace NYql::NNodes;
 using namespace NKikimr;
 using namespace NKikimr::NKqp;
 
-class TPhysicalMapBuilder: public TPhysicalUnaryOpBuilder {
+class TPhysicalMapBuilder: public TPhysicalWideUnaryOpBuilder {
 public:
     TPhysicalMapBuilder(TIntrusivePtr<TOpMap> map, TExprContext& ctx, TPositionHandle pos)
-        : TPhysicalUnaryOpBuilder(ctx, pos)
+        : TPhysicalWideUnaryOpBuilder(ctx, pos)
         , Map(map) {
     }
 
-    TExprNode::TPtr BuildPhysicalOp(TExprNode::TPtr input) override;
+    NPhysicalConvertionUtils::TStageBody BuildPhysicalOp(const NPhysicalConvertionUtils::TStageBody& input) override;
 
 private:
     TIntrusivePtr<TOpMap> Map;

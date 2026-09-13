@@ -245,4 +245,57 @@ TExprNode::TPtr BuildVoidLambda(TExprContext& ctx, TPositionHandle pos) {
     // clang-format on
 }
 
+TExprNode::TPtr BuildWideProjection(TExprNode::TPtr input, const TVector<TInfoUnit>& from, const TVector<TInfoUnit>& to, TExprContext& ctx) {
+    THashMap<TString, ui32> indices;
+    indices.reserve(from.size());
+    for (ui32 i = 0; i < from.size(); ++i) {
+        indices.emplace(from[i].GetFullName(), i);
+    }
+
+    TVector<TExprNode::TPtr> args;
+    args.reserve(from.size());
+    for (ui32 i = 0; i < from.size(); ++i) {
+        args.push_back(ctx.NewArgument(input->Pos(), "wide_" + ToString(i)));
+    }
+
+    TExprNode::TListType results;
+    results.reserve(to.size());
+    for (const auto& column : to) {
+        const auto it = indices.find(column.GetFullName());
+        Y_ENSURE(it != indices.end(), "Column " << column.GetFullName() << " is not available in the wide stage body");
+        results.push_back(args[it->second]);
+    }
+
+    auto lambda = ctx.NewLambda(input->Pos(), ctx.NewArguments(input->Pos(), std::move(args)), std::move(results));
+    return ctx.NewCallable(input->Pos(), "WideMap", {std::move(input), std::move(lambda)});
+}
+
+TExprNode::TPtr TStageBody::AsWide(const TVector<TInfoUnit>& columns, TExprContext& ctx) const {
+    Y_ENSURE(NarrowStream || WideFlow, "Stage body is empty");
+
+    if (!WideFlow) {
+        auto flow = ctx.NewCallable(NarrowStream->Pos(), "ToFlow", {NarrowStream});
+        return BuildExpandMapForNarrowInput(flow, columns, ctx);
+    }
+
+    if (WideColumns == columns) {
+        return WideFlow;
+    }
+    return BuildWideProjection(WideFlow, WideColumns, columns, ctx);
+}
+
+TExprNode::TPtr TStageBody::AsNarrow(TExprContext& ctx) const {
+    Y_ENSURE(NarrowStream || WideFlow, "Stage body is empty");
+
+    if (NarrowStream) {
+        return NarrowStream;
+    }
+    auto narrow = BuildNarrowMapForWideInput(WideFlow, WideColumns, ctx);
+    return ctx.NewCallable(WideFlow->Pos(), "FromFlow", {std::move(narrow)});
+}
+
+TStageBody BuildMultiConsumerHandler(const TStageBody& input, const ui32 numConsumers, TExprContext& ctx, TPositionHandle pos) {
+    return TStageBody::Narrow(BuildMultiConsumerHandler(input.AsNarrow(ctx), numConsumers, ctx, pos));
+}
+
 } // namespace NKikimr::NKqp::NPhysicalConvertionUtils
