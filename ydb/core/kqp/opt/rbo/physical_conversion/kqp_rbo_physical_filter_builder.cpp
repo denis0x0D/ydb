@@ -4,16 +4,10 @@ using namespace NYql::NNodes;
 using namespace NKikimr;
 using namespace NKikimr::NKqp;
 
-TExprNode::TPtr TPhysicalFilterBuilder::BuildPhysicalOp(TExprNode::TPtr input) {
+NPhysicalConvertionUtils::TStageBody TPhysicalFilterBuilder::BuildPhysicalOp(const NPhysicalConvertionUtils::TStageBody& input) {
     const auto inputColumns = NPhysicalConvertionUtils::GetLiveInputIUs(*Filter, 0);
 
-    // clang-format off
-    input = Build<TCoToFlow>(Ctx, Pos)
-        .Input(input)
-    .Done().Ptr();
-    // clang-format on
-
-    input = NPhysicalConvertionUtils::BuildExpandMapForNarrowInput(input, inputColumns, Ctx);
+    auto wideInput = input.AsWide(inputColumns, Ctx);
 
     THashMap<TString, ui32> colNamesToIndices;
     TVector<TExprNode::TPtr> lambdaArgs;
@@ -56,21 +50,27 @@ TExprNode::TPtr TPhysicalFilterBuilder::BuildPhysicalOp(TExprNode::TPtr input) {
     auto wideLambda = Ctx.NewLambda(Pos, Ctx.NewArguments(Pos, std::move(lambdaArgs)), {lambdaResult});
 
     // clang-format off
-    input = Build<TCoWideFilter>(Ctx, Pos)
-        .Input(input)
+    auto output = Build<TCoWideFilter>(Ctx, Pos)
+        .Input(wideInput)
         .Lambda(std::move(wideLambda))
     .Done().Ptr();
     // clang-format on
 
-    input = NPhysicalConvertionUtils::BuildNarrowMapForWideInput(input, inputColumns, NPhysicalConvertionUtils::BuildNameSet(NPhysicalConvertionUtils::GetLiveOutputIUs(*Filter)), Ctx);
+    // WideFilter passes every input slot through, so drop the ones that are dead past
+    // this operator. The projection is emitted only when something is actually dropped.
+    const auto liveOutputs = NPhysicalConvertionUtils::BuildNameSet(NPhysicalConvertionUtils::GetLiveOutputIUs(*Filter));
+    TVector<TInfoUnit> outputColumns;
+    outputColumns.reserve(inputColumns.size());
+    for (const auto& column : inputColumns) {
+        if (liveOutputs.contains(column.GetFullName())) {
+            outputColumns.push_back(column);
+        }
+    }
+    if (outputColumns.size() != inputColumns.size()) {
+        output = NPhysicalConvertionUtils::BuildWideProjection(output, inputColumns, outputColumns, Ctx);
+    }
 
-    // clang-format off
-    input = Build<TCoFromFlow>(Ctx, Pos)
-        .Input(input)
-    .Done().Ptr();
-    // clang-format on
+    YQL_CLOG(TRACE, CoreDq) << "[NEW RBO Physical filter] " << KqpExprToPrettyString(TExprBase(output), Ctx);
 
-    YQL_CLOG(TRACE, CoreDq) << "[NEW RBO Physical filter] " << KqpExprToPrettyString(TExprBase(input), Ctx);
-
-    return input;
+    return NPhysicalConvertionUtils::TStageBody::Wide(output, std::move(outputColumns));
 }

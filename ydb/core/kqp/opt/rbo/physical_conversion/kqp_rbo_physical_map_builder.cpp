@@ -4,23 +4,17 @@ using namespace NYql::NNodes;
 using namespace NKikimr;
 using namespace NKikimr::NKqp;
 
-TExprNode::TPtr TPhysicalMapBuilder::BuildPhysicalOp(TExprNode::TPtr input) {
+NPhysicalConvertionUtils::TStageBody TPhysicalMapBuilder::BuildPhysicalOp(const NPhysicalConvertionUtils::TStageBody& input) {
     const auto inputColumns = NPhysicalConvertionUtils::GetLiveInputIUs(*Map, 0);
     const auto liveOutputs = NPhysicalConvertionUtils::BuildNameSet(NPhysicalConvertionUtils::GetLiveOutputIUs(*Map));
 
-    // clang-format off
-    input = Build<TCoToFlow>(Ctx, Pos)
-        .Input(input)
-    .Done().Ptr();
-    // clang-format on
-
-    input = NPhysicalConvertionUtils::BuildExpandMapForNarrowInput(input, inputColumns, Ctx);
+    auto wideInput = input.AsWide(inputColumns, Ctx);
 
     THashMap<TString, ui32> colNamesToIndices;
     TVector<TExprNode::TPtr> lambdaArgs;
     TVector<TExprNode::TPtr> lambdaResults;
 
-    TVector<TString> outputColumns;
+    TVector<TInfoUnit> outputColumns;
     THashSet<TInfoUnit, TInfoUnit::THashFunction> renameSources;
 
     for (ui32 i = 0; i < inputColumns.size(); ++i) {
@@ -34,22 +28,23 @@ TExprNode::TPtr TPhysicalMapBuilder::BuildPhysicalOp(TExprNode::TPtr input) {
         }
     }
 
-    for (const auto& input : inputColumns) {
-        if (renameSources.contains(input)) {
+    for (const auto& column : inputColumns) {
+        if (renameSources.contains(column)) {
             continue;
         }
-        const auto& fullName = input.GetFullName();
+        const auto& fullName = column.GetFullName();
         if (!liveOutputs.contains(fullName)) {
             continue;
         }
         auto it = colNamesToIndices.find(fullName);
         Y_ENSURE(it != colNamesToIndices.end());
         lambdaResults.push_back(lambdaArgs[it->second]);
-        outputColumns.push_back(fullName);
+        outputColumns.push_back(column);
     }
 
     for (const auto& mapElement : Map->GetMapElements()) {
-        const auto outColName = mapElement.GetElementName().GetFullName();
+        const auto& outColumn = mapElement.GetElementName();
+        const auto outColName = outColumn.GetFullName();
         if (!liveOutputs.contains(outColName)) {
             continue;
         }
@@ -83,28 +78,21 @@ TExprNode::TPtr TPhysicalMapBuilder::BuildPhysicalOp(TExprNode::TPtr input) {
             lambdaResults.push_back(Ctx.ReplaceNodes(std::move(lambdaBody), replaces));
         }
 
-        outputColumns.push_back(outColName);
+        outputColumns.push_back(outColumn);
     }
 
     // Create a wide lambda.
     auto wideLambda = Ctx.NewLambda(Pos, Ctx.NewArguments(Pos, std::move(lambdaArgs)), std::move(lambdaResults));
 
     // clang-format off
-    input = Build<TCoWideMap>(Ctx, Pos)
-        .Input(input)
+    auto output = Build<TCoWideMap>(Ctx, Pos)
+        .Input(wideInput)
         .Lambda(std::move(wideLambda))
     .Done().Ptr();
     // clang-format on
 
-    input = NPhysicalConvertionUtils::BuildNarrowMapForWideInput(input, outputColumns, liveOutputs, Ctx);
+    // The wide lambda already emits exactly the live outputs, in outputColumns order.
+    YQL_CLOG(TRACE, CoreDq) << "[NEW RBO Physical map] " << KqpExprToPrettyString(TExprBase(output), Ctx);
 
-    // clang-format off
-    input = Build<TCoFromFlow>(Ctx, Pos)
-        .Input(input)
-    .Done().Ptr();
-    // clang-format on
-
-    YQL_CLOG(TRACE, CoreDq) << "[NEW RBO Physical map] " << KqpExprToPrettyString(TExprBase(input), Ctx);
-
-    return input;
+    return NPhysicalConvertionUtils::TStageBody::Wide(output, std::move(outputColumns));
 }

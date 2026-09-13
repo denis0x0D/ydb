@@ -7178,7 +7178,7 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                     testContext.ExprCtx.NewArgument(pos, "right_input"),
                     useBlockHashJoin,
                     testContext.TypeCtx
-                );
+                ).AsNarrow(testContext.ExprCtx);
         };
 
         auto physical = buildJoin(false);
@@ -7236,7 +7236,9 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
         UNIT_ASSERT(aggLiveOut.contains(TInfoUnit("sum_value")));
 
         auto physical = TPhysicalAggregationBuilder(aggregate, testContext.ExprCtx, pos)
-            .BuildPhysicalOp(testContext.ExprCtx.NewArgument(pos, "input"), std::nullopt);
+            .BuildPhysicalOp(
+                NPhysicalConvertionUtils::TStageBody::Narrow(testContext.ExprCtx.NewArgument(pos, "input")),
+                std::nullopt);
 
         TExprNode::TListType narrowMaps;
         CollectCallableNodes(physical, "NarrowMap", narrowMaps);

@@ -758,18 +758,12 @@ TExprNode::TPtr TPhysicalWindowBuilder::BuildWholePartition(TExprNode::TPtr wide
     return BuildExpandFromStructs(result);
 }
 
-TExprNode::TPtr TPhysicalWindowBuilder::BuildPhysicalOp(TExprNode::TPtr input) {
+NPhysicalConvertionUtils::TStageBody TPhysicalWindowBuilder::BuildPhysicalOp(const NPhysicalConvertionUtils::TStageBody& body) {
     Y_ENSURE(CanBuildWindow(*Window), "This window cannot be evaluated by a single forward pass");
 
     Prepare(NPhysicalConvertionUtils::GetLiveInputIUs(*Window, 0));
 
-    // clang-format off
-    input = Build<TCoToFlow>(Ctx, Pos)
-        .Input(input)
-    .Done().Ptr();
-    // clang-format on
-
-    input = NPhysicalConvertionUtils::BuildExpandMapForNarrowInput(input, Inputs, Ctx);
+    TExprNode::TPtr input = body.AsWide(Inputs, Ctx);
 
     // Sort for the partitioning keys + order by keys.
     if (const auto sortKeys = BuildSortKeys(); !sortKeys.empty()) {
@@ -808,18 +802,20 @@ TExprNode::TPtr TPhysicalWindowBuilder::BuildPhysicalOp(TExprNode::TPtr input) {
         // clang-format on
     }
 
-    input = NPhysicalConvertionUtils::BuildNarrowMapForWideInput(
-        input,
-        OutputLayout,
-        NPhysicalConvertionUtils::BuildNameSet(NPhysicalConvertionUtils::GetLiveOutputIUs(*Window)),
-        Ctx);
-
-    // clang-format off
-    input = Build<TCoFromFlow>(Ctx, Pos)
-        .Input(input)
-    .Done().Ptr();
-    // clang-format on
+    // WideChopper/WideSort pass every slot of OutputLayout through, so drop the ones that are
+    // dead past this operator; the projection is emitted only when something is dropped.
+    const auto liveOutputs = NPhysicalConvertionUtils::BuildNameSet(NPhysicalConvertionUtils::GetLiveOutputIUs(*Window));
+    TVector<TInfoUnit> outputColumns;
+    outputColumns.reserve(OutputLayout.size());
+    for (const auto& column : OutputLayout) {
+        if (liveOutputs.contains(column.GetFullName())) {
+            outputColumns.push_back(column);
+        }
+    }
+    if (outputColumns.size() != OutputLayout.size()) {
+        input = NPhysicalConvertionUtils::BuildWideProjection(input, OutputLayout, outputColumns, Ctx);
+    }
 
     YQL_CLOG(TRACE, CoreDq) << "[NEW RBO Physical window] " << KqpExprToPrettyString(TExprBase(input), Ctx);
-    return input;
+    return NPhysicalConvertionUtils::TStageBody::Wide(input, std::move(outputColumns));
 }
