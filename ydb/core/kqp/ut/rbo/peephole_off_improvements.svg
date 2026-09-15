@@ -423,7 +423,7 @@
 ]]>
 </script>
 <rect x="0.0" y="0" width="1600.0" height="2134.0" fill="url(#background)"  />
-<text id="title" x="800.00" y="24" >pg_rbo, peephole off - OURS (typeann guard + lambda guard + root-only param walk)</text>
+<text id="title" x="800.00" y="24" >pg_rbo, peephole off - improvements</text>
 <text id="details" x="10.00" y="2117" > </text>
 <text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
 <text id="search" x="1490.00" y="24" >Search</text>
