@@ -443,9 +443,9 @@ std::shared_ptr<TJoinOptimizerNode> ConvertJoinTree(
         TVector<TJoinColumn> leftKeys;
         TVector<TJoinColumn> rightKeys;
 
-        for (auto [leftKey, rightKey] : join->JoinKeys) {
-            leftKeys.push_back(ConvertRBOColumnToCBO(leaves, leftKey, leftNode));
-            rightKeys.push_back(ConvertRBOColumnToCBO(leaves, rightKey, rightNode));
+        for (const auto& joinKey : join->JoinKeys) {
+            leftKeys.push_back(ConvertRBOColumnToCBO(leaves, joinKey.Left, leftNode));
+            rightKeys.push_back(ConvertRBOColumnToCBO(leaves, joinKey.Right, rightNode));
         }
 
         result = std::make_shared<TJoinOptimizerNode>(leftNode,
@@ -464,26 +464,52 @@ std::shared_ptr<TJoinOptimizerNode> ConvertJoinTree(
     return result;
 }
 
+namespace {
+
+TString EqualNullsKeyId(const TInfoUnit& left, const TInfoUnit& right) {
+    const auto leftName = left.GetFullName();
+    const auto rightName = right.GetFullName();
+    return leftName <= rightName ? leftName + "=" + rightName : rightName + "=" + leftName;
+}
+
+} // anonymous namespace
+
+TEqualNullsKeys CollectEqualNullsKeys(const TOpCBOTree& cboTree) {
+    TEqualNullsKeys result;
+    for (const auto& node : cboTree.TreeNodes) {
+        if (node->Kind != EOperator::Join) {
+            continue;
+        }
+        for (const auto& joinKey : CastOperator<TOpJoin>(node)->JoinKeys) {
+            if (joinKey.EqualNulls) {
+                result.insert(EqualNullsKeyId(joinKey.Left, joinKey.Right));
+            }
+        }
+    }
+    return result;
+}
+
 TIntrusivePtr<IOperator> ConvertOptimizedTree(
     std::shared_ptr<IBaseOptimizerNode> tree,
     const TVector<TCBOLeaf>& leaves,
-    TPositionHandle pos)
+    TPositionHandle pos,
+    const TEqualNullsKeys& equalNullsKeys)
 {
     if (tree->Kind == RelNodeType) {
         auto rel = std::static_pointer_cast<NOpt::TRBORelOptimizerNode>(tree);
         return rel->Op;
     } else {
         auto join = std::static_pointer_cast<TJoinOptimizerNode>(tree);
-        auto leftArg = ConvertOptimizedTree(join->LeftArg, leaves, pos);
-        auto rightArg = ConvertOptimizedTree(join->RightArg, leaves, pos);
+        auto leftArg = ConvertOptimizedTree(join->LeftArg, leaves, pos, equalNullsKeys);
+        auto rightArg = ConvertOptimizedTree(join->RightArg, leaves, pos, equalNullsKeys);
 
         Y_ENSURE(join->LeftJoinKeys.size() == join->RightJoinKeys.size());
 
-        TVector<std::pair<TInfoUnit, TInfoUnit>> joinKeys;
+        TVector<TJoinKey> joinKeys;
         for (size_t i=0; i<join->LeftJoinKeys.size(); i++) {
             auto leftKey = ConvertCBOColumnToRBO(leaves, join->LeftJoinKeys[i]);
             auto rightKey = ConvertCBOColumnToRBO(leaves, join->RightJoinKeys[i]);
-            joinKeys.push_back(std::make_pair(leftKey, rightKey));
+            joinKeys.emplace_back(leftKey, rightKey, equalNullsKeys.contains(EqualNullsKeyId(leftKey, rightKey)));
         }
 
         auto joinKind = ConvertToJoinString(join->JoinType);

@@ -202,9 +202,9 @@ void TPhysicalJoinBuilder::PrepareJoinKeys(TVector<TString>& leftJoinKeys, TVect
 
     for (ui32 i = 0; i < Join->JoinKeys.size(); ++i) {
         const auto joinKeyPair = Join->JoinKeys[i];
-        const auto leftKey = joinKeyPair.first.GetFullName();
+        const auto leftKey = joinKeyPair.Left.GetFullName();
         leftJoinKeys.emplace_back(leftKey);
-        const auto rightKey = joinKeyPair.second.GetFullName();
+        const auto rightKey = joinKeyPair.Right.GetFullName();
         rightJoinKeys.emplace_back(rightKey);
         const bool duplicateLeftKey = !seenLeftKeys.insert(leftKey).second;
         const bool duplicateRightKey = !seenRightKeys.insert(rightKey).second;
@@ -393,6 +393,21 @@ TExprNode::TPtr TPhysicalJoinBuilder::BuildBlockHashJoin(const TString& joinType
         // clang-format on
     }
 
+    // Some keys could have IS NOT DISTINCT FROM semantics.
+    for (size_t keyIndex = 0; keyIndex < Join->JoinKeys.size(); ++keyIndex) {
+        if (Join->JoinKeys[keyIndex].EqualNulls) {
+            // clang-format off
+            joinSettings.push_back(
+                Build<TCoNameValueTuple>(Ctx, Pos)
+                    .Name().Build("EqualNulls")
+                    .Value<TCoUint32>()
+                        .Literal().Build(ToString(keyIndex))
+                        .Build()
+                .Done());
+            // clang-format on
+        }
+    }
+
     TExprNode::TPtr leftFilter;
     TExprNode::TPtr rightFilter;
     TExprNode::TPtr commonFilter;
@@ -478,6 +493,9 @@ TExprNode::TPtr TPhysicalJoinBuilder::BuildPhysicalJoin(TExprNode::TPtr leftInpu
 
     Y_ENSURE(props.JoinAlgo.has_value());
     auto joinAlgo = *(props.JoinAlgo);
+
+    Y_ENSURE(!HasEqualNullsKey(Join->JoinKeys) || useBlockHashJoin,
+             "Join keys with IS NOT DISTINCT FROM semantics require the block hash join");
 
     if (!Join->JoinFilters.empty() && joinAlgo == NKikimr::NKqp::EJoinAlgoType::MapJoin) {
         Y_ENSURE(useBlockHashJoin, "Join filters are supported only with BlockHashJoin.");

@@ -156,7 +156,7 @@ TIntrusivePtr<IOperator> TOptimizeCBOTreeRule::SimpleMatchAndApply(const TIntrus
 
     LogAndTraceJoinTree(ctx, "Optimized join tree", joinTree);
 
-    return ConvertOptimizedTree(joinTree, leaves, cboTree->Pos);
+    return ConvertOptimizedTree(joinTree, leaves, cboTree->Pos, CollectEqualNullsKeys(*cboTree));
 }
 
 } // namespace NKikimr::NKqp

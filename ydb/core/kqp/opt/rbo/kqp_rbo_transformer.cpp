@@ -246,7 +246,9 @@ void TKqpNewRBOTransformer::CollectJoinKeysColumns(const TIntrusivePtr<TOpJoin>&
         HistColumnsByTableName[tableName].insert(colName);
     };
 
-    for (const auto& [lhsKey, rhsKey] : join->JoinKeys) {
+    for (const auto& joinKey : join->JoinKeys) {
+        const auto& lhsKey = joinKey.Left;
+        const auto& rhsKey = joinKey.Right;
         requestHistogram(lhsKey);
         requestHistogram(rhsKey);
     }
