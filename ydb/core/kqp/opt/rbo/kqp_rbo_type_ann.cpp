@@ -514,6 +514,8 @@ TStatus ComputeTypes(TIntrusivePtr<TOpJoin> join, TRBOContext& ctx) {
         AnnotateLambdaIfNeeded(lambda, ctx);
     }
 
+    // Key columns keep the optionality of their inputs: an inner join is not allowed to dry them,
+    // because a key marked IS NOT DISTINCT FROM matches NULL to NULL and those rows reach the output.
     if (!JoinOutputsRight(join->JoinKind)) {
         rightItemTypes = {};
     } else if (!JoinOutputsLeft(join->JoinKind)) {

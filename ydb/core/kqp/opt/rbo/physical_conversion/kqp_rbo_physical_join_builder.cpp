@@ -213,13 +213,17 @@ void TPhysicalJoinBuilder::PrepareJoinKeys(TVector<TString>& leftJoinKeys, TVect
         const auto rightKeyType = rightInputType->FindItemType(rightKey);
         Y_ENSURE(leftKeyType && rightKeyType, "No types for join keys");
 
+        // Drying the key is only valid while the comparison rejects NULLs. A key marked
+        // IS NOT DISTINCT FROM matches NULL to NULL, so it has to keep its optionality.
+        const bool keepOptional = outer || joinKeyPair.EqualNulls;
+
         const TTypeAnnotationNode* commonType = nullptr;
         if (joinSide == EJoinSide::Left) {
-            commonType = JoinDryKeyType(outer, leftKeyType, rightKeyType, Ctx);
+            commonType = JoinDryKeyType(keepOptional, leftKeyType, rightKeyType, Ctx);
         } else if (joinSide == EJoinSide::Right) {
-            commonType = JoinDryKeyType(outer, rightKeyType, leftKeyType, Ctx);
+            commonType = JoinDryKeyType(keepOptional, rightKeyType, leftKeyType, Ctx);
         } else {
-            commonType = JoinCommonDryKeyType(Pos, outer, leftKeyType, rightKeyType, Ctx, typesCtx);
+            commonType = JoinCommonDryKeyType(Pos, keepOptional, leftKeyType, rightKeyType, Ctx, typesCtx);
         }
 
         if (commonType) {

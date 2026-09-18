@@ -38,7 +38,8 @@ TIntrusivePtr<IOperator> TRewriteRightJoinRule::SimpleMatchAndApply(const TIntru
     }
 
     // Swap arguments
-    return MakeIntrusive<TOpJoin>(join->GetRightInput(), join->GetLeftInput(), join->Pos, newJoinKind, newJoinKeys);
+    return MakeIntrusive<TOpJoin>(join->GetRightInput(), join->GetLeftInput(), join->Pos, newJoinKind, newJoinKeys,
+                                  join->JoinFilters);
 }
 
 }

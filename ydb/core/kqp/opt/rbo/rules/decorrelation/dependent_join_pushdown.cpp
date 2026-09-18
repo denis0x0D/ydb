@@ -503,25 +503,28 @@ TIntrusivePtr<IOperator> TPushDependentJoinThroughJoinRule::SimpleMatchAndApply(
     const auto joinKind = GetValidJoinKind(join->JoinKind);
     const bool innerLike = joinKind == "Inner" || joinKind == "Cross";
 
+    // Joins that keep every left row regardless of the right side. For those the domain travels
+    // with the left input, so pushing into the left alone reproduces the original per-domain result.
+    const bool leftPreserving = innerLike || joinKind == "Left" || joinKind == "LeftSemi" || joinKind == "LeftOnly";
+
     // Here we want to push the dependent join on the side where we have a free variables.
-    if (leftCorrelated && !rightCorrelated) {
-        if (!JoinOutputsLeft(joinKind)) {
-            return input;
-        }
+    if (leftCorrelated && !rightCorrelated && leftPreserving) {
         auto newLeft = PushInto(dependentJoin, join->GetLeftInput());
         return MakeIntrusive<TOpJoin>(newLeft, join->GetRightInput(), join->Pos, join->JoinKind, join->JoinKeys, join->JoinFilters);
     }
 
-    if (!leftCorrelated && rightCorrelated) {
-        if (!innerLike) {
-            return input;
-        }
+    // Pushing into the right side alone is only valid when the left side cannot produce a row on
+    // its own. Under an outer join a left row without a match is null extended, and its copy of the
+    // domain columns would come out NULL instead of one row per domain value, so those rows would
+    // drop out of their domain group. Neumann's rule for that case is to push into both sides and
+    // add the domain equality to the join predicate, which is what the code below does.
+    if (!leftCorrelated && rightCorrelated && innerLike) {
         auto newRight = PushInto(dependentJoin, join->GetRightInput());
         return MakeIntrusive<TOpJoin>(join->GetLeftInput(), newRight, join->Pos, join->JoinKind, join->JoinKeys, join->JoinFilters);
     }
 
     // I dont know about other kinds.
-    if (!innerLike && joinKind != "Left" && joinKind != "LeftSemi" && joinKind != "LeftOnly") {
+    if (!leftPreserving) {
         return input;
     }
 
@@ -533,7 +536,7 @@ TIntrusivePtr<IOperator> TPushDependentJoinThroughJoinRule::SimpleMatchAndApply(
     NMapRenames::AddUsedIUs(usedIUs, newRight->GetOutputIUs());
     const auto rightRenames = NMapRenames::MakeRenameMap(dependencies, props.InternalVarIdx, usedIUs);
 
-    // Add a domain keys if both side a correlated.
+    // Both sides now carry the domain, so the domain equality joins them back together.
     TVector<TJoinKey> domainKeys;
     for (const auto& iu : dependencies) {
         domainKeys.emplace_back(iu, iu);

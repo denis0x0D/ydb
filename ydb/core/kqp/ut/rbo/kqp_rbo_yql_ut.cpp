@@ -10150,6 +10150,33 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
                 ORDER BY t1.a;
              )",
              R"([[1];[2];[4];[5];[6];[8];[9];[10];[12]])"},
+
+            // Right joins inside a correlated subquery: the dependent join can only be pushed
+            // through inner-like and left-sided joins, so these rely on the right join being
+            // rewritten into a left join before inlining.
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE EXISTS (SELECT 1 FROM `/Root/t2` as t2 RIGHT JOIN `/Root/t3` as t3 ON t2.a == t3.a
+                              WHERE t3.c == t1.a)
+                ORDER BY t1.a;
+             )",
+             R"([[1];[2];[3];[4];[5];[6]])"},
+
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE EXISTS (SELECT 1 FROM `/Root/t2` as t2 RIGHT JOIN `/Root/t3` as t3 ON t2.b == t3.b
+                              WHERE t3.a == t1.e)
+                ORDER BY t1.a;
+             )",
+             R"([[2];[3];[5];[6];[7];[9];[10];[11]])"},
+
+            {R"(
+                SELECT t1.a FROM `/Root/t1` as t1
+                WHERE NOT EXISTS (SELECT 1 FROM `/Root/t2` as t2 RIGHT JOIN `/Root/t3` as t3 ON t2.a == t3.a
+                                  WHERE t2.c == t1.a)
+                ORDER BY t1.a;
+             )",
+             R"([[2];[3];[5];[6];[7];[8];[10];[11];[12]])"},
         };
 
         for (ui32 i = 0; i < cases.size(); ++i) {

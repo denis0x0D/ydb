@@ -459,6 +459,13 @@ void TKqpNewRBOTransformer::InitializeRBOOptimizationStages() {
     expandAggregationRules.emplace_back(std::make_unique<TExpandDistinctAggregationRule>());
     RBO.AddStage(std::make_unique<TRuleBasedStage>("Expand aggregation", std::move(expandAggregationRules)));
 
+    // Rewrite all right joins into left joins. This has to run before any inlining: the dependent
+    // join can only be pushed through inner-like and left-sided joins, so a correlated subquery
+    // under a right join would otherwise fail to decorrelate.
+    TVector<std::unique_ptr<IRule>> rewriteRightJoinsStageRules;
+    rewriteRightJoinsStageRules.emplace_back(std::make_unique<TRewriteRightJoinRule>());
+    RBO.AddStage(std::make_unique<TRuleBasedStage>("Rewrite right joins", std::move(rewriteRightJoinsStageRules)));
+
     // Push predicates before inlining.
     TVector<std::unique_ptr<IRule>> earlyPushFilterRules;
     earlyPushFilterRules.emplace_back(std::make_unique<TExtractJoinExpressionsRule>());
@@ -492,11 +499,6 @@ void TKqpNewRBOTransformer::InitializeRBOOptimizationStages() {
     decorrelationStageRules.emplace_back(std::make_unique<TPushDependentJoinThroughJoinRule>());
     decorrelationStageRules.emplace_back(std::make_unique<TDependentJoinNotSupportedRule>());
     RBO.AddStage(std::make_unique<TRuleBasedStage>("Decorrelation", std::move(decorrelationStageRules)));
-
-    // Rewrite all right joins into left joins
-    TVector<std::unique_ptr<IRule>> rewriteRightJoinsStageRules;
-    rewriteRightJoinsStageRules.emplace_back(std::make_unique<TRewriteRightJoinRule>());
-    RBO.AddStage(std::make_unique<TRuleBasedStage>("Rewrite right joins", std::move(rewriteRightJoinsStageRules)));
 
     // Normalize aliases and simple maps before the broader logical rewrites start.
     TVector<std::unique_ptr<IRule>> mapAliasRules;
