@@ -446,6 +446,8 @@ std::shared_ptr<TJoinOptimizerNode> ConvertJoinTree(
         for (const auto& joinKey : join->JoinKeys) {
             leftKeys.push_back(ConvertRBOColumnToCBO(leaves, joinKey.Left, leftNode));
             rightKeys.push_back(ConvertRBOColumnToCBO(leaves, joinKey.Right, rightNode));
+            leftKeys.back().EqualNulls = joinKey.EqualNulls;
+            rightKeys.back().EqualNulls = joinKey.EqualNulls;
         }
 
         result = std::make_shared<TJoinOptimizerNode>(leftNode,

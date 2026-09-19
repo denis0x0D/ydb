@@ -27,6 +27,7 @@ struct TJoinColumn {
     std::optional<TString> OriginalRelName{};
     std::optional<ui32> EquivalenceClass{};
     bool IsConstant = false;
+    bool EqualNulls = false;
 
     TJoinColumn() = default;
 
