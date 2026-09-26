@@ -6556,6 +6556,119 @@ FROM (
                 )
                 ORDER BY a;
             )"},
+            {"forward frame count and average", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT a, b, c, e,
+                    Count(e) OVER w AS ahead_count,
+                    Avg(e) OVER w AS ahead_avg
+                FROM `/Root/t1`
+                WINDOW w AS (
+                    PARTITION BY b
+                    ORDER BY c, a
+                    ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING
+                )
+                ORDER BY a;
+            )"},
+            {"ranking with a centred frame", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT a, b, c, e,
+                    RowNumber() OVER w AS row_number_in_group,
+                    Rank() OVER w AS rank_in_group,
+                    Sum(e) OVER w AS centred_sum
+                FROM `/Root/t1`
+                WINDOW w AS (
+                    PARTITION BY b
+                    ORDER BY c, a
+                    ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING
+                )
+                ORDER BY a;
+            )"},
+            {"global sliding frame", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT a, e,
+                    Sum(e) OVER (ORDER BY a ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS sliding_sum
+                FROM `/Root/t1`
+                ORDER BY a;
+            )"},
+            {"centred decimal average", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT a, b, f,
+                    Avg(f) OVER w AS centred_avg,
+                    Max(f) OVER w AS centred_max
+                FROM `/Root/t1`
+                WINDOW w AS (
+                    PARTITION BY b
+                    ORDER BY c, a
+                    ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING
+                )
+                ORDER BY a;
+            )"},
+            {"running frame reaching ahead", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT a, b, c, e,
+                    Sum(e) OVER w AS ahead_sum,
+                    Count(e) OVER w AS ahead_count
+                FROM `/Root/t1`
+                WINDOW w AS (
+                    PARTITION BY b
+                    ORDER BY c, a
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND 2 FOLLOWING
+                )
+                ORDER BY a;
+            )"},
+            {"trailing frame count with ranking", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT a, b, c, e,
+                    Rank() OVER w AS rank_in_group,
+                    Count(e) OVER w AS trailing_count,
+                    Avg(e) OVER w AS trailing_avg
+                FROM `/Root/t1`
+                WINDOW w AS (
+                    PARTITION BY b
+                    ORDER BY c, a
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND 2 PRECEDING
+                )
+                ORDER BY a;
+            )"},
+            {"suffix aggregates with ranking", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT a, b, c, e, f,
+                    RowNumber() OVER w AS row_number_in_group,
+                    Count(e) OVER w AS suffix_count,
+                    Min(e) OVER w AS suffix_min,
+                    Avg(f) OVER w AS suffix_avg
+                FROM `/Root/t1`
+                WINDOW w AS (
+                    PARTITION BY b
+                    ORDER BY c, a
+                    ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
+                )
+                ORDER BY a;
+            )"},
+            {"global whole partition frame", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT a, e,
+                    Sum(e) OVER () AS total,
+                    Max(e) OVER () AS maximum
+                FROM `/Root/t1`
+                ORDER BY a;
+            )"},
+            {"global suffix frame", R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT a, e,
+                    Sum(e) OVER (ORDER BY a ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS suffix_sum
+                FROM `/Root/t1`
+                ORDER BY a;
+            )"},
             {"range frame over a string order key", R"(
                 PRAGMA YqlSelect = "force";
 
@@ -6824,14 +6937,6 @@ FROM (
     }
 
     const THashSet<TString> WindowQueriesNotLoweredYet{
-        // A frame that ends after the current row but does not span the whole partition still
-        // needs a row queue.
-        "suffix frame",
-        // Frames that do not run from the partition start to the current row need a row queue.
-        "sliding frame ending at the current row",
-        "centred frame",
-        "forward looking frame",
-        "trailing frame",
     };
 
     Y_UNIT_TEST_TWIN(WindowFunctions, ColumnStore) {
@@ -6902,6 +7007,52 @@ FROM (
         } else {
             UNIT_ASSERT_C(ast.Contains("WideSortBlocks"), ast);
         }
+    }
+
+    Y_UNIT_TEST(WindowFrameStrategies) {
+        NKikimrConfig::TAppConfig appConfig;
+        appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+        appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
+        appConfig.MutableTableServiceConfig()->SetDefaultLangVer(NYql::GetMaxLangVersion());
+        appConfig.MutableTableServiceConfig()->SetBackportMode(NKikimrConfig::TTableServiceConfig_EBackportMode_All);
+        TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
+
+        auto session = kikimr.GetTableClient().CreateSession().GetValueSync().GetSession();
+        auto schemeResult = session.ExecuteSchemeQuery(R"(
+            CREATE TABLE `/Root/t1` (
+                a Int64 NOT NULL,
+                b Int64,
+                e Int64,
+                PRIMARY KEY (a)
+            );
+        )").GetValueSync();
+        UNIT_ASSERT_C(schemeResult.IsSuccess(), schemeResult.GetIssues().ToString());
+
+        auto explain = [&](const TString& frame) {
+            const TString query = TStringBuilder() << R"(
+                PRAGMA YqlSelect = "force";
+
+                SELECT a, Sum(e) OVER (PARTITION BY b ORDER BY a )" << frame << R"() AS s
+                FROM `/Root/t1`;
+            )";
+            auto explainMode = NYdb::NQuery::TExecuteQuerySettings().ExecMode(NYdb::NQuery::EExecMode::Explain);
+            auto result = kikimr.GetQueryClient().ExecuteQuery(query, NYdb::NQuery::TTxControl::NoTx(), explainMode).ExtractValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+            UNIT_ASSERT_C(result.GetStats() && result.GetStats()->GetAst(), "AST is not available");
+            return TString(*result.GetStats()->GetAst());
+        };
+
+        const auto trailing = explain("ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING");
+        UNIT_ASSERT_C(trailing.Contains("'('\"RowIncrementals\" '((AsStruct"), trailing);
+        UNIT_ASSERT_C(!trailing.Contains("Fold1"), trailing);
+
+        const auto suffix = explain("ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING");
+        UNIT_ASSERT_C(suffix.Contains("Reverse"), suffix);
+        UNIT_ASSERT_C(!suffix.Contains("WinFramesCollector"), suffix);
+
+        const auto sliding = explain("ROWS BETWEEN 2 PRECEDING AND CURRENT ROW");
+        UNIT_ASSERT_C(sliding.Contains("WinFramesCollector"), sliding);
+        UNIT_ASSERT_C(sliding.Contains("Fold1"), sliding);
     }
 
     std::set<ui32> MakePerf_YqlSingleQuerySkipList(const EBenchType type, const ui32 queryId) {
