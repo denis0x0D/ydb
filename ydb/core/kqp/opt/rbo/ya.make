@@ -8,6 +8,7 @@ SRCS(
     kqp_plan_to_json.cpp
     kqp_rbo_compute_statistics.cpp
     kqp_rbo_context.cpp
+    kqp_rbo_lookup_join.cpp
     kqp_rbo_statistics.cpp
     kqp_rbo_transformer.cpp
     kqp_rbo_type_ann.cpp

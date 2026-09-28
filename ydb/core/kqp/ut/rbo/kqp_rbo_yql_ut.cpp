@@ -5540,6 +5540,128 @@ FROM (
         }
     }
 
+    Y_UNIT_TEST_TWIN(LookupJoinByIndexWithConstPrefix, AllPointPrefixes) {
+        NKikimrConfig::TAppConfig appConfig;
+        appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+        appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
+        appConfig.MutableTableServiceConfig()->SetDefaultCostBasedOptimizationLevel(4);
+        appConfig.MutableTableServiceConfig()->SetDefaultEnableShuffleElimination(false);
+        appConfig.MutableTableServiceConfig()->SetEnablePruneKeyColumns(true);
+        appConfig.MutableTableServiceConfig()->SetEnableAutoIndexSelectionForIndexLookupJoin(true);
+        appConfig.MutableTableServiceConfig()->SetEnableNewRBOLookupJoinPointPrefixes(AllPointPrefixes);
+        appConfig.MutableTableServiceConfig()->SetDefaultLangVer(NYql::GetMaxLangVersion());
+
+        TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        auto schemeResult = session.ExecuteSchemeQuery(R"(
+            CREATE TABLE `/Root/t1` (
+                a Int64,
+                PRIMARY KEY (a)
+            );
+
+            CREATE TABLE `/Root/t2` (
+                a Int64,
+                b Int64,
+                c Int32,
+                PRIMARY KEY (a)
+            );
+
+            CREATE TABLE `/Root/t3` (
+                a Int64,
+                b Int64,
+                c Int32,
+                PRIMARY KEY (a)
+            );
+        )").GetValueSync();
+        UNIT_ASSERT_C(schemeResult.IsSuccess(), schemeResult.GetIssues().ToString());
+
+        {
+            NYdb::TValueBuilder rows;
+            rows.BeginList();
+            for (i64 a : {1, 2, 3, 4}) {
+                rows.AddListItem().BeginStruct()
+                    .AddMember("a").OptionalInt64(a)
+                    .EndStruct();
+            }
+            rows.EndList();
+            auto upsertResult = db.BulkUpsert("/Root/t1", rows.Build()).GetValueSync();
+            UNIT_ASSERT_C(upsertResult.IsSuccess(), upsertResult.GetIssues().ToString());
+        }
+
+        for (const auto* table : {"/Root/t2", "/Root/t3"}) {
+            NYdb::TValueBuilder rows;
+            rows.BeginList();
+            for (const auto& [a, b, c] : TVector<std::tuple<i64, i64, i32>>{
+                     {10, 1, 0}, {11, 2, 1}, {12, 3, 0}, {13, 3, 0}, {14, 5, 0}}) {
+                rows.AddListItem().BeginStruct()
+                    .AddMember("a").OptionalInt64(a)
+                    .AddMember("b").OptionalInt64(b)
+                    .AddMember("c").OptionalInt32(c)
+                    .EndStruct();
+            }
+            rows.EndList();
+            auto upsertResult = db.BulkUpsert(table, rows.Build()).GetValueSync();
+            UNIT_ASSERT_C(upsertResult.IsSuccess(), upsertResult.GetIssues().ToString());
+        }
+
+        // BulkUpsert does not support tables with sync indexes, so indexes are built after loading.
+        for (const auto* addIndex : {
+                 "ALTER TABLE `/Root/t2` ADD INDEX idx_c_b GLOBAL ON (c, b);",
+                 // Both indexes fit the predicate equally well, so idx_c wins by name. The lookup join has to redirect
+                 // the read to idx_c_b, where the join key follows the point prefix.
+                 "ALTER TABLE `/Root/t3` ADD INDEX idx_c GLOBAL ON (c) COVER (b);",
+                 "ALTER TABLE `/Root/t3` ADD INDEX idx_c_b GLOBAL ON (c, b);",
+             }) {
+            schemeResult = session.ExecuteSchemeQuery(addIndex).GetValueSync();
+            UNIT_ASSERT_C(schemeResult.IsSuccess(), schemeResult.GetIssues().ToString());
+        }
+
+        auto querySession = kikimr.GetQueryClient().GetSession().GetValueSync().GetSession();
+        auto explain = [&](const TString& query) {
+            auto explained = querySession.ExecuteQuery(query, NYdb::NQuery::TTxControl::NoTx(),
+                    NYdb::NQuery::TExecuteQuerySettings().ExecMode(NQuery::EExecMode::Explain)).ExtractValueSync();
+            UNIT_ASSERT_C(explained.IsSuccess(), explained.GetIssues().ToString());
+            return std::make_pair(TString{*explained.GetStats()->GetAst()}, TString{*explained.GetStats()->GetPlan()});
+        };
+
+        {
+            const auto [ast, plan] = explain("SELECT a, b, c FROM `/Root/t3` WHERE c = 0;");
+            UNIT_ASSERT_C(ast.Contains("/Root/t3/idx_c/indexImplTable"), "expected a read of idx_c, ast:\n" << ast);
+        }
+
+        for (const TString table : {"t2", "t3"}) {
+            // The lookup goes through idx_c_b: c is a constant point prefix and b is the lookup key.
+            const TString query = Sprintf(R"(
+                SELECT t1.a AS t1_a, t.a AS t_a, t.b AS t_b, t.c AS t_c
+                FROM `/Root/t1` AS t1
+                JOIN `/Root/%s` AS t
+                  ON t1.a = t.b
+                WHERE t.c = 0
+                ORDER BY t_a;
+            )", table.c_str());
+
+            auto result = querySession.ExecuteQuery(query, NYdb::NQuery::TTxControl::BeginTx().CommitTx()).GetValueSync();
+            UNIT_ASSERT_C(result.IsSuccess(), table << ": " << result.GetIssues().ToString());
+            UNIT_ASSERT_VALUES_EQUAL_C(FormatResultSetYson(result.GetResultSet(0)),
+                                       R"([[[1];[10];[1];[0]];[[3];[12];[3];[0]];[[3];[13];[3];[0]]])", table);
+
+            const auto [ast, plan] = explain(query);
+            if (!AllPointPrefixes && table == "t3") {
+                // Only the point prefix of idx_c is known, and b does not follow it, so t3 cannot be probed by b.
+                UNIT_ASSERT_C(!ast.Contains("/Root/t3/idx_c_b/indexImplTable"), table << ": expected no lookup by idx_c_b, ast:\n" << ast);
+                continue;
+            }
+
+            UNIT_ASSERT_C(ast.Contains("KqpIndexLookupJoin"), table << ": expected a lookup join, ast:\n" << ast);
+            UNIT_ASSERT_C(plan.Contains("TableLookupJoin"), table << ": expected a lookup join, plan:\n" << plan);
+            UNIT_ASSERT_C(ast.Contains("/Root/" + table + "/idx_c_b/indexImplTable"), table << ": expected a lookup by idx_c_b, ast:\n" << ast);
+            UNIT_ASSERT_C(!ast.Contains("/Root/" + table + "/idx_c/indexImplTable"), table << ": expected no read of idx_c, ast:\n" << ast);
+            UNIT_ASSERT_C(ast.Contains(R"('('"AllowNullKeysPrefixSize" '1))"), table << ": expected a lookup by a point prefix, ast:\n" << ast);
+        }
+    }
+
     Y_UNIT_TEST(JoinFiltersBasic) {
         NKikimrConfig::TAppConfig appConfig;
         appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);

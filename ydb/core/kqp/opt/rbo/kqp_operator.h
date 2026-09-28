@@ -418,6 +418,16 @@ protected:
 
 class TOpRead: public IOperator {
 public:
+    // Leading key columns of a table pinned by the read predicate to a set of points. A lookup join
+    // uses the points as a constant prefix of its lookup keys.
+    struct TPointPrefix {
+        TString Table;                // path of the main table or of an index implementation table
+        TExprNode::TPtr Points;
+        const TStructExprType* PointsItemType = nullptr;
+        TVector<TString> Columns;     // physical key columns pinned by the points
+        TMaybe<size_t> ExpectedMaxPoints;
+    };
+
     // Everything the read carries about pushed-down key ranges. ComputeNode is the source of
     // truth for the ranges themselves; the other fields are range extractor outputs that cannot
     // be recovered from the expression later (explain has no access to table metadata or the
@@ -428,10 +438,9 @@ public:
         size_t UsedPrefixLen = 0;     // how many leading key columns are range-constrained
         size_t PointPrefixLen = 0;    // how many are pinned to a single value
         TMaybe<size_t> ExpectedMaxRanges;
-        TExprNode::TPtr Points;
-        const TStructExprType* PointsItemType = nullptr;
-        TVector<TString> PointColumns;
-        TMaybe<size_t> ExpectedMaxPoints;
+        // Point prefixes of the read table and of the tables the read can be redirected to: the main
+        // table and its covering indexes. A lookup join chooses the one which fits its keys best.
+        TVector<TPointPrefix> PointPrefixes;
     };
 
     TOpRead(TExprNode::TPtr node);

@@ -1,3 +1,4 @@
+#include <ydb/core/kqp/opt/rbo/kqp_rbo_lookup_join.h>
 #include <ydb/core/kqp/opt/rbo/rules/kqp_rules_include.h>
 
 namespace NKikimr {
@@ -7,93 +8,6 @@ namespace {
 
 using namespace NYql;
 using namespace NYql::NNodes;
-
-bool IsValidIndex(const TIndexDescription& index) {
-    return index.Type != TIndexDescription::EType::GlobalAsync
-        && index.Type != TIndexDescription::EType::GlobalJson
-        && index.Type != TIndexDescription::EType::GlobalJsonCompact
-        && index.Type != TIndexDescription::EType::LocalMinMax
-        && index.Type != TIndexDescription::EType::LocalBloomFilter
-        && index.Type != TIndexDescription::EType::LocalBloomNgramFilter
-        && index.State == TIndexDescription::EIndexState::Ready;
-}
-
-bool IsCoveringIndex(const TVector<TString>& readColumns, const TVector<TString>& keyColumns, const TVector<TString>& dataColumns) {
-    THashSet<TString> indexColumnSet(keyColumns.begin(), keyColumns.end());
-    indexColumnSet.insert(dataColumns.begin(), dataColumns.end());
-    for (const auto& column : readColumns) {
-        if (!indexColumnSet.contains(column)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-TIntrusivePtr<TKikimrTableMetadata> TryToFindBestIndexForRightSide(const TKikimrTableDescription& mainTableDesc, const TVector<TString>& readColumns,
-                                                                   const THashSet<TString>& rightJoinKeys) {
-    const auto& meta = *mainTableDesc.Metadata;
-    std::optional<TString> bestIndexName;
-    ui32 bestPrefix = 0;
-
-    for (const auto& index : meta.Indexes) {
-        if (!IsValidIndex(index) || !IsCoveringIndex(readColumns, index.KeyColumns, index.DataColumns)) {
-            continue;
-        }
-
-        ui32 currentPrefix = 0;
-        for (const auto& keyCol : index.KeyColumns) {
-            if (!rightJoinKeys.contains(keyCol)) {
-                break;
-            }
-            ++currentPrefix;
-        }
-
-        // Better prefix wins and ties broken alphabetically by index name.
-        if (currentPrefix > bestPrefix || (currentPrefix == bestPrefix && currentPrefix > 0 && index.Name < *bestIndexName)) {
-            bestPrefix = currentPrefix;
-            bestIndexName = index.Name;
-        }
-    }
-
-    if (bestIndexName.has_value()) {
-        return meta.GetIndexMetadata(*bestIndexName).first;
-    }
-
-    return nullptr;
-}
-
-std::optional<TExpression> BuildFetchedRowFilter(const TOpRead& read, const TIntrusivePtr<TOpFilter>& filter, bool& supported) {
-    TVector<TExpression> conjuncts;
-    if (read.RangeInfo.has_value()) {
-        if (!read.OriginalPredicate.has_value()) {
-            supported = false;
-            return std::nullopt;
-        }
-        const auto original = read.OriginalPredicate->SplitConjunct();
-        conjuncts.insert(conjuncts.end(), original.begin(), original.end());
-    }
-    if (filter) {
-        const auto filters = filter->GetFilterExpression().SplitConjunct();
-        conjuncts.insert(conjuncts.end(), filters.begin(), filters.end());
-    }
-
-    if (conjuncts.empty()) {
-        return std::nullopt;
-    }
-
-    // The filter is evaluated on a fetched row, so it can only refer to the fetched columns.
-    const auto readOutputs = MakeInfoUnitSet(read.OutputIUs);
-    for (const auto& conjunct : conjuncts) {
-        for (const auto& iu : conjunct.GetInputIUs(/*includeSubplanVars=*/true, /*includeCorrelatedDeps=*/true)) {
-            if (!readOutputs.contains(iu)) {
-                supported = false;
-                return std::nullopt;
-            }
-        }
-    }
-
-    return MakeConjunction(conjuncts);
-}
 
 const TTypeAnnotationNode* StripOptional(const TTypeAnnotationNode* type) {
     return type && type->GetKind() == ETypeAnnotationKind::Optional ? type->Cast<TOptionalExprType>()->GetItemType() : type;
@@ -188,30 +102,6 @@ bool KeyTypesMatch(IOperator& leftInput, IOperator& rightInput, const TKeyMatch&
         && KeyTypesMatch(leftInput, rightInput, keys.ResidualKeys);
 }
 
-bool IsUsablePointPrefix(const TOpRead::TRangeInfo& ranges, const TVector<TString>& keyColumnNames, const TString& joinKind,
-                         size_t pointsLimit) {
-    if (!ranges.Points || !ranges.PointsItemType || ranges.PointColumns.empty()) {
-        return false;
-    }
-
-    if (ranges.PointColumns.size() >= keyColumnNames.size()) {
-        return false;
-    }
-
-    for (size_t i = 0; i < ranges.PointColumns.size(); ++i) {
-        if (ranges.PointColumns[i] != keyColumnNames[i]) {
-            return false;
-        }
-    }
-
-    // For left, left only, left semi joins we cannot support more than 1 point lookup.
-    if (joinKind != "Inner") {
-        pointsLimit = std::min<size_t>(pointsLimit, 1);
-    }
-
-    return ranges.ExpectedMaxPoints.Defined() && *ranges.ExpectedMaxPoints <= pointsLimit;
-}
-
 } // anonymous namespace
 
 bool TRewriteJoinToIndexLookupJoinRule::QuickMatch(const TIntrusivePtr<IOperator>& input) const {
@@ -270,37 +160,15 @@ TIntrusivePtr<IOperator> TRewriteJoinToIndexLookupJoinRule::SimpleMatchAndApply(
     }
 
     auto read = CastOperator<TOpRead>(rightInput);
-    if (ctx.KqpCtx.Config->IsAutoIndexSelectionForIndexLookupJoinEnabled()) {
-        // We cannot change the right side, if predicate was pushed.
-        if (!read->RangeInfo.has_value()) {
-            const auto table = TKqpTable(read->GetTable());
-            const auto& mainTableDesc = ctx.KqpCtx.Tables->ExistingTable(ctx.KqpCtx.Cluster, table.Path().Value());
-            THashSet<TString> rightJoinKeys;
-            for (const auto& joinKey : join->JoinKeys) {
-                rightJoinKeys.insert(joinKey.Right.GetColumnName());
-            }
 
-            if (auto index = TryToFindBestIndexForRightSide(mainTableDesc, read->Columns, rightJoinKeys)) {
-                // clang-format off
-                auto indexTableCallable = Build<TKqpTable>(ctx.ExprCtx, read->Pos)
-                    .Path().Build(index->Name)
-                    .PathId().Build(index->PathId.ToString())
-                    .SysView().Build(index->SysView)
-                    .Version().Build(index->SchemaVersion)
-                .Done().Ptr();
-                // clang-format on
-
-                auto rightOriginalType = read->Type;
-                // Update read with choosen index.
-                read = MakeIntrusive<TOpRead>(read->Alias, read->Columns, read->GetOutputIUs(), read->StorageType, indexTableCallable, nullptr, read->Limit,
-                                              std::nullopt, std::nullopt, ESortDir::None, read->Props, read->Pos);
-                read->Type = rightOriginalType;
-            }
-        }
+    TVector<TInfoUnit> rightJoinKeys;
+    rightJoinKeys.reserve(join->JoinKeys.size());
+    for (const auto& joinKey : join->JoinKeys) {
+        rightJoinKeys.push_back(joinKey.Right);
     }
 
-    // Only supports row storage tables.
-    if (read->GetTableStorageType() != NYql::EStorageType::RowStorage) {
+    const auto joinKeyColumns = GetLookupJoinKeyColumns(*read, rightJoinKeys);
+    if (!joinKeyColumns) {
         return input;
     }
 
@@ -310,34 +178,13 @@ TIntrusivePtr<IOperator> TRewriteJoinToIndexLookupJoinRule::SimpleMatchAndApply(
         return input;
     }
 
-    const auto table = TKqpTable(read->GetTable());
-    if (table.PathId().Value().empty()) {
+    const auto target = ChooseLookupJoinTarget(*read, *joinKeyColumns, joinKind == "Inner", ctx.KqpCtx);
+    if (!target) {
         return input;
     }
 
-    const auto& tableMeta = ctx.KqpCtx.Tables->ExistingTable(ctx.KqpCtx.Cluster, table.Path().Value()).Metadata;
-    Y_ENSURE(tableMeta);
-    if (!table.SysView().Value().empty() || tableMeta->Kind == EKikimrTableKind::SysView) {
-        // Can't lookup in system views: a read of one is not a datashard read even though it is
-        // described as a row storage read.
-        return input;
-    }
-
-    if (tableMeta->KeyColumnNames.empty()) {
-        return input;
-    }
-
-    size_t pointPrefixLen = 0;
-    if (read->RangeInfo && IsUsablePointPrefix(*read->RangeInfo, tableMeta->KeyColumnNames, joinKind, ctx.KqpCtx.Config->GetIdxLookupJoinPointsLimit())) {
-        pointPrefixLen = read->RangeInfo->PointColumns.size();
-    }
-
-    auto keys = MatchKeyPrefix(*join, *read, tableMeta->KeyColumnNames, pointPrefixLen);
-    if (!keys && pointPrefixLen != 0) {
-        pointPrefixLen = 0;
-        keys = MatchKeyPrefix(*join, *read, tableMeta->KeyColumnNames, 0);
-    }
-
+    const size_t pointPrefixLen = target->PointPrefix ? target->PointPrefix->Columns.size() : 0;
+    const auto keys = MatchKeyPrefix(*join, *read, target->Metadata->KeyColumnNames, pointPrefixLen);
     if (!keys) {
         return input;
     }
@@ -359,12 +206,11 @@ TIntrusivePtr<IOperator> TRewriteJoinToIndexLookupJoinRule::SimpleMatchAndApply(
     }
 
     std::optional<TOpTableLookup::TLookupKeyPrefix> prefix;
-    if (pointPrefixLen != 0) {
-        const auto& ranges = *read->RangeInfo;
+    if (target->PointPrefix) {
         TOpTableLookup::TLookupKeyPrefix keyPrefix;
-        keyPrefix.Points = ranges.Points;
-        keyPrefix.PointsItemType = ranges.PointsItemType;
-        keyPrefix.Columns = ranges.PointColumns;
+        keyPrefix.Points = target->PointPrefix->Points;
+        keyPrefix.PointsItemType = target->PointPrefix->PointsItemType;
+        keyPrefix.Columns = target->PointPrefix->Columns;
         for (const auto& key : keys->PrefixKeys) {
             keyPrefix.Equalities.emplace_back(key.Column, key.LeftIU);
         }
@@ -377,10 +223,16 @@ TIntrusivePtr<IOperator> TRewriteJoinToIndexLookupJoinRule::SimpleMatchAndApply(
         residualJoinKeys.emplace_back(key.LeftIU, key.RightIU);
     }
 
-    YQL_CLOG(TRACE, ProviderKqp) << "[NEW RBO] Rewriting a " << joinKind << " join into an index lookup join of "
-                                 << table.Path().StringValue();
+    // The lookup join can probe a covering index or the main table instead of the read table.
+    auto lookupTable = read->GetTable();
+    if (target->Metadata->Name != TKqpTable(lookupTable).Path().Value()) {
+        lookupTable = BuildTableCallable(*target->Metadata, read->Pos, ctx.ExprCtx);
+    }
 
-    auto lookup = MakeIntrusive<TOpTableLookup>(join->GetLeftInput(), join->Pos, read->GetTable(), read->Columns, read->OutputIUs,
+    YQL_CLOG(TRACE, ProviderKqp) << "[NEW RBO] Rewriting a " << joinKind << " join into an index lookup join of "
+                                 << target->Metadata->Name;
+
+    auto lookup = MakeIntrusive<TOpTableLookup>(join->GetLeftInput(), join->Pos, lookupTable, read->Columns, read->OutputIUs,
                                                 lookupKeys, lookupKeyColumns, joinKind, fetchedRowFilter, prefix, residualJoinKeys);
     return MakeIntrusive<TOpIndexLookupJoin>(lookup, join->Pos, joinKind, join->JoinKeys);
 }

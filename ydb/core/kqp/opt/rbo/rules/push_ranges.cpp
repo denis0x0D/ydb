@@ -1,3 +1,4 @@
+#include <ydb/core/kqp/opt/rbo/kqp_rbo_lookup_join.h>
 #include <ydb/core/kqp/opt/rbo/kqp_rbo_rules.h>
 #include <ydb/core/kqp/opt/rbo/kqp_rbo_utils.h>
 #include <ydb/core/kqp/provider/yql_kikimr_settings.h>
@@ -200,21 +201,15 @@ const TStructExprType* PrepareSchemeType(const TOpRead& read, const TStructExprT
     return changed ? ctx.MakeType<TStructExprType>(newItemTypes) : schemeType;
 }
 
-struct TPointPrefix {
-    TExprNode::TPtr Points;
-    const TStructExprType* PointsItemType = nullptr;
-    TVector<TString> Columns;
-    TMaybe<size_t> ExpectedMaxPoints;
-};
-
-TPointPrefix ExtractPointPrefix(size_t pointPrefixLen, const TExprNode::TPtr& lambda, const TStructExprType* schemeType,
-                               const THashSet<TString>& possibleKeys, const TVector<TString>& exposedKeyColumns,
-                               const TVector<TString>& physicalKeyColumns, const TPredicateExtractorSettings& baseSettings,
-                               TRBOContext& rboCtx) {
+std::optional<TOpRead::TPointPrefix> ExtractPointPrefix(size_t pointPrefixLen, const TExprNode::TPtr& lambda, const TStructExprType* schemeType,
+                                                       const THashSet<TString>& possibleKeys, const TVector<TString>& exposedKeyColumns,
+                                                       const TKikimrTableMetadata& tableMeta, const TPredicateExtractorSettings& baseSettings,
+                                                       TRBOContext& rboCtx) {
+    const auto& physicalKeyColumns = tableMeta.KeyColumnNames;
     Y_ENSURE(exposedKeyColumns.size() == physicalKeyColumns.size());
-    pointPrefixLen = std::min(pointPrefixLen, exposedKeyColumns.size());
-    if (pointPrefixLen == 0) {
-        return {};
+    // A lookup join needs some key columns after the prefix to lookup by.
+    if (pointPrefixLen == 0 || pointPrefixLen >= exposedKeyColumns.size()) {
+        return std::nullopt;
     }
 
     auto& ctx = rboCtx.ExprCtx;
@@ -230,12 +225,12 @@ TPointPrefix ExtractPointPrefix(size_t pointPrefixLen, const TExprNode::TPtr& la
     THashSet<TString> keys = possibleKeys;
     auto extractor = MakePredicateRangeExtractor(settings);
     if (!extractor->Prepare(lambda, *schemeType, keys, ctx, rboCtx.TypeCtx)) {
-        return {};
+        return std::nullopt;
     }
 
     const auto result = extractor->BuildComputeNode(exposedPointColumns, ctx, rboCtx.TypeCtx);
     if (!result.ComputeNode || result.PointPrefixLen != pointPrefixLen) {
-        return {};
+        return std::nullopt;
     }
 
     TVector<const TItemExprType*> items;
@@ -243,18 +238,19 @@ TPointPrefix ExtractPointPrefix(size_t pointPrefixLen, const TExprNode::TPtr& la
     for (size_t i = 0; i < pointPrefixLen; ++i) {
         const auto* columnType = schemeType->FindItemType(exposedPointColumns[i]);
         if (!columnType) {
-            return {};
+            return std::nullopt;
         }
         items.push_back(ctx.MakeType<TItemExprType>(physicalPointColumns[i], columnType));
     }
 
-    TPointPrefix prefix;
+    TOpRead::TPointPrefix prefix;
+    prefix.Table = tableMeta.Name;
     prefix.Points = BuildPointsList(result, physicalPointColumns, ctx);
     prefix.PointsItemType = ctx.MakeType<TStructExprType>(items);
     prefix.Columns = std::move(physicalPointColumns);
     prefix.ExpectedMaxPoints = result.ExpectedMaxRanges ? TMaybe<size_t>(*result.ExpectedMaxRanges) : TMaybe<size_t>();
 
-    YQL_CLOG(TRACE, ProviderKqp) << "[NEW RBO] Extracted points: " << KqpExprToPrettyString(*prefix.Points, ctx);
+    YQL_CLOG(TRACE, ProviderKqp) << "[NEW RBO] Extracted points of " << prefix.Table << ": " << KqpExprToPrettyString(*prefix.Points, ctx);
     return prefix;
 }
 
@@ -450,17 +446,6 @@ TVector<TString> BuildIndexReadColumns(const TVector<TString>& pkColumns, const 
     return result;
 }
 
-TExprNode::TPtr BuildTableCallable(const TKikimrTableMetadata& meta, TPositionHandle pos, TExprContext& ctx) {
-    // clang-format off
-    return Build<TKqpTable>(ctx, pos)
-        .Path().Build(meta.Name)
-        .PathId().Build(meta.PathId.ToString())
-        .SysView().Build(meta.SysView)
-        .Version().Build(meta.SchemaVersion)
-    .Done().Ptr();
-    // clang-format on
-}
-
 } // anonymous namespace
 
 bool TPushRangesRule::QuickMatch(const TIntrusivePtr<IOperator>& input) const {
@@ -526,6 +511,25 @@ TIntrusivePtr<IOperator> TPushRangesRule::SimpleMatchAndApply(const TIntrusivePt
     TVector<TString> lookupKeyColumns;
     TVector<TString> lookupReadColumns;
 
+    // Point prefixes are computed for every table the read can be redirected to, so a lookup join can
+    // choose the one which fits its keys best. Otherwise only the table chosen for the read gets one.
+    // Point lookups are only applicable to row storage tables.
+    const bool allPointPrefixes = kqpCtx.Config->GetEnableNewRBOLookupJoinPointPrefixes();
+    TVector<TOpRead::TPointPrefix> pointPrefixes;
+    auto addPointPrefix = [&](const TKikimrTableMetadata& tableMeta, const IPredicateRangeExtractor::TBuildResult& result,
+                              const TVector<TString>& exposedKeyColumns) {
+        if (read->StorageType != NYql::EStorageType::RowStorage) {
+            return;
+        }
+        if (auto prefix = ExtractPointPrefix(result.PointPrefixLen, lambda.Ptr(), schemeType, possibleKeys, exposedKeyColumns, tableMeta,
+                                             settings, rboCtx)) {
+            pointPrefixes.push_back(std::move(*prefix));
+        }
+    };
+    if (allPointPrefixes) {
+        addPointPrefix(mainMeta, mainResult, mainKeyColumns);
+    }
+
     auto bestScore = ScoreKeyOrder(mainResult, mainKeyColumns.size(), sortColumns, mainKeyColumns, true);
     TString bestIndexName;
     bool bestCovering = false;
@@ -562,6 +566,11 @@ TIntrusivePtr<IOperator> TPushRangesRule::SimpleMatchAndApply(const TIntrusivePt
             auto indexResult = extractor->BuildComputeNode(indexKeyColumns, ctx, typeCtx);
             if (!indexResult.ComputeNode) {
                 continue;
+            }
+
+            // A lookup join can be redirected only to a covering index.
+            if (allPointPrefixes && covering) {
+                addPointPrefix(*indexMeta, indexResult, indexKeyColumns);
             }
 
             const auto score = ScoreKeyOrder(indexResult, indexKeyColumns.size(), sortColumns, indexKeyColumns, covering);
@@ -632,6 +641,9 @@ TIntrusivePtr<IOperator> TPushRangesRule::SimpleMatchAndApply(const TIntrusivePt
         return input;
     }
     const auto& chosenKeyColumns = chosenIndexMeta ? winnerKeyColumns : mainKeyColumns;
+    if (!allPointPrefixes) {
+        addPointPrefix(chosenIndexMeta ? *chosenIndexMeta : mainMeta, chosen, chosenKeyColumns);
+    }
 
     if (chosenIndexMeta) {
         YQL_CLOG(TRACE, ProviderKqp) << "[NEW RBO] Selected index " << chosenIndexMeta->Name << " for a read of " << tablePath;
@@ -645,21 +657,9 @@ TIntrusivePtr<IOperator> TPushRangesRule::SimpleMatchAndApply(const TIntrusivePt
         .UsedPrefixLen = chosen.UsedPrefixLen,
         .PointPrefixLen = chosen.PointPrefixLen,
         .ExpectedMaxRanges = chosen.ExpectedMaxRanges ? TMaybe<size_t>(*chosen.ExpectedMaxRanges) : TMaybe<size_t>(),
+        .PointPrefixes = std::move(pointPrefixes),
     };
     const auto storageType = chosenIndexMeta ? GetStorageType(*chosenIndexMeta) : read->StorageType;
-
-    // Point lookup is only applicable to row storage tables.
-    if (storageType == NYql::EStorageType::RowStorage && chosen.PointPrefixLen > 0) {
-        const auto& chosenPhysicalKeyColumns = chosenIndexMeta ? chosenIndexMeta->KeyColumnNames : mainMeta.KeyColumnNames;
-        auto prefix = ExtractPointPrefix(chosen.PointPrefixLen, lambda.Ptr(), schemeType, possibleKeys, chosenKeyColumns,
-                                         chosenPhysicalKeyColumns, settings, rboCtx);
-        if (prefix.Points) {
-            rangeInfo.Points = std::move(prefix.Points);
-            rangeInfo.PointsItemType = prefix.PointsItemType;
-            rangeInfo.PointColumns = std::move(prefix.Columns);
-            rangeInfo.ExpectedMaxPoints = prefix.ExpectedMaxPoints;
-        }
-    }
 
     const auto tableCallable = chosenIndexMeta ? BuildTableCallable(*chosenIndexMeta, read->Pos, ctx) : read->TableCallable;
     const auto sortDir = chosenIndexMeta ? ESortDir::None : read->SortDir;
