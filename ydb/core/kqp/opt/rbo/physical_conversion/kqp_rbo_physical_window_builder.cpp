@@ -181,9 +181,18 @@ void TPhysicalWindowBuilder::Prepare(const TVector<TInfoUnit>& inputs) {
     Y_ENSURE(inputType, "Window input has no type annotation");
     InputStruct = inputType->Cast<TListExprType>()->GetItemType()->Cast<TStructExprType>();
 
-    OutputLayout = inputs;
+    // Only the outputs live past the window are expanded back into the wide flow.
+    const auto liveOutputs = NPhysicalConvertionUtils::BuildNameSet(NPhysicalConvertionUtils::GetLiveOutputIUs(*Window));
+    const auto addOutput = [&](const TInfoUnit& column) {
+        if (liveOutputs.contains(column.GetFullName())) {
+            OutputColumns.push_back(column);
+        }
+    };
+    for (const auto& column : inputs) {
+        addOutput(column);
+    }
     for (const auto& func : Window->GetWindowFuncs()) {
-        OutputLayout.push_back(func.ResultColName);
+        addOutput(func.ResultColName);
         NeedsPeerKey = NeedsPeerKey || func.Function == "rank" || func.Function == "denserank";
     }
     NeedsPeerKey = NeedsPeerKey && !Window->GetSortElements().empty();
@@ -379,6 +388,9 @@ TExprNode::TPtr TPhysicalWindowBuilder::BuildGroupSwitchLambda() const {
 // ChainMap has 2 lambdas:
 // 1) init row has an access to the first row.
 // 2) update row has an access to state and a current row.
+// A flat item is one struct of the live output columns and the state members, ready to be expanded.
+// Otherwise the item is a tuple of the full output row and the state struct: the RANGE handlers pass
+// that row on as the window row type.
 TExprNode::TPtr TPhysicalWindowBuilder::BuildAccumulator(const TOpWindowFunc& func, ui32 funcIndex, TExprNode::TPtr itemArg,
                                                          TExprNode::TPtr previousState, TExprNode::TPtr sortKeyChanged,
                                                          TVector<std::pair<TString, TExprNode::TPtr>>& stateMembers) const {
@@ -566,7 +578,7 @@ TExprNode::TPtr TPhysicalWindowBuilder::BuildAccumulator(const TOpWindowFunc& fu
     // clang-format on
 }
 
-TExprNode::TPtr TPhysicalWindowBuilder::BuildChainLambda(bool update) const {
+TExprNode::TPtr TPhysicalWindowBuilder::BuildChainLambda(bool update, bool flat) const {
     auto itemArg = Ctx.NewArgument(Pos, "win_item");
     TExprNode::TListType args{itemArg};
 
@@ -575,13 +587,17 @@ TExprNode::TPtr TPhysicalWindowBuilder::BuildChainLambda(bool update) const {
         // Get the state/prev row.
         auto previousArg = Ctx.NewArgument(Pos, "win_prev");
         args.push_back(previousArg);
-        // clang-format off
-        previousState = Ctx.Builder(Pos)
-            .Callable("Nth")
-                .Add(0, previousArg)
-                .Atom(1, "1")
-            .Seal().Build();
-        // clang-format on
+        if (flat) {
+            previousState = previousArg;
+        } else {
+            // clang-format off
+            previousState = Ctx.Builder(Pos)
+                .Callable("Nth")
+                    .Add(0, previousArg)
+                    .Atom(1, "1")
+                .Seal().Build();
+            // clang-format on
+        }
     }
 
     const auto& sortElements = Window->GetSortElements();
@@ -600,10 +616,21 @@ TExprNode::TPtr TPhysicalWindowBuilder::BuildChainLambda(bool update) const {
         sortKeyChanged = comparisons.size() == 1 ? comparisons.front() : Ctx.NewCallable(Pos, "Or", std::move(comparisons));
     }
 
+    // A flat item carries only the output columns that are expanded after the chain.
+    THashSet<TString> liveOutputs;
+    if (flat) {
+        liveOutputs = NPhysicalConvertionUtils::BuildNameSet(OutputColumns);
+    }
+    const auto isCarried = [&](const TString& name) {
+        return !flat || liveOutputs.contains(name);
+    };
+
     TVector<std::pair<TString, TExprNode::TPtr>> stateMembers;
     TVector<std::pair<TString, TExprNode::TPtr>> outputMembers;
     for (const auto& column : Inputs) {
-        outputMembers.emplace_back(column.GetFullName(), Member(itemArg, column.GetFullName()));
+        if (isCarried(column.GetFullName())) {
+            outputMembers.emplace_back(column.GetFullName(), Member(itemArg, column.GetFullName()));
+        }
     }
 
     const auto& funcs = Window->GetWindowFuncs();
@@ -611,7 +638,9 @@ TExprNode::TPtr TPhysicalWindowBuilder::BuildChainLambda(bool update) const {
         const auto& func = funcs[f];
         auto accumulator = BuildAccumulator(func, f, itemArg, previousState, sortKeyChanged, stateMembers);
         stateMembers.emplace_back(AccumulatorName(f), accumulator);
-        outputMembers.emplace_back(func.ResultColName.GetFullName(), BuildResultFromAccumulator(func, accumulator));
+        if (isCarried(func.ResultColName.GetFullName())) {
+            outputMembers.emplace_back(func.ResultColName.GetFullName(), BuildResultFromAccumulator(func, accumulator));
+        }
     }
 
     if (NeedsPeerKey) {
@@ -620,13 +649,19 @@ TExprNode::TPtr TPhysicalWindowBuilder::BuildChainLambda(bool update) const {
         }
     }
 
-    // clang-format off
-    auto body = Ctx.Builder(Pos)
-        .List()
-            .Add(0, BuildStruct(outputMembers))
-            .Add(1, BuildStruct(stateMembers))
-        .Seal().Build();
-    // clang-format on
+    TExprNode::TPtr body;
+    if (flat) {
+        outputMembers.insert(outputMembers.end(), stateMembers.begin(), stateMembers.end());
+        body = BuildStruct(outputMembers);
+    } else {
+        // clang-format off
+        body = Ctx.Builder(Pos)
+            .List()
+                .Add(0, BuildStruct(outputMembers))
+                .Add(1, BuildStruct(stateMembers))
+            .Seal().Build();
+        // clang-format on
+    }
 
     return Ctx.NewLambda(Pos, Ctx.NewArguments(Pos, std::move(args)), std::move(body));
 }
@@ -711,22 +746,20 @@ TExprNode::TPtr TPhysicalWindowBuilder::BuildResultFromAccumulator(const TOpWind
     // clang-format on
 }
 
-TExprNode::TPtr TPhysicalWindowBuilder::BuildExpandFromChain(TExprNode::TPtr chained) const {
+// Expands a flow of structs straight into the live output columns.
+TExprNode::TPtr TPhysicalWindowBuilder::BuildExpandToOutputs(TExprNode::TPtr flow) const {
     // clang-format off
     return Ctx.Builder(Pos)
         .Callable("ExpandMap")
-            .Add(0, chained)
+            .Add(0, flow)
             .Lambda(1)
-                .Param("win_chained")
+                .Param("win_row")
                 .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
-                    for (ui32 i = 0; i < OutputLayout.size(); ++i) {
+                    for (ui32 i = 0; i < OutputColumns.size(); ++i) {
                         parent
                             .Callable(i, "Member")
-                                .Callable(0, "Nth")
-                                    .Arg(0, "win_chained")
-                                    .Atom(1, "0")
-                                .Seal()
-                                .Atom(1, OutputLayout[i].GetFullName())
+                                .Arg(0, "win_row")
+                                .Atom(1, OutputColumns[i].GetFullName())
                             .Seal();
                     }
                     return parent;
@@ -744,13 +777,13 @@ TExprNode::TPtr TPhysicalWindowBuilder::BuildChain(TExprNode::TPtr wideFlow) con
         .Callable("Chain1Map")
             .Add(0, narrow)
             // Only for the first row.
-            .Add(1, BuildChainLambda(/*update=*/false))
+            .Add(1, BuildChainLambda(/*update=*/false, /*flat=*/true))
             // Computes a state it has access to the prev row.
-            .Add(2, BuildChainLambda(/*update=*/true))
+            .Add(2, BuildChainLambda(/*update=*/true, /*flat=*/true))
         .Seal().Build();
     // clang-format on
 
-    return BuildExpandFromChain(chained);
+    return BuildExpandToOutputs(chained);
 }
 
 // Processes whole partition and accumulates it into one value.
@@ -774,27 +807,7 @@ TExprNode::TPtr TPhysicalWindowBuilder::BuildFoldLambda(bool update) const {
 }
 
 TExprNode::TPtr TPhysicalWindowBuilder::BuildExpandFromStructs(TExprNode::TPtr list) const {
-    // clang-format off
-    return Ctx.Builder(Pos)
-        .Callable("ExpandMap")
-            .Callable(0, "ToFlow")
-                .Add(0, list)
-            .Seal()
-            .Lambda(1)
-                .Param("win_row")
-                .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
-                    for (ui32 i = 0; i < OutputLayout.size(); ++i) {
-                        parent
-                            .Callable(i, "Member")
-                                .Arg(0, "win_row")
-                                .Atom(1, OutputLayout[i].GetFullName())
-                            .Seal();
-                    }
-                    return parent;
-                })
-            .Seal()
-        .Seal().Build();
-    // clang-format on
+    return BuildExpandToOutputs(Ctx.NewCallable(Pos, "ToFlow", {std::move(list)}));
 }
 
 TExprNode::TPtr TPhysicalWindowBuilder::BuildWholePartition(TExprNode::TPtr wideFlow) const {
@@ -861,8 +874,8 @@ TExprNode::TPtr TPhysicalWindowBuilder::BuildRangeCarry(TExprNode::TPtr wideFlow
     auto chained = Ctx.Builder(Pos)
         .Callable("Chain1Map")
             .Add(0, narrow)
-            .Add(1, BuildChainLambda(/*update=*/false))
-            .Add(2, BuildChainLambda(/*update=*/true))
+            .Add(1, BuildChainLambda(/*update=*/false, /*flat=*/false))
+            .Add(2, BuildChainLambda(/*update=*/true, /*flat=*/false))
         .Seal().Build();
 
     auto outputs = Ctx.Builder(Pos)
@@ -980,8 +993,8 @@ TExprNode::TPtr TPhysicalWindowBuilder::BuildRangePeerGroups(TExprNode::TPtr wid
     auto chained = Ctx.Builder(Pos)
         .Callable("Chain1Map")
             .Add(0, narrow)
-            .Add(1, BuildChainLambda(/*update=*/false))
-            .Add(2, BuildChainLambda(/*update=*/true))
+            .Add(1, BuildChainLambda(/*update=*/false, /*flat=*/false))
+            .Add(2, BuildChainLambda(/*update=*/true, /*flat=*/false))
         .Seal().Build();
 
     auto outputs = Ctx.Builder(Pos)
@@ -1187,20 +1200,7 @@ NPhysicalConvertionUtils::TStageBody TPhysicalWindowBuilder::BuildPhysicalOp(con
         // clang-format on
     }
 
-    // WideChopper/WideSort pass every slot of OutputLayout through, so drop the ones that are
-    // dead past this operator; the projection is emitted only when something is dropped.
-    const auto liveOutputs = NPhysicalConvertionUtils::BuildNameSet(NPhysicalConvertionUtils::GetLiveOutputIUs(*Window));
-    TVector<TInfoUnit> outputColumns;
-    outputColumns.reserve(OutputLayout.size());
-    for (const auto& column : OutputLayout) {
-        if (liveOutputs.contains(column.GetFullName())) {
-            outputColumns.push_back(column);
-        }
-    }
-    if (outputColumns.size() != OutputLayout.size()) {
-        input = NPhysicalConvertionUtils::BuildWideProjection(input, OutputLayout, outputColumns, Ctx);
-    }
-
+    // The partition handlers expand only the live output columns, so dead ones never reach the wide flow.
     YQL_CLOG(TRACE, CoreDq) << "[NEW RBO Physical window] " << KqpExprToPrettyString(TExprBase(input), Ctx);
-    return NPhysicalConvertionUtils::TStageBody::Wide(input, std::move(outputColumns));
+    return NPhysicalConvertionUtils::TStageBody::Wide(input, OutputColumns);
 }

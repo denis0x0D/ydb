@@ -31,7 +31,7 @@ private:
     TExprNode::TPtr BuildGroupSwitchLambda() const;
 
     TExprNode::TPtr BuildChain(TExprNode::TPtr wideFlow) const;
-    TExprNode::TPtr BuildChainLambda(bool update) const;
+    TExprNode::TPtr BuildChainLambda(bool update, bool flat) const;
     TExprNode::TPtr BuildAccumulator(const TOpWindowFunc& func, ui32 funcIndex, TExprNode::TPtr itemArg, TExprNode::TPtr previousState,
                                      TExprNode::TPtr sortKeyChanged, TVector<std::pair<TString, TExprNode::TPtr>>& stateMembers) const;
     TExprNode::TPtr BuildWholePartition(TExprNode::TPtr wideFlow) const;
@@ -40,7 +40,7 @@ private:
     TExprNode::TPtr BuildRangePeerGroups(TExprNode::TPtr wideFlow) const;
     TExprNode::TPtr BuildPartitionHandler(TExprNode::TPtr wideFlow) const;
     TExprNode::TPtr BuildExpandFromStructs(TExprNode::TPtr list) const;
-    TExprNode::TPtr BuildExpandFromChain(TExprNode::TPtr chained) const;
+    TExprNode::TPtr BuildExpandToOutputs(TExprNode::TPtr flow) const;
 
     TString AccumulatorName(ui32 funcIndex) const;
     TString PositionName(ui32 funcIndex) const;
@@ -59,7 +59,8 @@ private:
     TVector<TInfoUnit> Inputs;
     THashMap<TString, ui32> Indexes;
     const TStructExprType* InputStruct = nullptr;
-    TVector<TInfoUnit> OutputLayout;
+    // Output columns live past the window, in layout order: the inputs, then the function results.
+    TVector<TInfoUnit> OutputColumns;
     bool NeedsPeerKey = false;
     bool WholePartition = false;
     bool RangeCarry = false;

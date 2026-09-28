@@ -91,7 +91,7 @@ public:
         : TPhysicalOpBuilder(ctx, pos) {
     }
 
-    virtual TExprNode::TPtr BuildPhysicalOp(const NPhysicalConvertionUtils::TStageBody& input, std::optional<i64> memLimit) = 0;
+    virtual NPhysicalConvertionUtils::TStageBody BuildPhysicalOp(const NPhysicalConvertionUtils::TStageBody& input, std::optional<i64> memLimit) = 0;
 };
 
 template <typename TPhysicalBuilder, typename TOperator, typename... Args>

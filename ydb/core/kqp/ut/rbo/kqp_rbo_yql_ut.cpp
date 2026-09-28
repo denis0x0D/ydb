@@ -8404,7 +8404,8 @@ FROM (
         auto physical = TPhysicalAggregationBuilder(aggregate, testContext.ExprCtx, pos)
             .BuildPhysicalOp(
                 NPhysicalConvertionUtils::TStageBody::Narrow(testContext.ExprCtx.NewArgument(pos, "input")),
-                std::nullopt);
+                std::nullopt)
+            .AsNarrow(testContext.ExprCtx);
 
         TExprNode::TListType narrowMaps;
         CollectCallableNodes(physical, "NarrowMap", narrowMaps);
