@@ -19,21 +19,11 @@ bool IsSingleConsumerRelNode(const std::shared_ptr<IBaseOptimizerNode>& node) {
 
 bool IsLookupJoinApplicableDetailed(const std::shared_ptr<TRelOptimizerNode>& node, const TVector<TJoinColumn>& joinColumns, EJoinKind joinKind, const TKqpProviderContext& ctx) {
     auto rel = std::static_pointer_cast<TRBORelOptimizerNode>(node);
-    auto rightInput = rel->Op;
-    TIntrusivePtr<TOpFilter> rightFilter;
-
-    if (rightInput->Kind == EOperator::Filter) {
-        if (!rightInput->IsSingleConsumer()) {
-            return false;
-        }
-        rightFilter = CastOperator<TOpFilter>(rightInput);
-        rightInput = rightFilter->GetInput();
-    }
-    if (rightInput->Kind != EOperator::Source || !rightInput->IsSingleConsumer()) {
+    const auto rightSide = MatchLookupJoinRightSide(rel->Op);
+    if (!rightSide) {
         return false;
     }
-
-    auto read = CastOperator<TOpRead>(rightInput);
+    const auto& read = rightSide->Read;
 
     TVector<TInfoUnit> rightJoinKeys;
     for (const auto& joinCol : joinColumns) {
@@ -50,7 +40,7 @@ bool IsLookupJoinApplicableDetailed(const std::shared_ptr<TRelOptimizerNode>& no
     }
 
     bool filterSupported = true;
-    BuildFetchedRowFilter(*read, rightFilter, filterSupported);
+    BuildFetchedRowFilter(*read, rightSide->Filter, filterSupported);
     if (!filterSupported) {
         return false;
     }

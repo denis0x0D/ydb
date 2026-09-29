@@ -550,6 +550,18 @@ TIntrusivePtr<IOperator> TPushRangesRule::SimpleMatchAndApply(const TIntrusivePt
                 continue;
             }
 
+            auto indexKeyColumns = ResolveExposedKeyColumns(*read, indexMeta->KeyColumnNames);
+            auto indexResult = extractor->BuildComputeNode(indexKeyColumns, ctx, typeCtx);
+            if (!indexResult.ComputeNode) {
+                continue;
+            }
+
+            // A lookup join fetches the rows it finds in a non-covering index from the main table and applies
+            // the whole predicate to them, so the index needs neither to cover the read nor the predicate.
+            if (allPointPrefixes) {
+                addPointPrefix(*indexMeta, indexResult, indexKeyColumns);
+            }
+
             const bool covering = IsCovering(*read, *indexMeta);
             if (!covering) {
                 if (read->Limit) {
@@ -560,17 +572,6 @@ TIntrusivePtr<IOperator> TPushRangesRule::SimpleMatchAndApply(const TIntrusivePt
                 if (!evaluable) {
                     continue;
                 }
-            }
-
-            auto indexKeyColumns = ResolveExposedKeyColumns(*read, indexMeta->KeyColumnNames);
-            auto indexResult = extractor->BuildComputeNode(indexKeyColumns, ctx, typeCtx);
-            if (!indexResult.ComputeNode) {
-                continue;
-            }
-
-            // A lookup join can be redirected only to a covering index.
-            if (allPointPrefixes && covering) {
-                addPointPrefix(*indexMeta, indexResult, indexKeyColumns);
             }
 
             const auto score = ScoreKeyOrder(indexResult, indexKeyColumns.size(), sortColumns, indexKeyColumns, covering);
@@ -632,8 +633,17 @@ TIntrusivePtr<IOperator> TPushRangesRule::SimpleMatchAndApply(const TIntrusivePt
             lookupKeys.emplace_back(TString(), pk);
         }
 
-        return MakeIntrusive<TOpTableLookup>(indexFilter, read->Pos, read->TableCallable, read->Columns,
-                                             read->GetOutputIUs(), lookupKeys);
+        auto lookup = MakeIntrusive<TOpTableLookup>(indexFilter, read->Pos, read->TableCallable, read->Columns,
+                                                    read->GetOutputIUs(), lookupKeys);
+        // Keep the read predicate and the point prefixes, so a lookup join can still probe the main table
+        // or a covering index instead of this subtree.
+        if (allPointPrefixes && read->StorageType == NYql::EStorageType::RowStorage) {
+            lookup->SourceRead = TOpTableLookup::TSourceRead{
+                .Predicate = TExpression(originalLambda, &ctx, &props),
+                .PointPrefixes = std::move(pointPrefixes),
+            };
+        }
+        return lookup;
     }
 
     const auto& chosen = chosenIndexMeta ? winnerResult : mainResult;

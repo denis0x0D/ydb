@@ -91,6 +91,23 @@ bool IsUsablePointPrefix(const TOpRead::TPointPrefix& prefix, const TVector<TStr
     return prefix.ExpectedMaxPoints.Defined() && *prefix.ExpectedMaxPoints <= pointsLimit;
 }
 
+bool IsCoveringTable(const TKikimrTableMetadata& meta, const TVector<TString>& columns) {
+    return std::all_of(columns.begin(), columns.end(), [&](const TString& column) { return meta.Columns.contains(column); });
+}
+
+// Rows found in a secondary index of the main table can be fetched from the main table by its primary key.
+bool IsSecondaryIndexOf(const TKikimrTableMetadata& mainMeta, const TString& indexTable) {
+    for (size_t i = 0; i < mainMeta.Indexes.size() && i < mainMeta.ImplTables.size(); ++i) {
+        const auto& index = mainMeta.Indexes[i];
+        const auto& implTable = mainMeta.ImplTables[i];
+        if (implTable && implTable->Name == indexTable) {
+            return (index.Type == TIndexDescription::EType::GlobalSync || index.Type == TIndexDescription::EType::GlobalSyncUnique)
+                && index.State == TIndexDescription::EIndexState::Ready;
+        }
+    }
+    return false;
+}
+
 // Returns how many leading key columns a lookup fixes: the point prefix and the join keys after it.
 size_t GetLookupKeyPrefixLen(const TVector<TString>& keyColumnNames, size_t pointPrefixLen, const THashSet<TString>& joinKeyColumns) {
     size_t len = pointPrefixLen;
@@ -101,6 +118,47 @@ size_t GetLookupKeyPrefixLen(const TVector<TString>& keyColumnNames, size_t poin
 }
 
 } // anonymous namespace
+
+std::optional<TLookupJoinRightSide> MatchLookupJoinRightSide(const TIntrusivePtr<IOperator>& input) {
+    auto op = input;
+    TIntrusivePtr<TOpTableLookup> sourceLookup;
+    if (op->Kind == EOperator::TableLookup) {
+        sourceLookup = CastOperator<TOpTableLookup>(op);
+        if (sourceLookup->IsJoin() || !sourceLookup->SourceRead || !sourceLookup->IsSingleConsumer()) {
+            return std::nullopt;
+        }
+        op = sourceLookup->GetInput();
+    }
+
+    TIntrusivePtr<TOpFilter> filter;
+    if (op->Kind == EOperator::Filter) {
+        if (!op->IsSingleConsumer()) {
+            return std::nullopt;
+        }
+        filter = CastOperator<TOpFilter>(op);
+        op = filter->GetInput();
+    }
+
+    if (op->Kind != EOperator::Source || !op->IsSingleConsumer()) {
+        return std::nullopt;
+    }
+
+    auto read = CastOperator<TOpRead>(op);
+    if (!sourceLookup) {
+        return TLookupJoinRightSide{read, filter};
+    }
+
+    // The lookup join replaces the whole subtree, so the index read and the filter above it are not needed:
+    // the source read predicate contains the whole read predicate.
+    const auto& source = *sourceLookup->SourceRead;
+    TOpRead::TRangeInfo rangeInfo;
+    rangeInfo.PointPrefixes = source.PointPrefixes;
+    auto sourceRead = MakeIntrusive<TOpRead>(read->Alias, sourceLookup->FetchColumns, sourceLookup->OutputIUs, NYql::EStorageType::RowStorage,
+                                             sourceLookup->Table, nullptr, nullptr, std::move(rangeInfo), source.Predicate, ESortDir::None,
+                                             sourceLookup->Props, sourceLookup->Pos);
+    sourceRead->Type = sourceLookup->Type;
+    return TLookupJoinRightSide{sourceRead, nullptr};
+}
 
 std::optional<THashSet<TString>> GetLookupJoinKeyColumns(const TOpRead& read, const TVector<TInfoUnit>& rightJoinKeys) {
     THashMap<TInfoUnit, TString, TInfoUnit::THashFunction> readColumnByIU;
@@ -172,13 +230,14 @@ std::optional<TLookupJoinTarget> ChooseLookupJoinTarget(const TOpRead& read, con
     // Without a pushed predicate the read can be redirected to a covering index whose key starts with join keys.
     if (autoIndexSelection && !read.RangeInfo.has_value()) {
         if (auto index = TryToFindBestIndexForRightSide(tableDesc, read.Columns, joinKeyColumns); index && IsLookupTable(*index)) {
-            return TLookupJoinTarget{index, nullptr};
+            return TLookupJoinTarget{index, nullptr, nullptr};
         }
     }
 
     const size_t pointsLimit = kqpCtx.Config->GetIdxLookupJoinPointsLimit();
     std::optional<TLookupJoinTarget> best;
-    size_t bestLen = 0;
+    // The longest looked up key prefix wins, and a covering table wins a tie, because it needs a single lookup.
+    std::pair<size_t, bool> bestScore;
     // Candidates are considered in the order of preference, so the first one wins a tie.
     auto consider = [&](const TIntrusivePtr<TKikimrTableMetadata>& meta, const TOpRead::TPointPrefix* prefix) {
         if (!IsLookupTable(*meta)) {
@@ -188,15 +247,30 @@ std::optional<TLookupJoinTarget> ChooseLookupJoinTarget(const TOpRead& read, con
             return;
         }
 
+        TIntrusivePtr<TKikimrTableMetadata> mainTable;
+        if (!IsCoveringTable(*meta, read.Columns)) {
+            // Rows found in a non-covering index are fetched from the main table by a second lookup. Only an inner join
+            // can drop the rows without a match before the second lookup, other joins would need its result for them.
+            if (!innerJoin || !IsLookupTable(*tableDesc.Metadata) || !IsSecondaryIndexOf(*tableDesc.Metadata, meta->Name)) {
+                return;
+            }
+            mainTable = tableDesc.Metadata;
+        }
+
         const size_t pointPrefixLen = prefix ? prefix->Columns.size() : 0;
         const size_t len = GetLookupKeyPrefixLen(meta->KeyColumnNames, pointPrefixLen, joinKeyColumns);
         // At least one join key is needed to lookup by.
-        if (len == pointPrefixLen || len <= bestLen) {
+        if (len == pointPrefixLen) {
             return;
         }
 
-        best = TLookupJoinTarget{meta, prefix};
-        bestLen = len;
+        const std::pair<size_t, bool> score{len, !mainTable};
+        if (best && score <= bestScore) {
+            return;
+        }
+
+        best = TLookupJoinTarget{meta, prefix, mainTable};
+        bestScore = score;
     };
 
     // The read table is preferred, so the read is not redirected without a reason.

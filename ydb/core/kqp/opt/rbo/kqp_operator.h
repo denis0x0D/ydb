@@ -439,7 +439,7 @@ public:
         size_t PointPrefixLen = 0;    // how many are pinned to a single value
         TMaybe<size_t> ExpectedMaxRanges;
         // Point prefixes of the read table and of the tables the read can be redirected to: the main
-        // table and its covering indexes. A lookup join chooses the one which fits its keys best.
+        // table and its indexes. A lookup join chooses the one which fits its keys best.
         TVector<TPointPrefix> PointPrefixes;
     };
 
@@ -1013,6 +1013,18 @@ public:
     std::optional<TLookupKeyPrefix> Prefix;
     ELookupStrategy Strategy{ELookupStrategy::LookupRows};
     TVector<TJoinKey> ResidualJoinKeys;
+    // Lookup keys can be null: they are key columns of rows found in another table, e.g. the primary key
+    // of rows found in an index, and the primary key can have nulls.
+    bool AllowNullKeys = false;
+
+    // Describes the read which this lookup replaced after the read was redirected to a non-covering index:
+    // the whole read predicate over the lookup output and point prefixes of the tables the read can be
+    // redirected to. A lookup join can probe one of these tables instead of the whole subtree.
+    struct TSourceRead {
+        TExpression Predicate;
+        TVector<TOpRead::TPointPrefix> PointPrefixes;
+    };
+    std::optional<TSourceRead> SourceRead;
 
 protected:
     void ComputeOutputIUs() override;

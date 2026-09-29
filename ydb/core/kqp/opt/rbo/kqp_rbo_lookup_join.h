@@ -10,7 +10,20 @@ struct TLookupJoinTarget {
     TIntrusivePtr<NYql::TKikimrTableMetadata> Metadata;
     // Leading key columns pinned by the read predicate, they become a constant prefix of the lookup keys.
     const TOpRead::TPointPrefix* PointPrefix = nullptr;
+    // Set when the target is a non-covering index of this main table: rows found in the index are fetched
+    // from the main table by its primary key.
+    TIntrusivePtr<NYql::TKikimrTableMetadata> MainTable;
 };
+
+// The right side of a lookup join: a read and an optional filter above it.
+struct TLookupJoinRightSide {
+    TIntrusivePtr<TOpRead> Read;
+    TIntrusivePtr<TOpFilter> Filter;
+};
+
+// Matches the right side of a lookup join: Read or Filter -> Read. A read redirected to a non-covering index,
+// TableLookup -> Filter -> Read(index), is matched as the read it replaced, if the lookup keeps its description.
+std::optional<TLookupJoinRightSide> MatchLookupJoinRightSide(const TIntrusivePtr<IOperator>& input);
 
 // Maps the right side join keys to physical columns of the read, because the read can rename its columns.
 std::optional<THashSet<TString>> GetLookupJoinKeyColumns(const TOpRead& read, const TVector<TInfoUnit>& rightJoinKeys);
@@ -19,6 +32,7 @@ std::optional<THashSet<TString>> GetLookupJoinKeyColumns(const TOpRead& read, co
 std::optional<TExpression> BuildFetchedRowFilter(const TOpRead& read, const TIntrusivePtr<TOpFilter>& filter, bool& supported);
 
 // Chooses a table to probe for the read: the one whose key has the longest prefix of point prefix columns followed by join keys.
+// A non-covering index of the read table can be chosen for an inner join only.
 // CBO and the rewrite rule have to use it both, so the rule can rewrite every lookup join chosen by CBO.
 std::optional<TLookupJoinTarget> ChooseLookupJoinTarget(const TOpRead& read, const THashSet<TString>& joinKeyColumns, bool innerJoin,
                                                         const NOpt::TKqpOptimizeContext& kqpCtx);

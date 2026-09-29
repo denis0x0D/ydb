@@ -4921,7 +4921,7 @@ FROM (
                 ORDER BY t1.Value2, t2.Value2;
             )",
             R"(
-                -- MapJoin, Index12 left side stream lookup for Value1+Value2 / PK right
+                -- LookupJoin, PK left / Index21 right by the point prefix SubKey2 and Value1, stream lookup for Value2
                 SELECT t1.Value2, t2.Value2
                 FROM `/Root/Table` AS t1 INNER JOIN `/Root/Table2` AS t2 ON t1.Value1 = t2.Value1
                 WHERE t1.SubKey1 = 0 AND t1.SubKey2 = "0" AND t2.Key = 0
@@ -4988,7 +4988,7 @@ FROM (
         };
         const std::vector<TCase> cases = {
             {false, {}},
-            {false, {"Index1_12/indexImplTable"}},
+            {true,  {"Index1_21/indexImplTable"}},
             {false, {"Index2_21/indexImplTable"}},
             {false, {"Index1_212/indexImplTable", "Index2_212/indexImplTable"}},
             {true,  {}},
@@ -5574,6 +5574,14 @@ FROM (
                 c Int32,
                 PRIMARY KEY (a)
             );
+
+            CREATE TABLE `/Root/t4` (
+                a Int64,
+                b Int64,
+                c Int32,
+                d Int32,
+                PRIMARY KEY (a)
+            );
         )").GetValueSync();
         UNIT_ASSERT_C(schemeResult.IsSuccess(), schemeResult.GetIssues().ToString());
 
@@ -5606,6 +5614,23 @@ FROM (
             UNIT_ASSERT_C(upsertResult.IsSuccess(), upsertResult.GetIssues().ToString());
         }
 
+        {
+            NYdb::TValueBuilder rows;
+            rows.BeginList();
+            for (const auto& [a, b, c, d] : TVector<std::tuple<i64, i64, i32, i32>>{
+                     {10, 1, 0, 7}, {11, 2, 1, 7}, {12, 3, 0, 7}, {13, 3, 0, 8}, {14, 5, 0, 7}}) {
+                rows.AddListItem().BeginStruct()
+                    .AddMember("a").OptionalInt64(a)
+                    .AddMember("b").OptionalInt64(b)
+                    .AddMember("c").OptionalInt32(c)
+                    .AddMember("d").OptionalInt32(d)
+                    .EndStruct();
+            }
+            rows.EndList();
+            auto upsertResult = db.BulkUpsert("/Root/t4", rows.Build()).GetValueSync();
+            UNIT_ASSERT_C(upsertResult.IsSuccess(), upsertResult.GetIssues().ToString());
+        }
+
         // BulkUpsert does not support tables with sync indexes, so indexes are built after loading.
         for (const auto* addIndex : {
                  "ALTER TABLE `/Root/t2` ADD INDEX idx_c_b GLOBAL ON (c, b);",
@@ -5613,6 +5638,10 @@ FROM (
                  // the read to idx_c_b, where the join key follows the point prefix.
                  "ALTER TABLE `/Root/t3` ADD INDEX idx_c GLOBAL ON (c) COVER (b);",
                  "ALTER TABLE `/Root/t3` ADD INDEX idx_c_b GLOBAL ON (c, b);",
+                 // idx_c_d pins more key columns, so it wins for the predicate although it does not cover b.
+                 // The lookup join has to probe the covering idx_c_b instead.
+                 "ALTER TABLE `/Root/t4` ADD INDEX idx_c_d GLOBAL ON (c, d);",
+                 "ALTER TABLE `/Root/t4` ADD INDEX idx_c_b GLOBAL ON (c, b) COVER (d);",
              }) {
             schemeResult = session.ExecuteSchemeQuery(addIndex).GetValueSync();
             UNIT_ASSERT_C(schemeResult.IsSuccess(), schemeResult.GetIssues().ToString());
@@ -5626,40 +5655,198 @@ FROM (
             return std::make_pair(TString{*explained.GetStats()->GetAst()}, TString{*explained.GetStats()->GetPlan()});
         };
 
-        {
-            const auto [ast, plan] = explain("SELECT a, b, c FROM `/Root/t3` WHERE c = 0;");
-            UNIT_ASSERT_C(ast.Contains("/Root/t3/idx_c/indexImplTable"), "expected a read of idx_c, ast:\n" << ast);
+        for (const auto& [query, index] : TVector<std::pair<TString, TString>>{
+                 {"SELECT a, b, c FROM `/Root/t3` WHERE c = 0;", "/Root/t3/idx_c/indexImplTable"},
+                 {"SELECT a, b, c, d FROM `/Root/t4` WHERE c = 0 AND d = 7;", "/Root/t4/idx_c_d/indexImplTable"}}) {
+            const auto [ast, plan] = explain(query);
+            UNIT_ASSERT_C(ast.Contains(index), "expected a read of " << index << ", ast:\n" << ast);
         }
 
-        for (const TString table : {"t2", "t3"}) {
+        struct TCase {
+            TString Table;
+            TString Predicate;
+            TString Result;
+            // The index chosen for the predicate, when it is not the one to lookup by.
+            TString PredicateIndex;
+        };
+
+        const TString allRows = R"([[[1];[10];[1];[0]];[[3];[12];[3];[0]];[[3];[13];[3];[0]]])";
+        const TVector<TCase> cases = {
+            {"t2", "t.c = 0", allRows, ""},
+            {"t3", "t.c = 0", allRows, "idx_c"},
+            {"t4", "t.c = 0 AND t.d = 7", R"([[[1];[10];[1];[0]];[[3];[12];[3];[0]]])", "idx_c_d"},
+        };
+
+        for (const auto& [table, predicate, expected, predicateIndex] : cases) {
             // The lookup goes through idx_c_b: c is a constant point prefix and b is the lookup key.
             const TString query = Sprintf(R"(
                 SELECT t1.a AS t1_a, t.a AS t_a, t.b AS t_b, t.c AS t_c
                 FROM `/Root/t1` AS t1
                 JOIN `/Root/%s` AS t
                   ON t1.a = t.b
-                WHERE t.c = 0
+                WHERE %s
                 ORDER BY t_a;
-            )", table.c_str());
+            )", table.c_str(), predicate.c_str());
 
             auto result = querySession.ExecuteQuery(query, NYdb::NQuery::TTxControl::BeginTx().CommitTx()).GetValueSync();
             UNIT_ASSERT_C(result.IsSuccess(), table << ": " << result.GetIssues().ToString());
-            UNIT_ASSERT_VALUES_EQUAL_C(FormatResultSetYson(result.GetResultSet(0)),
-                                       R"([[[1];[10];[1];[0]];[[3];[12];[3];[0]];[[3];[13];[3];[0]]])", table);
+            UNIT_ASSERT_VALUES_EQUAL_C(FormatResultSetYson(result.GetResultSet(0)), expected, table);
 
             const auto [ast, plan] = explain(query);
-            if (!AllPointPrefixes && table == "t3") {
-                // Only the point prefix of idx_c is known, and b does not follow it, so t3 cannot be probed by b.
-                UNIT_ASSERT_C(!ast.Contains("/Root/t3/idx_c_b/indexImplTable"), table << ": expected no lookup by idx_c_b, ast:\n" << ast);
+            if (!AllPointPrefixes && !predicateIndex.empty()) {
+                // Only the point prefix of the index chosen for the predicate is known, and b does not follow it.
+                UNIT_ASSERT_C(!ast.Contains("/Root/" + table + "/idx_c_b/indexImplTable"), table << ": expected no lookup by idx_c_b, ast:\n" << ast);
                 continue;
             }
 
             UNIT_ASSERT_C(ast.Contains("KqpIndexLookupJoin"), table << ": expected a lookup join, ast:\n" << ast);
             UNIT_ASSERT_C(plan.Contains("TableLookupJoin"), table << ": expected a lookup join, plan:\n" << plan);
             UNIT_ASSERT_C(ast.Contains("/Root/" + table + "/idx_c_b/indexImplTable"), table << ": expected a lookup by idx_c_b, ast:\n" << ast);
-            UNIT_ASSERT_C(!ast.Contains("/Root/" + table + "/idx_c/indexImplTable"), table << ": expected no read of idx_c, ast:\n" << ast);
+            if (!predicateIndex.empty()) {
+                const TString predicateIndexTable = "/Root/" + table + "/" + predicateIndex + "/indexImplTable";
+                UNIT_ASSERT_C(!ast.Contains(predicateIndexTable), table << ": expected no read of " << predicateIndex << ", ast:\n" << ast);
+            }
             UNIT_ASSERT_C(ast.Contains(R"('('"AllowNullKeysPrefixSize" '1))"), table << ": expected a lookup by a point prefix, ast:\n" << ast);
         }
+    }
+
+    Y_UNIT_TEST_TWIN(LookupJoinByNonCoveringIndexWithConstPrefix, AllPointPrefixes) {
+        NKikimrConfig::TAppConfig appConfig;
+        appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+        appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
+        appConfig.MutableTableServiceConfig()->SetDefaultCostBasedOptimizationLevel(4);
+        appConfig.MutableTableServiceConfig()->SetDefaultEnableShuffleElimination(false);
+        appConfig.MutableTableServiceConfig()->SetEnablePruneKeyColumns(true);
+        appConfig.MutableTableServiceConfig()->SetEnableAutoIndexSelectionForIndexLookupJoin(true);
+        appConfig.MutableTableServiceConfig()->SetEnableNewRBOLookupJoinPointPrefixes(AllPointPrefixes);
+        appConfig.MutableTableServiceConfig()->SetDefaultLangVer(NYql::GetMaxLangVersion());
+
+        TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        auto schemeResult = session.ExecuteSchemeQuery(R"(
+            CREATE TABLE `/Root/t1` (
+                id Int64 NOT NULL,
+                c  Int32,
+                k  Int64,
+                v  Int64,
+                PRIMARY KEY (id)
+            );
+
+            CREATE TABLE `/Root/t2` (
+                k Int64 NOT NULL,
+                c Int32,
+                PRIMARY KEY (k)
+            );
+        )").GetValueSync();
+        UNIT_ASSERT_C(schemeResult.IsSuccess(), schemeResult.GetIssues().ToString());
+
+        {
+            NYdb::TValueBuilder rows;
+            rows.BeginList();
+            for (i64 id = 0; id < 100; ++id) {
+                rows.AddListItem().BeginStruct()
+                    .AddMember("id").Int64(id)
+                    .AddMember("c").OptionalInt32(0)
+                    .AddMember("k").OptionalInt64(id)
+                    .AddMember("v").OptionalInt64(id + 1000)
+                    .EndStruct();
+            }
+            rows.EndList();
+            auto upsertResult = db.BulkUpsert("/Root/t1", rows.Build()).GetValueSync();
+            UNIT_ASSERT_C(upsertResult.IsSuccess(), upsertResult.GetIssues().ToString());
+        }
+
+        {
+            NYdb::TValueBuilder rows;
+            rows.BeginList();
+            for (const auto& [k, c] : TVector<std::pair<i64, i32>>{{17, 0}, {42, 0}, {50, 1}}) {
+                rows.AddListItem().BeginStruct()
+                    .AddMember("k").Int64(k)
+                    .AddMember("c").OptionalInt32(c)
+                    .EndStruct();
+            }
+            rows.EndList();
+            auto upsertResult = db.BulkUpsert("/Root/t2", rows.Build()).GetValueSync();
+            UNIT_ASSERT_C(upsertResult.IsSuccess(), upsertResult.GetIssues().ToString());
+        }
+
+        // BulkUpsert does not support tables with sync indexes, so the index is built after loading.
+        // The index does not cover v.
+        schemeResult = session.ExecuteSchemeQuery("ALTER TABLE `/Root/t1` ADD INDEX idx_c_k GLOBAL ON (c, k);").GetValueSync();
+        UNIT_ASSERT_C(schemeResult.IsSuccess(), schemeResult.GetIssues().ToString());
+
+        auto querySession = kikimr.GetQueryClient().GetSession().GetValueSync().GetSession();
+
+        // f is large and d is small, so d has to probe f: by the point prefix c and the join key k in idx_c_k,
+        // and then by the primary key in t1 for v.
+        const TString query = R"(
+            PRAGMA ydb.OptimizerHints = 'Rows(f # 300000) Bytes(f # 10000000) Rows(d # 2) Bytes(d # 20)';
+            SELECT f.id, f.v
+            FROM `/Root/t1` AS f
+            JOIN `/Root/t2` AS d
+              ON f.k = d.k
+            WHERE f.c = 0 AND d.c = 0
+            ORDER BY f.id;
+        )";
+
+        auto result = querySession.ExecuteQuery(query, NYdb::NQuery::TTxControl::BeginTx().CommitTx()).GetValueSync();
+        UNIT_ASSERT_C(result.IsSuccess(), result.GetIssues().ToString());
+        UNIT_ASSERT_VALUES_EQUAL(FormatResultSetYson(result.GetResultSet(0)), R"([[17;[1017]];[42;[1042]]])");
+
+        auto explained = querySession.ExecuteQuery(query, NYdb::NQuery::TTxControl::NoTx(),
+                NYdb::NQuery::TExecuteQuerySettings().ExecMode(NQuery::EExecMode::Explain)).ExtractValueSync();
+        UNIT_ASSERT_C(explained.IsSuccess(), explained.GetIssues().ToString());
+        const auto ast = TString{*explained.GetStats()->GetAst()};
+
+        // Returns stream lookups into the table. The table and the lookup settings are bound to variables,
+        // so a returned lookup is followed by the definitions of the settings it refers to.
+        auto streamLookupsInto = [&](const TString& table) {
+            THashMap<TString, TString> definitions;
+            TVector<TString> lookups;
+            TStringBuf rest = ast;
+            TString tableVar;
+            for (TStringBuf line; rest.NextTok('\n', line);) {
+                if (line.StartsWith("(let $")) {
+                    const TString var(line.substr(5, line.find(' ', 5) - 5));
+                    definitions[var] = TString(line);
+                    if (line.Contains("(KqpTable '\"" + table + "\"")) {
+                        tableVar = " " + var + " ";
+                    }
+                }
+                if (!tableVar.empty() && line.Contains("(KqpCnStreamLookup ") && line.Contains(tableVar)) {
+                    lookups.emplace_back(line);
+                }
+            }
+
+            for (auto& lookup : lookups) {
+                TString expanded = lookup;
+                for (const auto& [var, definition] : definitions) {
+                    if (definition.Contains("\"Strategy\"") && (lookup.Contains(" " + var + ")") || lookup.Contains(" " + var + " "))) {
+                        expanded += "\n" + definition;
+                    }
+                }
+                lookup = std::move(expanded);
+            }
+            return lookups;
+        };
+
+        const auto indexLookups = streamLookupsInto("/Root/t1/idx_c_k/indexImplTable");
+        if (!AllPointPrefixes) {
+            // The index is chosen for the predicate only, so the read cannot be replaced by a lookup.
+            UNIT_ASSERT_C(indexLookups.empty(), "expected no lookup by idx_c_k, ast:\n" << ast);
+            return;
+        }
+
+        UNIT_ASSERT_VALUES_EQUAL_C(indexLookups.size(), 1, ast);
+        UNIT_ASSERT_C(indexLookups[0].Contains(R"('('"Strategy" '"LookupJoinRows") '('"AllowNullKeysPrefixSize" '1))"),
+                      "expected a lookup join by the point prefix, ast:\n" << ast);
+
+        const auto mainLookups = streamLookupsInto("/Root/t1");
+        UNIT_ASSERT_VALUES_EQUAL_C(mainLookups.size(), 1, ast);
+        UNIT_ASSERT_C(mainLookups[0].Contains(R"('('"Strategy" '"LookupJoinRows") '('"AllowNullKeysPrefixSize" '1))"),
+                      "expected a lookup join by the primary key, ast:\n" << ast);
     }
 
     Y_UNIT_TEST(JoinFiltersBasic) {
