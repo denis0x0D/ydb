@@ -619,4 +619,9 @@ message TTableServiceConfig {
 
     // When true, block hash join keys use IS NOT DISTINCT FROM (NULL matches NULL).
     optional bool EnableBlockHashJoinEqualNulls = 149 [default = false, (InvalidateCompileCache) = true];
+
+    // New RBO: compute point prefixes of the main table and of all its indexes during index selection,
+    // so an index lookup join can probe the table where a join key follows the point prefix.
+    // When false, only the point prefix of the table chosen for the read predicate is used.
+    optional bool EnableNewRBOLookupJoinPointPrefixes = 150 [default = true, (InvalidateCompileCache) = true];
 };
