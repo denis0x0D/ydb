@@ -11,9 +11,16 @@ namespace NKikimr::NKqp::NLookupJoinBuilder {
 struct TLookupKeysResult {
     NYql::TExprNode::TPtr InputStage;
     NYql::TExprNode::TPtr InputType;
+    // Type of the left rows passed through the lookup.
+    const NYql::TStructExprType* LeftRowType = nullptr;
 };
 
 TLookupKeysResult BuildLookupKeys(TOpTableLookup& lookup, NYql::TExprNode::TPtr inputStage, NYql::TExprContext& ctx);
+
+// Builds the input type of a lookup by keys of the input lookup: the output of the input lookup is passed as is,
+// so its fetched rows with physical column names are the lookup keys.
+NYql::TExprNode::TPtr BuildKeysFromInputLookupType(const TOpTableLookup& inputLookup, const NYql::TStructExprType* leftRowType,
+                                                   NYql::TExprContext& ctx);
 
 } // namespace NKikimr::NKqp::NLookupJoinBuilder
 

@@ -5657,7 +5657,9 @@ FROM (
 
         for (const auto& [query, index] : TVector<std::pair<TString, TString>>{
                  {"SELECT a, b, c FROM `/Root/t3` WHERE c = 0;", "/Root/t3/idx_c/indexImplTable"},
-                 {"SELECT a, b, c, d FROM `/Root/t4` WHERE c = 0 AND d = 7;", "/Root/t4/idx_c_d/indexImplTable"}}) {
+                 {"SELECT a, b, c, d FROM `/Root/t4` WHERE c = 0 AND d = 7;", "/Root/t4/idx_c_d/indexImplTable"},
+                 {"SELECT a, b, c FROM `/Root/t2` WHERE c = 0 AND b > 1;", "/Root/t2/idx_c_b/indexImplTable"},
+                 {"SELECT a, b, c, d FROM `/Root/t4` WHERE c = 0 AND d > 7;", "/Root/t4/idx_c_d/indexImplTable"}}) {
             const auto [ast, plan] = explain(query);
             UNIT_ASSERT_C(ast.Contains(index), "expected a read of " << index << ", ast:\n" << ast);
         }
@@ -5675,6 +5677,11 @@ FROM (
             {"t2", "t.c = 0", allRows, ""},
             {"t3", "t.c = 0", allRows, "idx_c"},
             {"t4", "t.c = 0 AND t.d = 7", R"([[[1];[10];[1];[0]];[[3];[12];[3];[0]]])", "idx_c_d"},
+            // The whole predicate is pushed into the ranges of the read, so only the point prefix c is left for the lookup.
+            // The range b > 1 has to be applied to fetched rows: the lookup by b = 1 finds a row, which it filters out.
+            {"t2", "t.c = 0 AND t.b > 1", R"([[[3];[12];[3];[0]];[[3];[13];[3];[0]]])", ""},
+            // The range d > 7 is pushed into idx_c_d, the lookup by idx_c_b has to apply it to fetched rows.
+            {"t4", "t.c = 0 AND t.d > 7", R"([[[3];[13];[3];[0]]])", "idx_c_d"},
         };
 
         for (const auto& [table, predicate, expected, predicateIndex] : cases) {
@@ -5745,12 +5752,19 @@ FROM (
         {
             NYdb::TValueBuilder rows;
             rows.BeginList();
+            TVector<std::tuple<i64, i32, i64, i64>> facts;
             for (i64 id = 0; id < 100; ++id) {
+                facts.emplace_back(id, 0, id, id + 1000);
+            }
+            // A second match for k = 17, and a row which the point prefix c = 0 excludes.
+            facts.emplace_back(100, 0, 17, 2000);
+            facts.emplace_back(101, 1, 42, 3000);
+            for (const auto& [id, c, k, v] : facts) {
                 rows.AddListItem().BeginStruct()
                     .AddMember("id").Int64(id)
-                    .AddMember("c").OptionalInt32(0)
-                    .AddMember("k").OptionalInt64(id)
-                    .AddMember("v").OptionalInt64(id + 1000)
+                    .AddMember("c").OptionalInt32(c)
+                    .AddMember("k").OptionalInt64(k)
+                    .AddMember("v").OptionalInt64(v)
                     .EndStruct();
             }
             rows.EndList();
@@ -5761,7 +5775,8 @@ FROM (
         {
             NYdb::TValueBuilder rows;
             rows.BeginList();
-            for (const auto& [k, c] : TVector<std::pair<i64, i32>>{{17, 0}, {42, 0}, {50, 1}}) {
+            // k = 500 has no match in the index.
+            for (const auto& [k, c] : TVector<std::pair<i64, i32>>{{17, 0}, {42, 0}, {50, 1}, {500, 0}}) {
                 rows.AddListItem().BeginStruct()
                     .AddMember("k").Int64(k)
                     .AddMember("c").OptionalInt32(c)
@@ -5793,24 +5808,25 @@ FROM (
 
         auto result = querySession.ExecuteQuery(query, NYdb::NQuery::TTxControl::BeginTx().CommitTx()).GetValueSync();
         UNIT_ASSERT_C(result.IsSuccess(), result.GetIssues().ToString());
-        UNIT_ASSERT_VALUES_EQUAL(FormatResultSetYson(result.GetResultSet(0)), R"([[17;[1017]];[42;[1042]]])");
+        UNIT_ASSERT_VALUES_EQUAL(FormatResultSetYson(result.GetResultSet(0)), R"([[17;[1017]];[42;[1042]];[100;[2000]]])");
 
         auto explained = querySession.ExecuteQuery(query, NYdb::NQuery::TTxControl::NoTx(),
                 NYdb::NQuery::TExecuteQuerySettings().ExecMode(NQuery::EExecMode::Explain)).ExtractValueSync();
         UNIT_ASSERT_C(explained.IsSuccess(), explained.GetIssues().ToString());
         const auto ast = TString{*explained.GetStats()->GetAst()};
 
-        // Returns stream lookups into the table. The table and the lookup settings are bound to variables,
-        // so a returned lookup is followed by the definitions of the settings it refers to.
+        // Returns stream lookups into the table. The AST binds the table and parts of the lookup settings
+        // to variables, so the variables of a returned lookup are substituted with their values.
         auto streamLookupsInto = [&](const TString& table) {
-            THashMap<TString, TString> definitions;
+            THashMap<TString, TString> values;
             TVector<TString> lookups;
             TStringBuf rest = ast;
             TString tableVar;
             for (TStringBuf line; rest.NextTok('\n', line);) {
-                if (line.StartsWith("(let $")) {
-                    const TString var(line.substr(5, line.find(' ', 5) - 5));
-                    definitions[var] = TString(line);
+                if (line.StartsWith("(let $") && line.EndsWith(")")) {
+                    const size_t nameEnd = line.find(' ', 5);
+                    const TString var(line.substr(5, nameEnd - 5));
+                    values[var] = TString(line.substr(nameEnd + 1, line.size() - nameEnd - 2));
                     if (line.Contains("(KqpTable '\"" + table + "\"")) {
                         tableVar = " " + var + " ";
                     }
@@ -5820,14 +5836,30 @@ FROM (
                 }
             }
 
-            for (auto& lookup : lookups) {
-                TString expanded = lookup;
-                for (const auto& [var, definition] : definitions) {
-                    if (definition.Contains("\"Strategy\"") && (lookup.Contains(" " + var + ")") || lookup.Contains(" " + var + " "))) {
-                        expanded += "\n" + definition;
+            auto substitute = [&](const TString& text) {
+                TString result;
+                size_t i = 0;
+                while (i < text.size()) {
+                    if (text[i] == '$') {
+                        size_t end = i + 1;
+                        while (end < text.size() && std::isdigit(static_cast<unsigned char>(text[end]))) {
+                            ++end;
+                        }
+                        if (const auto it = values.find(text.substr(i, end - i)); it != values.end()) {
+                            result += it->second;
+                            i = end;
+                            continue;
+                        }
                     }
+                    result += text[i++];
                 }
-                lookup = std::move(expanded);
+                return result;
+            };
+
+            for (auto& lookup : lookups) {
+                for (int depth = 0; depth < 3; ++depth) {
+                    lookup = substitute(lookup);
+                }
             }
             return lookups;
         };
@@ -5843,10 +5875,19 @@ FROM (
         UNIT_ASSERT_C(indexLookups[0].Contains(R"('('"Strategy" '"LookupJoinRows") '('"AllowNullKeysPrefixSize" '1))"),
                       "expected a lookup join by the point prefix, ast:\n" << ast);
 
+        // The primary key has no nulls, so the main table lookup does not allow null keys: the rows without a match
+        // in the index come with a missing key, which is not looked up.
         const auto mainLookups = streamLookupsInto("/Root/t1");
         UNIT_ASSERT_VALUES_EQUAL_C(mainLookups.size(), 1, ast);
-        UNIT_ASSERT_C(mainLookups[0].Contains(R"('('"Strategy" '"LookupJoinRows") '('"AllowNullKeysPrefixSize" '1))"),
+        UNIT_ASSERT_C(mainLookups[0].Contains(R"('('"Strategy" '"LookupJoinRows") '('"AllowNullKeysPrefixSize" '0))"),
                       "expected a lookup join by the primary key, ast:\n" << ast);
+
+        // The index lookup feeds the main table lookup directly, so a single lookup join consumes the result.
+        size_t lookupJoins = 0;
+        for (size_t pos = ast.find("(KqpIndexLookupJoin "); pos != TString::npos; pos = ast.find("(KqpIndexLookupJoin ", pos + 1)) {
+            ++lookupJoins;
+        }
+        UNIT_ASSERT_VALUES_EQUAL_C(lookupJoins, 1, ast);
     }
 
     Y_UNIT_TEST(JoinFiltersBasic) {

@@ -1157,13 +1157,25 @@ TOpTableLookup::TOpTableLookup(TIntrusivePtr<IOperator> input, TPositionHandle p
     }
 }
 
+TIntrusivePtr<IOperator> TOpTableLookup::GetLeftInput() {
+    if (!KeysFromInputLookup) {
+        return GetInput();
+    }
+
+    Y_ENSURE(GetInput()->Kind == EOperator::TableLookup, "A lookup by keys of the input lookup must be fed by a table lookup");
+    auto inputLookup = CastOperator<TOpTableLookup>(GetInput());
+    Y_ENSURE(inputLookup->IsJoin(), "A lookup by keys of the input lookup must be fed by a table lookup in join mode");
+    return inputLookup->GetLeftInput();
+}
+
 void TOpTableLookup::ComputeOutputIUs() {
     if (!IsJoin()) {
         Props.OutputIUs = OutputIUs;
         return;
     }
 
-    auto res = GetInput()->GetOutputIUs();
+    // The rows fetched by the input lookup are replaced by the rows fetched by this one.
+    auto res = GetLeftInput()->GetOutputIUs();
     res.insert(res.end(), OutputIUs.begin(), OutputIUs.end());
     Props.OutputIUs = std::move(res);
 }
@@ -1193,6 +1205,9 @@ TString TOpTableLookup::ToString(TExprContext& ctx) {
     res << GetExplainName() << ": " << TKqpTable(Table).Path().StringValue();
     if (IsJoin()) {
         res << ", kind: " << JoinKind;
+    }
+    if (KeysFromInputLookup) {
+        res << ", keys from input lookup";
     }
     res << ", keys: [";
     for (size_t i = 0; i < LookupKeys.size(); i++) {
@@ -1284,7 +1299,7 @@ TIntrusivePtr<TOpTableLookup> TOpIndexLookupJoin::GetTableLookup() {
 
 void TOpIndexLookupJoin::ComputeOutputIUs() {
     if (!JoinOutputsRight(JoinKind)) {
-        Props.OutputIUs = GetTableLookup()->GetInput()->GetOutputIUs();
+        Props.OutputIUs = GetTableLookup()->GetLeftInput()->GetOutputIUs();
         return;
     }
     Props.OutputIUs = GetInput()->GetOutputIUs();

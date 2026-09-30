@@ -681,7 +681,7 @@ TStatus ComputeTypes(TIntrusivePtr<TOpTableLookup> lookup, TRBOContext& ctx) {
         }
     }
 
-    const auto* leftItemType = lookup->GetInput()->Type->Cast<TListExprType>()->GetItemType();
+    const auto* leftItemType = lookup->GetLeftInput()->Type->Cast<TListExprType>()->GetItemType();
     if (!EnsureStructType(lookup->Pos, *leftItemType, ctx.ExprCtx)) {
         return TStatus::Error;
     }

@@ -1016,6 +1016,13 @@ public:
     // Lookup keys can be null: they are key columns of rows found in another table, e.g. the primary key
     // of rows found in an index, and the primary key can have nulls.
     bool AllowNullKeys = false;
+    // The input is a lookup in join mode too, and the rows it fetches are the lookup keys of this one:
+    // e.g. this lookup fetches main table rows by the primary key found in an index. Both lookups share
+    // the left rows, so a single lookup join consumes the result of the chain.
+    bool KeysFromInputLookup = false;
+
+    // Returns the operator which produces the left rows of the lookup join.
+    TIntrusivePtr<IOperator> GetLeftInput();
 
     // Describes the read which this lookup replaced after the read was redirected to a non-covering index:
     // the whole read predicate over the lookup output and point prefixes of the tables the read can be

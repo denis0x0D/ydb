@@ -221,7 +221,32 @@ TLookupKeysResult BuildLookupKeys(TOpTableLookup& lookup, TExprNode::TPtr inputS
 
     YQL_CLOG(TRACE, CoreDq) << "[NEW RBO Physical lookup join keys] " << KqpExprToPrettyString(TExprBase(newInputStage), ctx);
 
-    return {newInputStage, NYql::ExpandType(pos, *keysType, ctx)};
+    return {newInputStage, NYql::ExpandType(pos, *keysType, ctx), ctx.MakeType<TStructExprType>(leftItems)};
+}
+
+TExprNode::TPtr BuildKeysFromInputLookupType(const TOpTableLookup& inputLookup, const TStructExprType* leftRowType, TExprContext& ctx) {
+    Y_ENSURE(inputLookup.IsJoin(), "Keys are taken from a table lookup in join mode only");
+    Y_ENSURE(leftRowType, "Type of the left rows of the input lookup is not available");
+    Y_ENSURE(inputLookup.FetchColumns.size() == inputLookup.OutputIUs.size());
+
+    // The logical type of the input lookup names fetched columns by output IUs, the stream lookup returns physical names.
+    const auto* tupleType = inputLookup.Type->Cast<TListExprType>()->GetItemType()->Cast<TTupleExprType>();
+    const auto* fetchedRowType = tupleType->GetItems()[1]->Cast<TOptionalExprType>()->GetItemType()->Cast<TStructExprType>();
+    TVector<const TItemExprType*> keyItems;
+    for (size_t i = 0; i < inputLookup.FetchColumns.size(); ++i) {
+        const auto* type = fetchedRowType->FindItemType(inputLookup.OutputIUs[i].GetFullName());
+        Y_ENSURE(type, "Type of the fetched column " << inputLookup.FetchColumns[i] << " is not available");
+        keyItems.push_back(ctx.MakeType<TItemExprType>(inputLookup.FetchColumns[i], type));
+    }
+
+    // Tuple: (left row, lookup key, cookie).
+    const TTypeAnnotationNode::TListType tupleItems{
+        leftRowType,
+        ctx.MakeType<TOptionalExprType>(ctx.MakeType<TStructExprType>(keyItems)),
+        ctx.MakeType<TDataExprType>(EDataSlot::Uint64),
+    };
+    const auto* keysType = ctx.MakeType<TListExprType>(ctx.MakeType<TTupleExprType>(tupleItems));
+    return NYql::ExpandType(inputLookup.Pos, *keysType, ctx);
 }
 
 } // namespace NKikimr::NKqp::NLookupJoinBuilder

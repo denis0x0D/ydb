@@ -226,10 +226,15 @@ TIntrusivePtr<IOperator> TRewriteJoinToIndexLookupJoinRule::SimpleMatchAndApply(
                                  << target->Metadata->Name;
 
     if (target->MainTable) {
-        // The index is not covering: the first lookup join finds primary keys of the matching rows in the index,
-        // the second one fetches the rows from the main table and applies the whole read predicate to them.
+        // The index is not covering: the index lookup finds primary keys of the matching rows, and the main table lookup
+        // fetches the rows by them and applies the whole read predicate to them.
         Y_ENSURE(joinKind == "Inner", "A lookup join by a non-covering index is supported for inner joins only");
         const auto& mainKeyColumns = target->MainTable->KeyColumnNames;
+        const auto& mainColumns = target->MainTable->Columns;
+        const bool mainKeyNotNull = std::all_of(mainKeyColumns.begin(), mainKeyColumns.end(), [&](const TString& column) {
+            const auto it = mainColumns.find(column);
+            return it != mainColumns.end() && it->second.NotNull;
+        });
 
         auto usedIUs = MakeInfoUnitSet(join->GetLeftInput()->GetOutputIUs());
         AddInfoUnits(usedIUs, read->OutputIUs);
@@ -249,6 +254,20 @@ TIntrusivePtr<IOperator> TRewriteJoinToIndexLookupJoinRule::SimpleMatchAndApply(
 
         auto indexLookup = MakeIntrusive<TOpTableLookup>(join->GetLeftInput(), join->Pos, lookupTable, mainKeyColumns, mainKeyIUs,
                                                          lookupKeys, lookupKeyColumns, joinKind, std::nullopt, prefix);
+
+        if (mainKeyNotNull) {
+            // The index lookup feeds the main table lookup directly, and a single lookup join consumes the result.
+            // A row without a match in the index comes with a missing key, which is a key of nulls for the lookup:
+            // the primary key has no nulls, so such a key is not looked up.
+            auto mainLookup = MakeIntrusive<TOpTableLookup>(indexLookup, join->Pos, getTableCallable(*target->MainTable), read->Columns,
+                                                            read->OutputIUs, mainKeyIUs, mainKeyColumns, joinKind, fetchedRowFilter,
+                                                            std::nullopt, residualJoinKeys);
+            mainLookup->KeysFromInputLookup = true;
+            return MakeIntrusive<TOpIndexLookupJoin>(mainLookup, join->Pos, joinKind, join->JoinKeys);
+        }
+
+        // The primary key can have nulls, which the main table lookup has to allow, so a key of a row without a match
+        // in the index cannot be told apart. A lookup join drops such rows before the main table lookup.
         auto indexLookupJoin = MakeIntrusive<TOpIndexLookupJoin>(indexLookup, join->Pos, joinKind, indexJoinKeys);
 
         auto mainLookup = MakeIntrusive<TOpTableLookup>(indexLookupJoin, join->Pos, getTableCallable(*target->MainTable), read->Columns,
