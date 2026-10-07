@@ -42,6 +42,8 @@
 #include <library/cpp/random_provider/random_provider.h>
 #include <library/cpp/time_provider/time_provider.h>
 
+#include <util/system/env.h>
+
 #include <algorithm>
 #include <array>
 #include <ctime>
@@ -12850,6 +12852,40 @@ foo_0.join_id = foo_6.id AND foo_0.join_id = foo_7.id AND foo_0.join_id = foo_8.
             UNIT_ASSERT_C(result.IsSuccess(), "Query " << i << ": " << result.GetIssues().ToString());
             UNIT_ASSERT_VALUES_EQUAL_C(FormatResultSetYson(result.GetResultSet(0)), results[i], "Query " << i);
         }
+    }
+
+    // Compiles a slow production INSERT ... SELECT (8 UNION ALL branches of joins) with the new RBO.
+    // Set RBO_PROFILE_ITERATIONS to compile it repeatedly, e.g. under perf.
+    Y_UNIT_TEST(YdbVsPgQ1Compile) {
+        NKikimrConfig::TAppConfig appConfig;
+        appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+        appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
+        appConfig.MutableTableServiceConfig()->SetEnableFallbackOnDML(false);
+        appConfig.MutableTableServiceConfig()->SetEnableNewRBOPhysicalStagePeephole(false);
+
+        TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
+        auto tableSession = kikimr.GetTableClient().CreateSession().GetValueSync().GetSession();
+        CreateTablesFromPath(tableSession, "data/", "ydb_vs_pg/schema.sql", /*useColumnStore*/ false);
+
+        const TString query = GetFullPath("data/", "ydb_vs_pg/q1.yql");
+        const ui32 iterations = FromString<ui32>(GetEnv("RBO_PROFILE_ITERATIONS", "1"));
+        auto session = kikimr.GetQueryClient().GetSession().GetValueSync().GetSession();
+
+        const auto before = GetNewRBOCompileCounters(kikimr);
+        const TInstant start = TInstant::Now();
+        for (ui32 i = 0; i < iterations; ++i) {
+            // A unique query text bypasses the compile cache.
+            auto result = session.ExecuteQuery(TStringBuilder() << "-- iteration " << i << "\n" << query,
+                NYdb::NQuery::TTxControl::NoTx(),
+                NYdb::NQuery::TExecuteQuerySettings().ExecMode(NQuery::EExecMode::Explain)).ExtractValueSync();
+            UNIT_ASSERT_C(result.IsSuccess(), result.GetIssues().ToString());
+        }
+        const TDuration elapsed = TInstant::Now() - start;
+        const auto after = GetNewRBOCompileCounters(kikimr);
+
+        UNIT_ASSERT_VALUES_EQUAL(after.first - before.first, iterations);
+        UNIT_ASSERT_VALUES_EQUAL(after.second, before.second);
+        Cerr << "YdbVsPgQ1Compile: " << iterations << " compilations, avg " << elapsed / iterations << Endl;
     }
 
 }
