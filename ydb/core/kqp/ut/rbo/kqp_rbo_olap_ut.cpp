@@ -2351,6 +2351,190 @@ Y_UNIT_TEST_SUITE(KqpRboOlap) {
         }
     }
 
+    // Runs a query with aggregate pushdown and compares its result with the aggregation in compute.
+    void CheckAggregatePushdown(NYdb::NTable::TTableClient& client, const TString& query, bool expectPushdown) {
+        const TString pushdownQuery = TStringBuilder() << R"(PRAGMA Kikimr.OptEnableOlapPushdownAggregate = "true";)" << Endl << query;
+
+        TStreamExecScanQuerySettings explainSettings;
+        explainSettings.Explain(true);
+        auto explain = client.StreamExecuteScanQuery(pushdownQuery, explainSettings).GetValueSync();
+        UNIT_ASSERT_C(explain.IsSuccess(), explain.GetIssues().ToString());
+        const auto explainResult = CollectStreamResult(explain);
+        const auto ast = explainResult.QueryStats->Getquery_ast();
+        UNIT_ASSERT_VALUES_EQUAL_C(ast.find("TKqpOlapAgg") != std::string::npos, expectPushdown,
+                                   TStringBuilder() << "Query: " << query << Endl << "Plan: " << explainResult.PlanJson.GetOrElse("") << Endl
+                                                    << "Ast: " << ast);
+
+        auto expected = client.StreamExecuteScanQuery(query).GetValueSync();
+        UNIT_ASSERT_C(expected.IsSuccess(), expected.GetIssues().ToString());
+        auto actual = client.StreamExecuteScanQuery(pushdownQuery).GetValueSync();
+        UNIT_ASSERT_C(actual.IsSuccess(), actual.GetIssues().ToString());
+        CompareYson(StreamResultToYson(expected), StreamResultToYson(actual));
+    }
+
+    Y_UNIT_TEST(AggregatePushdown) {
+        NKikimrConfig::TAppConfig appConfig;
+        appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+
+        auto settings = TKikimrSettings(appConfig)
+            .SetWithSampleTables(false);
+        TKikimrRunner kikimr(settings);
+
+        TLocalHelper(kikimr).CreateTestOlapTable();
+        WriteTestData(kikimr, "/Root/olapStore/olapTable", 0, 1000000, 300, true);
+
+        auto client = kikimr.GetTableClient();
+        Tests::NCommon::TLoggerInit(kikimr).Initialize();
+
+        {
+            auto it = client.StreamExecuteScanQuery(R"(
+                PRAGMA Kikimr.OptEnableOlapPushdownAggregate = "true";
+                SELECT COUNT(*), COUNT(level), SUM(level), AVG(level), MIN(level), MAX(level)
+                FROM `/Root/olapStore/olapTable`
+            )").GetValueSync();
+            UNIT_ASSERT_C(it.IsSuccess(), it.GetIssues().ToString());
+            CompareYson(R"([[300u;200u;[400];[2.];[0];[4]]])", StreamResultToYson(it));
+        }
+
+        const std::vector<TString> queries = {
+            R"(
+                SELECT COUNT(*) FROM `/Root/olapStore/olapTable`
+            )",
+            R"(
+                SELECT COUNT(level), SUM(level), MIN(level), MAX(level), AVG(level)
+                FROM `/Root/olapStore/olapTable`
+            )",
+            R"(
+                SELECT SUM(new_column1), AVG(new_column1), MIN(uid), MAX(`timestamp`), COUNT(resource_id), SOME(level)
+                FROM `/Root/olapStore/olapTable`
+                WHERE uid = "uid_1000007"
+            )",
+            R"(
+                SELECT COUNT(*), SUM(level), AVG(level)
+                FROM `/Root/olapStore/olapTable`
+                WHERE level > 1
+            )",
+            R"(
+                SELECT COUNT(*), COUNT(level), SUM(level), AVG(level), MIN(`timestamp`), MAX(uid)
+                FROM `/Root/olapStore/olapTable`
+                WHERE level = 100
+            )",
+            R"(
+                SELECT level, COUNT(*), SUM(new_column1), AVG(level), MIN(uid)
+                FROM `/Root/olapStore/olapTable`
+                GROUP BY level
+                ORDER BY level
+            )",
+            R"(
+                SELECT level, SOME(level), COUNT(level)
+                FROM `/Root/olapStore/olapTable`
+                GROUP BY level
+                ORDER BY level
+            )",
+            R"(
+                SELECT resource_id, MAX(level), COUNT(*)
+                FROM `/Root/olapStore/olapTable`
+                WHERE level < 3
+                GROUP BY resource_id
+                ORDER BY resource_id
+                LIMIT 5
+            )",
+        };
+
+        for (const auto& query : queries) {
+            CheckAggregatePushdown(client, query, true);
+        }
+    }
+
+    Y_UNIT_TEST(AggregatePushdownBisectTmp) {
+        NKikimrConfig::TAppConfig appConfig;
+        appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+        auto settings = TKikimrSettings(appConfig).SetWithSampleTables(false);
+        TKikimrRunner kikimr(settings);
+        TLocalHelper(kikimr).CreateTestOlapTable();
+        auto client = kikimr.GetTableClient();
+        const std::vector<TString> queries = {
+            "SELECT level, COUNT(level) FROM `/Root/olapStore/olapTable` GROUP BY level",
+            "PRAGMA Kikimr.OptEnableOlapPushdownProjections = \"true\"; SELECT level, COUNT(level) FROM `/Root/olapStore/olapTable` GROUP BY level",
+            "PRAGMA Kikimr.OptEnableOlapPushdown = \"false\"; SELECT level, COUNT(level) FROM `/Root/olapStore/olapTable` GROUP BY level",
+            "PRAGMA Kikimr.OptEnableOlapPushdownAggregate = \"true\"; SELECT level, COUNT(level) FROM `/Root/olapStore/olapTable` GROUP BY level",
+            "PRAGMA Kikimr.OptEnableOlapPushdownAggregate = \"true\"; SELECT level AS l, COUNT(level) FROM `/Root/olapStore/olapTable` GROUP BY level",
+            "PRAGMA Kikimr.OptEnableOlapPushdownAggregate = \"true\"; SELECT COUNT(level) FROM `/Root/olapStore/olapTable` GROUP BY level",
+        };
+        for (const auto& query : queries) {
+            TStreamExecScanQuerySettings explainSettings;
+            explainSettings.Explain(true);
+            auto it = client.StreamExecuteScanQuery(query, explainSettings).GetValueSync();
+            TString status = it.IsSuccess() ? "OK" : it.GetIssues().ToString();
+            if (it.IsSuccess()) {
+                for (;;) {
+                    auto part = it.ReadNext().GetValueSync();
+                    if (!part.IsSuccess()) {
+                        status = part.EOS() ? "OK" : part.GetIssues().ToString();
+                        break;
+                    }
+                }
+            }
+            Cerr << "BISECT: " << query << " => " << status.substr(0, 120) << Endl;
+        }
+    }
+
+    Y_UNIT_TEST(AggregateNoPushdown) {
+        NKikimrConfig::TAppConfig appConfig;
+        appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+
+        auto settings = TKikimrSettings(appConfig)
+            .SetWithSampleTables(false);
+        TKikimrRunner kikimr(settings);
+
+        TLocalHelper(kikimr).CreateTestOlapTable();
+        WriteTestData(kikimr, "/Root/olapStore/olapTable", 0, 1000000, 300, true);
+
+        auto client = kikimr.GetTableClient();
+        Tests::NCommon::TLoggerInit(kikimr).Initialize();
+
+        // Disabled by default.
+        {
+            TStreamExecScanQuerySettings explainSettings;
+            explainSettings.Explain(true);
+            auto explain = client.StreamExecuteScanQuery(R"(
+                SELECT COUNT(*), SUM(level) FROM `/Root/olapStore/olapTable`
+            )", explainSettings).GetValueSync();
+            UNIT_ASSERT_C(explain.IsSuccess(), explain.GetIssues().ToString());
+            const auto ast = CollectStreamResult(explain).QueryStats->Getquery_ast();
+            UNIT_ASSERT_C(ast.find("TKqpOlapAgg") == std::string::npos, ast);
+        }
+
+        const std::vector<TString> queries = {
+            // Column shards aggregate columns, not expressions.
+            R"(
+                SELECT SUM(level + 1) FROM `/Root/olapStore/olapTable`
+            )",
+            R"(
+                SELECT l, COUNT(*)
+                FROM `/Root/olapStore/olapTable`
+                GROUP BY level + 1 AS l
+                ORDER BY l
+            )",
+            R"(
+                SELECT COUNT(DISTINCT level) FROM `/Root/olapStore/olapTable`
+            )",
+            R"(
+                SELECT DISTINCT level FROM `/Root/olapStore/olapTable` ORDER BY level
+            )",
+            // A filter the column shards cannot evaluate stays between the read and the aggregate.
+            R"(
+                SELECT COUNT(*)
+                FROM `/Root/olapStore/olapTable`
+                WHERE Re2::Match('uid.*')(uid)
+            )",
+        };
+
+        for (const auto& query : queries) {
+            CheckAggregatePushdown(client, query, false);
+        }
+    }
+
     Y_UNIT_TEST(DoubleOutOfRangeInJson) {
         NKikimrConfig::TAppConfig appConfig;
         appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
