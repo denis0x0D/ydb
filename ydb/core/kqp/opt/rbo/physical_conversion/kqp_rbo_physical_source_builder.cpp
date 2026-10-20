@@ -5,6 +5,7 @@
 #include <ydb/library/yql/dq/type_ann/dq_type_ann.h>
 
 #include <yql/essentials/core/yql_expr_optimize.h>
+#include <yql/essentials/core/yql_expr_type_annotation.h>
 
 using namespace NYql::NNodes;
 using namespace NKikimr;
@@ -17,6 +18,8 @@ TString TPhysicalSourceBuilder::GetOlapAggregateField(ui32 index, TStringBuf fun
 TExprNode::TPtr TPhysicalSourceBuilder::AddOlapAggregate(TExprNode::TPtr processLambda, TVector<TString>& outputFields) const {
     outputFields.clear();
     TVector<TExprBase> aggregates;
+    TVector<TExprBase> projections;
+    THashMap<TString, TString> averageColumns;
     auto addAggregate = [&](TString field, TStringBuf function, const TString& column) {
         // clang-format off
         aggregates.push_back(Build<TKqpOlapAggOperation>(Ctx, Pos)
@@ -37,7 +40,36 @@ TExprNode::TPtr TPhysicalSourceBuilder::AddOlapAggregate(TExprNode::TPtr process
         // COUNT(*) has no column argument.
         const TString storageColumn = column ? Registry.Get(*column).GetColumnName() : TString("*");
         if (aggFunction == "avg") {
-            addAggregate(GetOlapAggregateField(index, "sum"), "sum", storageColumn);
+            // AVG accumulates in Double. Cast each input before SUM so integer
+            // sums cannot overflow and Float sums have the declared Double type.
+            TString sumColumn = storageColumn;
+            const auto* columnType = Read.GetIUType(*column, Ctx);
+            if (RemoveOptionality(*columnType).Cast<TDataExprType>()->GetSlot() != EDataSlot::Double) {
+                auto [it, inserted] = averageColumns.emplace(storageColumn, GetOlapAggregateField(index, "avg_input"));
+                sumColumn = it->second;
+                if (inserted) {
+                    const TVector<const TItemExprType*> inputFields{Ctx.MakeType<TItemExprType>(storageColumn, columnType)};
+                    const auto columnArg = Build<TKqpOlapApplyColumnArg>(Ctx, Pos)
+                        .TableRowType(ExpandType(Pos, *Ctx.MakeType<TStructExprType>(inputFields), Ctx))
+                        .ColumnName().Build(storageColumn)
+                        .Done();
+                    const auto value = Ctx.NewArgument(Pos, "value");
+                    const auto cast = Build<TCoSafeCast>(Ctx, Pos)
+                        .Value(value)
+                        .Type(ExpandType(Pos, *Ctx.MakeType<TDataExprType>(EDataSlot::Double), Ctx))
+                        .Done();
+                    const auto apply = Build<TKqpOlapApply>(Ctx, Pos)
+                        .Lambda(Ctx.NewLambda(Pos, Ctx.NewArguments(Pos, {value}), cast.Ptr()))
+                        .Args().Add(columnArg).Build()
+                        .KernelName().Build("")
+                        .Done();
+                    projections.push_back(Build<TKqpOlapProjection>(Ctx, Pos)
+                        .OlapOperation(apply)
+                        .ColumnName().Build(sumColumn)
+                        .Done());
+                }
+            }
+            addAggregate(GetOlapAggregateField(index, "sum"), "sum", sumColumn);
             addAggregate(GetOlapAggregateField(index, "count"), "count", storageColumn);
         } else {
             addAggregate(GetOlapAggregateField(index, aggFunction), aggFunction, storageColumn);
@@ -57,9 +89,17 @@ TExprNode::TPtr TPhysicalSourceBuilder::AddOlapAggregate(TExprNode::TPtr process
     }
     std::sort(outputFields.begin(), outputFields.end());
 
+    TExprBase input = TCoLambda(processLambda).Body();
+    if (!projections.empty()) {
+        input = Build<TKqpOlapProjections>(Ctx, Pos)
+            .Input(input)
+            .Projections().Add(projections).Build()
+            .Done();
+    }
+
     // clang-format off
     auto olapAgg = Build<TKqpOlapAgg>(Ctx, Pos)
-        .Input(TCoLambda(processLambda).Body())
+        .Input(input)
         .Aggregates<TKqpOlapAggOperationList>()
             .Add(aggregates)
         .Build()

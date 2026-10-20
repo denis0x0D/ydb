@@ -21,11 +21,15 @@ const TDataExprType* GetDataType(const TTypeAnnotationNode* type) {
     return itemType->GetKind() == ETypeAnnotationKind::Data ? itemType->Cast<TDataExprType>() : nullptr;
 }
 
-// Column shards do not aggregate decimals. SUM and AVG states are numeric:
-// AVG converts the sum to its Double accumulator.
+// Column shards do not aggregate decimals. SUM and AVG require numeric inputs.
 bool IsOlapAggregateType(const TString& aggFunction, const TTypeAnnotationNode* type) {
     const auto* dataType = GetDataType(type);
     if (!dataType || IsDataTypeDecimal(dataType->GetSlot())) {
+        return false;
+    }
+    // Storage widens Float sums to Double, whereas compute accumulates in Float.
+    // Keep SUM(Float) in compute to preserve both its type and its rounding.
+    if (aggFunction == "sum" && dataType->GetSlot() == EDataSlot::Float) {
         return false;
     }
     if (aggFunction == "sum" || aggFunction == "avg") {
