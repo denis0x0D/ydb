@@ -21,69 +21,85 @@ const TDataExprType* GetDataType(const TTypeAnnotationNode* type) {
     return itemType->GetKind() == ETypeAnnotationKind::Data ? itemType->Cast<TDataExprType>() : nullptr;
 }
 
-// Column shards do not aggregate decimals. SUM and AVG require numeric inputs.
+// Whether column shards compute `aggFunction` over a column of `type` the way compute does.
 bool IsOlapAggregateType(const TString& aggFunction, const TTypeAnnotationNode* type) {
     const auto* dataType = GetDataType(type);
+    // Column shards do not aggregate decimals.
     if (!dataType || IsDataTypeDecimal(dataType->GetSlot())) {
         return false;
     }
+    const auto slot = dataType->GetSlot();
     // Storage widens Float sums to Double, whereas compute accumulates in Float.
     // Keep SUM(Float) in compute to preserve both its type and its rounding.
-    if (aggFunction == "sum" && dataType->GetSlot() == EDataSlot::Float) {
+    if (aggFunction == "sum" && slot == EDataSlot::Float) {
+        return false;
+    }
+    // Compute orders NaN above every other value, whereas column shards compare
+    // with `<` and may drop it. Keep MIN and MAX of floating-point values in compute.
+    if ((aggFunction == "min" || aggFunction == "max") && IsDataTypeFloat(slot)) {
         return false;
     }
     if (aggFunction == "sum" || aggFunction == "avg") {
-        return IsDataTypeNumeric(dataType->GetSlot());
+        return IsDataTypeNumeric(slot);
     }
     return true;
 }
 
+// Projections overwrite read columns, while column shards aggregate the stored
+// values. A read program also aggregates or deduplicates at most once.
 bool HasOlapProgramBlockingAggregate(const TOpRead& read) {
     if (!read.OlapFilterLambda) {
         return false;
     }
-    // Projections overwrite read columns, while column shards aggregate the
-    // stored values. A read program aggregates or deduplicates at most once.
     return !!FindNode(read.OlapFilterLambda, [](const TExprNode::TPtr& node) {
         return TKqpOlapProjections::Match(node.Get()) || TKqpOlapAgg::Match(node.Get()) || TKqpOlapDistinct::Match(node.Get());
     });
 }
 
-// The read column an aggregation input refers to, or std::nullopt for a
-// literal that COUNT(*) counts. Returns false for any other input.
-bool ResolveAggregationColumn(const TOlapAggregateInput& input, const TOpAggregationTraits& traits, std::optional<TInfoUnitId>& column) {
-    const auto& columns = input.Read->GetColumns();
-    if (columns.Contains(traits.Input)) {
-        column = traits.Input;
-        return true;
+// The read column `input` refers to, directly or through its copy in the Map.
+std::optional<TInfoUnitId> ResolveReadColumn(TInfoUnitId input, const TOpRead& read, const TOpMap* map) {
+    if (read.GetColumns().Contains(input)) {
+        return input;
     }
+    const auto* element = map ? map->FindOutputElement(input) : nullptr;
+    if (element && element->IsColumnAccess() && read.GetColumns().Contains(element->GetColumnAccess())) {
+        return element->GetColumnAccess();
+    }
+    return std::nullopt;
+}
 
-    const auto* element = input.Map ? input.Map->FindOutputElement(traits.Input) : nullptr;
-    if (!element) {
+// COUNT(*) counts Void or another literal of the Map, which is never null.
+bool IsCountAll(const TOpAggregationTraits& traits, const TOpMap* map) {
+    const auto* element = map ? map->FindOutputElement(traits.Input) : nullptr;
+    if (traits.AggFunction != "count" || !element || element->IsColumnAccess()) {
         return false;
     }
-    if (element->IsColumnAccess()) {
-        column = element->GetColumnAccess();
-        return columns.Contains(*column);
-    }
-    // COUNT(*) counts Void or another non-null literal.
     const auto body = element->GetExpression().GetExpressionBody();
-    if (traits.AggFunction == "count" && (TCoVoid::Match(body.Get()) || TCoDataCtor::Match(body.Get()))) {
-        column = std::nullopt;
-        return true;
-    }
-    return false;
+    return TCoVoid::Match(body.Get()) || TCoDataCtor::Match(body.Get());
 }
 
 } // anonymous namespace
 
-std::optional<TOlapAggregateInput> MatchOlapAggregateInput(const TOpAggregate& aggregate, TExprContext& ctx) {
+bool IsOlapAverageCast(const TTypeAnnotationNode& columnType) {
+    return RemoveOptionality(columnType).Cast<TDataExprType>()->GetSlot() != EDataSlot::Double;
+}
+
+bool HasOlapAverageCast(const TOlapAggregate& aggregate, TExprContext& ctx) {
+    for (const auto& aggregation : aggregate.Aggregations) {
+        if (aggregation.Function == "avg" && IsOlapAverageCast(*aggregate.Read->GetIUType(*aggregation.Column, ctx))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::optional<TOlapAggregate> MatchOlapAggregate(const TOpAggregate& aggregate, TExprContext& ctx) {
     const auto& aggregations = aggregate.GetAggregationTraits();
     if (aggregate.IsDistinctAll() || aggregations.Keys().Empty()) {
         return std::nullopt;
     }
 
-    TOlapAggregateInput result;
+    TOlapAggregate result;
     auto* input = aggregate.GetInput().Get();
     if (input->Kind == EOperator::Map) {
         result.Map = CastOperator<TOpMap>(input);
@@ -106,9 +122,13 @@ std::optional<TOlapAggregateInput> MatchOlapAggregateInput(const TOpAggregate& a
     }
 
     // Maps only append definitions, so read keys reach the aggregate as is.
+    TUnorderedIUs keys;
     for (const auto key : aggregate.GetKeyColumns().Items()) {
         if (!read.GetColumns().Contains(key) || !GetDataType(read.GetIUType(key, ctx))) {
             return std::nullopt;
+        }
+        if (keys.Add(key)) {
+            result.Keys.push_back(key);
         }
     }
 
@@ -116,15 +136,16 @@ std::optional<TOlapAggregateInput> MatchOlapAggregateInput(const TOpAggregate& a
         if (traits.Distinct || traits.Unwrap || !OlapAggregateFunctions.contains(traits.AggFunction)) {
             return std::nullopt;
         }
-
-        std::optional<TInfoUnitId> column;
-        if (!ResolveAggregationColumn(result, traits, column)) {
+        if (const auto column = ResolveReadColumn(traits.Input, read, result.Map)) {
+            if (!IsOlapAggregateType(traits.AggFunction, read.GetIUType(*column, ctx))) {
+                return std::nullopt;
+            }
+            result.Aggregations.push_back({output, traits.AggFunction, *column});
+        } else if (IsCountAll(traits, result.Map)) {
+            result.Aggregations.push_back({output, traits.AggFunction, std::nullopt});
+        } else {
             return std::nullopt;
         }
-        if (column && !IsOlapAggregateType(traits.AggFunction, read.GetIUType(*column, ctx))) {
-            return std::nullopt;
-        }
-        result.Columns.emplace(output, column);
     }
 
     return result;

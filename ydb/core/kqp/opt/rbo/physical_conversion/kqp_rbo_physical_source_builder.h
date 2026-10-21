@@ -20,28 +20,33 @@ public:
 
     // Compute an aggregate pushed to column shards in the read program. The
     // source then yields the rows of the aggregate instead of the read.
-    TPhysicalSourceBuilder& WithOlapAggregate(const TOpAggregate& aggregate, const TOlapAggregateInput& input) {
-        Y_ENSURE(input.Read == &Read, "A pushed aggregate must compute over this read");
+    TPhysicalSourceBuilder& WithOlapAggregate(const TOlapAggregate& aggregate) {
+        Y_ENSURE(aggregate.Read == &Read, "A pushed aggregate must compute over this read");
         OlapAggregate = &aggregate;
-        OlapAggregateInput = &input;
         return *this;
     }
 
     TExprNode::TPtr BuildPhysicalOp() override;
 
 private:
-    // The program row field of the aggregation at `index`. AVG has two: sum and count.
-    TString GetOlapAggregateField(ui32 index, TStringBuf function) const;
+    // Program row fields by name.
+    using TProgramFields = THashMap<TString, TExprNode::TPtr>;
+
+    // The program row field holding `function` of the aggregation into `output`.
+    TString GetOlapAggregateField(TInfoUnitId output, TStringBuf function) const;
     // Replace the program output with the aggregate rows and list their fields.
     TExprNode::TPtr AddOlapAggregate(TExprNode::TPtr processLambda, TVector<TString>& outputFields) const;
-    // Rebuild the aggregate's output IDs, including the AVG states, from the program row.
-    TExprNode::TPtr BuildOlapAggregateRow(const THashMap<TString, TExprNode::TPtr>& fields) const;
+    // A program projection that casts `column` to Double into `field`.
+    TExprBase BuildOlapDoubleCast(const TString& column, const TTypeAnnotationNode& columnType, const TString& field) const;
+    // Rebuild the aggregate's outputs, its keys and partial states, from the program row.
+    TExprNode::TPtr BuildOlapAggregateRow(const TProgramFields& fields) const;
+    // The intermediate AVG state built from the sum and count in the program row.
+    TExprNode::TPtr BuildOlapAverageState(const TOlapAggregation& aggregation, const TProgramFields& fields) const;
 
     TOpRead& Read;
     const TInfoUnitRegistry& Registry;
     TString StageGUID;
     bool IsSysView;
     TString CarrierColumn;
-    const TOpAggregate* OlapAggregate = nullptr;
-    const TOlapAggregateInput* OlapAggregateInput = nullptr;
+    const TOlapAggregate* OlapAggregate = nullptr;
 };

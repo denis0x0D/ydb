@@ -6,20 +6,33 @@
 
 namespace NKikimr::NKqp {
 
-// The input of an intermediate aggregate that column shards compute in the
-// program of a column table read.
-struct TOlapAggregateInput {
-    TOpRead* Read = nullptr;
-    // An optional Map between the read and the aggregate. The aggregate uses
-    // only its read column copies and the literals COUNT(*) counts.
-    TOpMap* Map = nullptr;
-    // Aggregation output -> aggregated read column, std::nullopt counts rows.
-    THashMap<TInfoUnitId, std::optional<TInfoUnitId>> Columns;
+// An aggregation that column shards compute over a column of the read.
+struct TOlapAggregation {
+    TInfoUnitId Output;
+    TString Function;
+    // The aggregated read column, std::nullopt for COUNT(*).
+    std::optional<TInfoUnitId> Column;
 };
 
-// Match an aggregate whose aggregations and keys column shards can compute
-// over the read below it. The aggregate phase and pushdown settings are the
-// caller's concern.
-std::optional<TOlapAggregateInput> MatchOlapAggregateInput(const TOpAggregate& aggregate, TExprContext& ctx);
+// An intermediate aggregate that column shards compute in the program of a
+// column table read. Its outputs are the partial states the final aggregate merges.
+struct TOlapAggregate {
+    TOpRead* Read = nullptr;
+    // An optional Map between the read and the aggregate. The aggregate uses
+    // only its copies of read columns and the literals COUNT(*) counts.
+    TOpMap* Map = nullptr;
+    // Distinct read columns to group by.
+    TVector<TInfoUnitId> Keys;
+    TVector<TOlapAggregation> Aggregations;
+};
+
+// Match an aggregate whose keys and aggregations column shards can compute over
+// the read below it. The aggregate phase and pushdown settings are the caller's concern.
+std::optional<TOlapAggregate> MatchOlapAggregate(const TOpAggregate& aggregate, TExprContext& ctx);
+
+// AVG accumulates in Double. The read program casts an AVG column of any other
+// type with a YQL kernel, which column shards run only with scalar apply enabled.
+bool IsOlapAverageCast(const TTypeAnnotationNode& columnType);
+bool HasOlapAverageCast(const TOlapAggregate& aggregate, TExprContext& ctx);
 
 } // namespace NKikimr::NKqp

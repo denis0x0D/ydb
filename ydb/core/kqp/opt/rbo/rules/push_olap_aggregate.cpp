@@ -7,7 +7,12 @@
 namespace NKikimr::NKqp {
 
 bool TPushOlapAggregateRule::QuickMatch(const TIntrusivePtr<IOperator>& input) const {
-    return input->Kind == EOperator::Aggregate;
+    if (input->Kind != EOperator::Aggregate) {
+        return false;
+    }
+    // Column shards compute partial aggregates, the final aggregate merges them.
+    const auto& aggregate = CastOperator<TOpAggregate>(*input);
+    return aggregate.GetAggregationPhase() == EOpPhase::Intermediate && !aggregate.IsPushedToOlap();
 }
 
 TIntrusivePtr<IOperator> TPushOlapAggregateRule::SimpleMatchAndApply(const TIntrusivePtr<IOperator>& input, TRBOContext& ctx, TPlanProps& props) {
@@ -15,18 +20,16 @@ TIntrusivePtr<IOperator> TPushOlapAggregateRule::SimpleMatchAndApply(const TIntr
         return input;
     }
 
-    // Column shards compute partial aggregates, the final aggregate merges them.
     const auto aggregate = CastOperator<TOpAggregate>(input);
-    if (aggregate->GetAggregationPhase() != EOpPhase::Intermediate || aggregate->IsPushedToOlap()) {
-        return input;
-    }
-
-    const auto olapInput = MatchOlapAggregateInput(*aggregate, ctx.ExprCtx);
-    if (!olapInput) {
+    const auto olapAggregate = MatchOlapAggregate(*aggregate, ctx.ExprCtx);
+    if (!olapAggregate) {
         return input;
     }
     // The read program replaces the read and the map, so nothing else may consume them.
-    if (olapInput->Read->Parents.size() != 1 || (olapInput->Map && olapInput->Map->Parents.size() != 1)) {
+    if (olapAggregate->Read->Parents.size() != 1 || (olapAggregate->Map && olapAggregate->Map->Parents.size() != 1)) {
+        return input;
+    }
+    if (!ctx.KqpCtx.Config->GetEnableOlapScalarApply() && HasOlapAverageCast(*olapAggregate, ctx.ExprCtx)) {
         return input;
     }
 

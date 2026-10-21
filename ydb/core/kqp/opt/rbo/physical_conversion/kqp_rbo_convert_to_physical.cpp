@@ -90,23 +90,23 @@ TExprNode::TPtr ConvertToPhysical(const TVector<TIntrusivePtr<TOpRoot>>& roots, 
 
         // A read program computes each aggregate pushed to column shards. The
         // aggregate builds that read, its read and map have no lowering of their own.
-        THashMap<const IOperator*, TOlapAggregateInput> olapAggregates;
+        THashMap<const IOperator*, TOlapAggregate> olapAggregates;
         THashSet<const IOperator*> olapAggregateInputs;
         for (const auto& iter : *root) {
             const auto* op = iter.Current;
             if (op->Kind != EOperator::Aggregate || !CastOperator<TOpAggregate>(*op).IsPushedToOlap()) {
                 continue;
             }
-            auto input = MatchOlapAggregateInput(CastOperator<TOpAggregate>(*op), ctx);
-            Y_ENSURE(input, "An aggregate pushed to column shards no longer matches its read");
-            olapAggregateInputs.insert(input->Read);
-            if (input->Map) {
-                olapAggregateInputs.insert(input->Map);
+            auto olapAggregate = MatchOlapAggregate(CastOperator<TOpAggregate>(*op), ctx);
+            Y_ENSURE(olapAggregate, "An aggregate pushed to column shards no longer matches its read");
+            olapAggregateInputs.insert(olapAggregate->Read);
+            if (olapAggregate->Map) {
+                olapAggregateInputs.insert(olapAggregate->Map);
             }
-            olapAggregates.emplace(op, std::move(*input));
+            olapAggregates.emplace(op, std::move(*olapAggregate));
         }
 
-        auto buildSource = [&](TOpRead& opRead, const TOpAggregate* olapAggregate, const TOlapAggregateInput* olapInput) {
+        auto buildSource = [&](TOpRead& opRead, const TOlapAggregate* olapAggregate) {
             const auto& table = rboCtx.KqpCtx.Tables->ExistingTable(
                 rboCtx.KqpCtx.Cluster, TKqpTable(opRead.TableCallable).Path().Value());
 
@@ -119,7 +119,7 @@ TExprNode::TPtr ConvertToPhysical(const TVector<TIntrusivePtr<TOpRoot>>& roots, 
                 graph.StageGUIDs.at(*opRead.Props.StageId), table.Metadata->Kind == NYql::EKikimrTableKind::SysView,
                 std::move(carrierColumn));
             if (olapAggregate) {
-                builder.WithOlapAggregate(*olapAggregate, *olapInput);
+                builder.WithOlapAggregate(*olapAggregate);
             }
             return builder.BuildPhysicalOp();
         };
@@ -176,7 +176,7 @@ TExprNode::TPtr ConvertToPhysical(const TVector<TIntrusivePtr<TOpRoot>>& roots, 
                 stagePos[opStageId] = op->Pos;
                 YQL_CLOG(TRACE, CoreDq) << "Converted Empty Source " << opStageId;
             } else if (op->Kind == EOperator::Source) {
-                currentStageBody = buildSource(CastOperator<TOpRead>(*op), nullptr, nullptr);
+                currentStageBody = buildSource(CastOperator<TOpRead>(*op), nullptr);
 
                 stages[opStageId] = currentStageBody;
                 stagePos[opStageId] = op->Pos;
@@ -298,9 +298,9 @@ TExprNode::TPtr ConvertToPhysical(const TVector<TIntrusivePtr<TOpRoot>>& roots, 
             } else if (op->Kind == EOperator::Aggregate) {
                 auto& aggregate = CastOperator<TOpAggregate>(*op);
 
-                if (const auto* olapInput = olapAggregates.FindPtr(op)) {
+                if (const auto* olapAggregate = olapAggregates.FindPtr(op)) {
                     Y_ENSURE(!currentStageBody, "A pushed aggregate must start the stage of its read");
-                    currentStageBody = buildSource(*olapInput->Read, &aggregate, olapInput);
+                    currentStageBody = buildSource(*olapAggregate->Read, olapAggregate);
 
                     stages[opStageId] = currentStageBody;
                     stagePos[opStageId] = op->Pos;

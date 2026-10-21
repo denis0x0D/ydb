@@ -2446,6 +2446,16 @@ Y_UNIT_TEST_SUITE(KqpRboOlap) {
             CheckAggregatePushdown(client, query, false);
             CheckAggregatePushdown(client, query + " GROUP BY group_key ORDER BY cnt", false);
         }
+
+        // Column shards drop NaN in MIN and MAX, while compute orders it last.
+        // Keep floating-point MIN and MAX, including mixed aggregates, in compute.
+        for (const auto& fields : {"MIN(float_value)", "MAX(double_value)", "MIN(optional_float), MAX(optional_float)",
+                                   "MAX(double_value), AVG(unsigned_value)"}) {
+            const TString query = TStringBuilder() << "SELECT " << fields
+                << ", COUNT(optional_unsigned) AS cnt FROM `/Root/numeric_aggregates`";
+            CheckAggregatePushdown(client, query, false);
+            CheckAggregatePushdown(client, query + " GROUP BY group_key ORDER BY cnt", false);
+        }
     }
 
     Y_UNIT_TEST(AggregatePushdown) {
@@ -2577,6 +2587,25 @@ Y_UNIT_TEST_SUITE(KqpRboOlap) {
         for (const auto& query : queries) {
             CheckAggregatePushdown(client, query, false);
         }
+    }
+
+    Y_UNIT_TEST(AggregatePushdownNoScalarApply) {
+        NKikimrConfig::TAppConfig appConfig;
+        appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+        appConfig.MutableTableServiceConfig()->SetEnableOlapScalarApply(false);
+
+        auto settings = TKikimrSettings(appConfig)
+            .SetWithSampleTables(false);
+        TKikimrRunner kikimr(settings);
+
+        TLocalHelper(kikimr).CreateTestOlapTable();
+        WriteTestData(kikimr, "/Root/olapStore/olapTable", 0, 1000000, 300, true);
+
+        auto client = kikimr.GetTableClient();
+
+        // AVG(Int32) casts its input to Double with a YQL kernel in the read program.
+        CheckAggregatePushdown(client, "SELECT AVG(level) FROM `/Root/olapStore/olapTable`", false);
+        CheckAggregatePushdown(client, "SELECT COUNT(*), SUM(level), MIN(level) FROM `/Root/olapStore/olapTable`", true);
     }
 
     Y_UNIT_TEST(DoubleOutOfRangeInJson) {

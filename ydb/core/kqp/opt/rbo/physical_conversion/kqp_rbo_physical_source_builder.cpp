@@ -11,15 +11,13 @@ using namespace NYql::NNodes;
 using namespace NKikimr;
 using namespace NKikimr::NKqp;
 
-TString TPhysicalSourceBuilder::GetOlapAggregateField(ui32 index, TStringBuf function) const {
-    return Names.GetTemporaryName(TStringBuilder() << "__kqp_olap_agg_" << function << "_" << index << "_");
+TString TPhysicalSourceBuilder::GetOlapAggregateField(TInfoUnitId output, TStringBuf function) const {
+    return Names.GetTemporaryName(TStringBuilder() << "__kqp_olap_agg_" << function << "_" << output << "_");
 }
 
 TExprNode::TPtr TPhysicalSourceBuilder::AddOlapAggregate(TExprNode::TPtr processLambda, TVector<TString>& outputFields) const {
-    outputFields.clear();
-    TVector<TExprBase> aggregates;
     TVector<TExprBase> projections;
-    THashMap<TString, TString> averageColumns;
+    TVector<TExprBase> aggregates;
     auto addAggregate = [&](TString field, TStringBuf function, const TString& column) {
         // clang-format off
         aggregates.push_back(Build<TKqpOlapAggOperation>(Ctx, Pos)
@@ -31,70 +29,54 @@ TExprNode::TPtr TPhysicalSourceBuilder::AddOlapAggregate(TExprNode::TPtr process
         outputFields.push_back(std::move(field));
     };
 
-    // Column shards return partial states. AVG returns its sum and count.
-    const auto& aggregations = OlapAggregate->GetAggregationTraits();
-    ui32 index = 0;
-    for (const auto output : aggregations.Keys()) {
-        const auto& aggFunction = aggregations.Find(output)->AggFunction;
-        const auto& column = OlapAggregateInput->Columns.at(output);
+    // Storage column -> its Double cast, which all AVGs of the column share.
+    THashMap<TString, TString> averageInputs;
+    for (const auto& aggregation : OlapAggregate->Aggregations) {
         // COUNT(*) has no column argument.
-        const TString storageColumn = column ? Registry.Get(*column).GetColumnName() : TString("*");
-        if (aggFunction == "avg") {
-            // AVG accumulates in Double. Cast each input before SUM so integer
-            // sums cannot overflow and Float sums have the declared Double type.
-            TString sumColumn = storageColumn;
-            const auto* columnType = Read.GetIUType(*column, Ctx);
-            if (RemoveOptionality(*columnType).Cast<TDataExprType>()->GetSlot() != EDataSlot::Double) {
-                auto [it, inserted] = averageColumns.emplace(storageColumn, GetOlapAggregateField(index, "avg_input"));
-                sumColumn = it->second;
-                if (inserted) {
-                    const TVector<const TItemExprType*> inputFields{Ctx.MakeType<TItemExprType>(storageColumn, columnType)};
-                    const auto columnArg = Build<TKqpOlapApplyColumnArg>(Ctx, Pos)
-                        .TableRowType(ExpandType(Pos, *Ctx.MakeType<TStructExprType>(inputFields), Ctx))
-                        .ColumnName().Build(storageColumn)
-                        .Done();
-                    const auto value = Ctx.NewArgument(Pos, "value");
-                    const auto cast = Build<TCoSafeCast>(Ctx, Pos)
-                        .Value(value)
-                        .Type(ExpandType(Pos, *Ctx.MakeType<TDataExprType>(EDataSlot::Double), Ctx))
-                        .Done();
-                    const auto apply = Build<TKqpOlapApply>(Ctx, Pos)
-                        .Lambda(Ctx.NewLambda(Pos, Ctx.NewArguments(Pos, {value}), cast.Ptr()))
-                        .Args().Add(columnArg).Build()
-                        .KernelName().Build("")
-                        .Done();
-                    projections.push_back(Build<TKqpOlapProjection>(Ctx, Pos)
-                        .OlapOperation(apply)
-                        .ColumnName().Build(sumColumn)
-                        .Done());
-                }
-            }
-            addAggregate(GetOlapAggregateField(index, "sum"), "sum", sumColumn);
-            addAggregate(GetOlapAggregateField(index, "count"), "count", storageColumn);
-        } else {
-            addAggregate(GetOlapAggregateField(index, aggFunction), aggFunction, storageColumn);
+        const TString column = aggregation.Column ? Registry.Get(*aggregation.Column).GetColumnName() : TString("*");
+        if (aggregation.Function != "avg") {
+            addAggregate(GetOlapAggregateField(aggregation.Output, aggregation.Function), aggregation.Function, column);
+            continue;
         }
-        ++index;
+
+        // Column shards return AVG as its sum and count. Cast the input to Double
+        // before SUM, so integer sums cannot overflow and Float sums are Double.
+        TString sumColumn = column;
+        const auto& columnType = *Read.GetIUType(*aggregation.Column, Ctx);
+        if (IsOlapAverageCast(columnType)) {
+            const auto [it, inserted] = averageInputs.emplace(column, GetOlapAggregateField(aggregation.Output, "avg_input"));
+            if (inserted) {
+                projections.push_back(BuildOlapDoubleCast(column, columnType, it->second));
+            }
+            sumColumn = it->second;
+        }
+        addAggregate(GetOlapAggregateField(aggregation.Output, "sum"), "sum", sumColumn);
+        addAggregate(GetOlapAggregateField(aggregation.Output, "count"), "count", column);
     }
 
     // Several key IDs may name one storage column; group by it once.
     TVector<TCoAtom> keys;
     THashSet<TString> keyColumns;
-    for (const auto key : OlapAggregate->GetKeyColumns().Items()) {
+    for (const auto key : OlapAggregate->Keys) {
         const auto& column = Registry.Get(key).GetColumnName();
         if (keyColumns.insert(column).second) {
             keys.push_back(Build<TCoAtom>(Ctx, Pos).Value(column).Done());
             outputFields.push_back(column);
         }
     }
+    // Block reads expose the program row in lexical field order.
     std::sort(outputFields.begin(), outputFields.end());
 
     TExprBase input = TCoLambda(processLambda).Body();
     if (!projections.empty()) {
+        // clang-format off
         input = Build<TKqpOlapProjections>(Ctx, Pos)
             .Input(input)
-            .Projections().Add(projections).Build()
-            .Done();
+            .Projections()
+                .Add(projections)
+            .Build()
+        .Done();
+        // clang-format on
     }
 
     // clang-format off
@@ -111,87 +93,83 @@ TExprNode::TPtr TPhysicalSourceBuilder::AddOlapAggregate(TExprNode::TPtr process
     return Ctx.ChangeChild(*processLambda, TCoLambda::idx_Body, std::move(olapAgg));
 }
 
-TExprNode::TPtr TPhysicalSourceBuilder::BuildOlapAggregateRow(const THashMap<TString, TExprNode::TPtr>& fields) const {
+TExprBase TPhysicalSourceBuilder::BuildOlapDoubleCast(const TString& column, const TTypeAnnotationNode& columnType, const TString& field) const {
+    const TVector<const TItemExprType*> rowItems{Ctx.MakeType<TItemExprType>(column, &columnType)};
+    const auto* rowType = Ctx.MakeType<TStructExprType>(rowItems);
+    const auto* doubleType = Ctx.MakeType<TDataExprType>(EDataSlot::Double);
+    // clang-format off
+    return Build<TKqpOlapProjection>(Ctx, Pos)
+        .OlapOperation<TKqpOlapApply>()
+            .Lambda()
+                .Args({"value"})
+                .Body<TCoSafeCast>()
+                    .Value("value")
+                    .Type(ExpandType(Pos, *doubleType, Ctx))
+                .Build()
+            .Build()
+            .Args()
+                .Add<TKqpOlapApplyColumnArg>()
+                    .TableRowType(ExpandType(Pos, *rowType, Ctx))
+                    .ColumnName().Build(column)
+                .Build()
+            .Build()
+            .KernelName().Build("")
+        .Build()
+        .ColumnName().Build(field)
+    .Done();
+    // clang-format on
+}
+
+TExprNode::TPtr TPhysicalSourceBuilder::BuildOlapAggregateRow(const TProgramFields& fields) const {
     TExprNode::TListType members;
     auto addMember = [&](TInfoUnitId id, TExprNode::TPtr value) {
         members.push_back(Ctx.NewList(Pos, {Ctx.NewAtom(Pos, Names.Get(id)), std::move(value)}));
     };
 
-    TUnorderedIUs keys;
-    for (const auto key : OlapAggregate->GetKeyColumns().Items()) {
-        if (keys.Add(key)) {
-            addMember(key, fields.at(Registry.Get(key).GetColumnName()));
-        }
+    for (const auto key : OlapAggregate->Keys) {
+        addMember(key, fields.at(Registry.Get(key).GetColumnName()));
     }
-
-    const auto& aggregations = OlapAggregate->GetAggregationTraits();
-    ui32 index = 0;
-    for (const auto output : aggregations.Keys()) {
-        const auto& aggFunction = aggregations.Find(output)->AggFunction;
-        if (aggFunction != "avg") {
-            addMember(output, fields.at(GetOlapAggregateField(index++, aggFunction)));
-            continue;
-        }
-
-        // Build the intermediate AVG state of TPhysicalAggregationBuilder: (sum as Double, count),
-        // or nothing when an optional column has no values.
-        const auto sum = fields.at(GetOlapAggregateField(index, "sum"));
-        const auto count = fields.at(GetOlapAggregateField(index, "count"));
-        ++index;
-        const auto* columnType = Read.GetIUType(*OlapAggregateInput->Columns.at(output), Ctx);
-        Y_ENSURE(columnType, "Cannot find the type of an AVG column");
-        TExprNode::TPtr state;
-        if (columnType->IsOptionalOrNull()) {
-            // clang-format off
-            state = Ctx.Builder(Pos)
-                .Callable("IfPresent")
-                    .Add(0, sum)
-                    .Lambda(1)
-                        .Param("sum")
-                        .Callable(0, "Just")
-                            .List(0)
-                                .Callable(0, "SafeCast")
-                                    .Arg(0, "sum")
-                                    .Callable(1, "DataType")
-                                        .Atom(0, "Double")
-                                    .Seal()
-                                .Seal()
-                                .Add(1, count)
-                            .Seal()
-                        .Seal()
-                    .Seal()
-                    .Callable(2, "Nothing")
-                        .Callable(0, "OptionalType")
-                            .Callable(0, "TupleType")
-                                .Callable(0, "DataType")
-                                    .Atom(0, "Double")
-                                .Seal()
-                                .Callable(1, "DataType")
-                                    .Atom(0, "Uint64")
-                                .Seal()
-                            .Seal()
-                        .Seal()
-                    .Seal()
-                .Seal().Build();
-            // clang-format on
+    for (const auto& aggregation : OlapAggregate->Aggregations) {
+        if (aggregation.Function == "avg") {
+            addMember(aggregation.Output, BuildOlapAverageState(aggregation, fields));
         } else {
-            // clang-format off
-            state = Ctx.Builder(Pos)
-                .List()
-                    .Callable(0, "SafeCast")
-                        .Add(0, sum)
-                        .Callable(1, "DataType")
-                            .Atom(0, "Double")
-                        .Seal()
-                    .Seal()
-                    .Add(1, count)
-                .Seal().Build();
-            // clang-format on
+            addMember(aggregation.Output, fields.at(GetOlapAggregateField(aggregation.Output, aggregation.Function)));
         }
-        addMember(output, std::move(state));
+    }
+    return Ctx.NewCallable(Pos, "AsStruct", std::move(members));
+}
+
+TExprNode::TPtr TPhysicalSourceBuilder::BuildOlapAverageState(const TOlapAggregation& aggregation, const TProgramFields& fields) const {
+    // The AVG state of TPhysicalAggregationBuilder is (sum as Double, count).
+    // AddOlapAggregate already sums Double values.
+    auto sum = fields.at(GetOlapAggregateField(aggregation.Output, "sum"));
+    auto count = fields.at(GetOlapAggregateField(aggregation.Output, "count"));
+    if (!Read.GetIUType(*aggregation.Column, Ctx)->IsOptionalOrNull()) {
+        return Ctx.NewList(Pos, {std::move(sum), std::move(count)});
     }
 
-    return Ctx.NewCallable(Pos, "AsStruct", std::move(members));
+    // An optional column with no values in the group has no sum, and no state.
+    const TTypeAnnotationNode::TListType stateItems{
+        Ctx.MakeType<TDataExprType>(EDataSlot::Double), Ctx.MakeType<TDataExprType>(EDataSlot::Uint64)};
+    const auto* stateType = Ctx.MakeType<TOptionalExprType>(Ctx.MakeType<TTupleExprType>(stateItems));
+    // clang-format off
+    return Ctx.Builder(Pos)
+        .Callable("IfPresent")
+            .Add(0, std::move(sum))
+            .Lambda(1)
+                .Param("sum")
+                .Callable(0, "Just")
+                    .List(0)
+                        .Arg(0, "sum")
+                        .Add(1, std::move(count))
+                    .Seal()
+                .Seal()
+            .Seal()
+            .Callable(2, "Nothing")
+                .Add(0, ExpandType(Pos, *stateType, Ctx))
+            .Seal()
+        .Seal().Build();
+    // clang-format on
 }
 
 TExprNode::TPtr TPhysicalSourceBuilder::BuildPhysicalOp() {
@@ -302,10 +280,12 @@ TExprNode::TPtr TPhysicalSourceBuilder::BuildPhysicalOp() {
                     Read.OlapFilterLambda, olapNames, Ctx));
             }
 
-            // Block reads expose the program row in lexical field order.
-            TVector<TString> outputFields = storageColumns;
+            // The program row fields, in the lexical order of block reads.
+            TVector<TString> outputFields;
             if (OlapAggregate) {
                 processLambda = AddOlapAggregate(processLambda, outputFields);
+            } else {
+                outputFields = storageColumns;
             }
 
             TKqpReadTableSettings settings;
@@ -342,7 +322,7 @@ TExprNode::TPtr TPhysicalSourceBuilder::BuildPhysicalOp() {
             // clang-format on
 
             TExprNode::TListType args;
-            THashMap<TString, TExprNode::TPtr> fieldArgs;
+            TProgramFields fieldArgs;
             for (ui32 i = 0; i < outputFields.size(); ++i) {
                 args.push_back(Ctx.NewArgument(Pos, "column_" + ToString(i)));
                 fieldArgs.emplace(outputFields[i], args.back());
