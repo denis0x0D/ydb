@@ -1,5 +1,6 @@
 #include "kqp_rbo_physical_query_builder.h"
 #include "kqp_rbo_compatibility.h"
+#include "kqp_rbo_expr_serializer.h"
 
 #include <ydb/core/kqp/common/kqp_yql.h>
 #include <ydb/core/kqp/opt/peephole/kqp_opt_peephole.h>
@@ -12,8 +13,12 @@
 #include <ydb/library/yql/dq/opt/dq_opt_peephole.h>
 #include <ydb/library/yql/dq/type_ann/dq_type_ann.h>
 
+#include <yql/essentials/ast/yql_type_string.h>
 #include <yql/essentials/core/yql_expr_optimize.h>
 #include <yql/essentials/core/yql_expr_type_annotation.h>
+
+#include <util/digest/city.h>
+#include <util/string/escape.h>
 
 #include <cctype>
 #include <optional>
@@ -26,6 +31,82 @@ using namespace NYql::NNodes;
 using namespace NKikimr;
 
 namespace {
+
+constexpr ui32 StageCacheFormatVersion = 1;
+
+template <typename T>
+void WriteSetting(TStringBuilder& out, TStringBuf name, const T& value) {
+    out << name << '=' << value << ';';
+}
+
+template <typename T>
+void WriteSetting(TStringBuilder& out, TStringBuf name, const TMaybe<T>& value) {
+    out << name << '=';
+    if (value) {
+        out << *value;
+    } else {
+        out << '-';
+    }
+    out << ';';
+}
+
+// Digest of what peephole reads besides the program: the table service config, the settings a query can
+// override with pragmas, and the block engine mode.
+TString BuildStageCacheEnvironment(const TRBOContext& rboCtx) {
+    const auto& config = *rboCtx.KqpCtx.Config;
+    TStringBuilder environment;
+    environment << static_cast<const NKikimrConfig::TTableServiceConfig&>(config).ShortDebugString() << '\n';
+    WriteSetting(environment, "BlockChannelsMode", static_cast<i32>(config.GetBlockChannelsMode()));
+    WriteSetting(environment, "DqDefaultHashShuffleFuncType", static_cast<ui32>(config.GetDqDefaultHashShuffleFuncType()));
+    WriteSetting(environment, "DqHashCombineExportTypeInfo", config.GetDqHashCombineExportTypeInfo());
+    WriteSetting(environment, "DqHashOperatorsUseBlocks", config.GetDqHashOperatorsUseBlocks());
+    WriteSetting(environment, "UseDqHashAggregate", config.GetUseDqHashAggregate());
+    WriteSetting(environment, "UseDqHashCombine", config.GetUseDqHashCombine());
+    WriteSetting(environment, "DisableCheckpoints", config.DisableCheckpoints.Get());
+    WriteSetting(environment, "OptValidateStreamingCheckpoints", config.OptValidateStreamingCheckpoints.Get());
+    WriteSetting(environment, "OptValidateStreamingConstraints", config.OptValidateStreamingConstraints.Get());
+    WriteSetting(environment, "UseInMemoryStreamingAggregation", config.UseInMemoryStreamingAggregation.Get());
+    WriteSetting(environment, "KqpYqlCombinerMemoryLimit", config._KqpYqlCombinerMemoryLimit.Get());
+    WriteSetting(environment, "KqpYqlConstraintsTransformerEnabled", config._KqpYqlConstraintsTransformerEnabled.Get());
+    WriteSetting(environment, "BlockEngineMode", static_cast<ui32>(rboCtx.TypeCtx.BlockEngineMode));
+    WriteSetting(environment, "UseBlocks", rboCtx.TypeCtx.UseBlocks);
+
+    const auto digest = CityHash128(environment);
+    return TStringBuilder() << Uint128High64(digest) << '-' << Uint128Low64(digest);
+}
+
+// Peephole of a stage is a function of its program, the argument types and the settings, so together they are
+// the cache key. The program is written with the types of its typed nodes: they carry what the program text
+// doesn't, like the column types of a table read.
+std::optional<TString> BuildStageCacheKey(const TString& environment, const TExprNode& program,
+    const TVector<const TTypeAnnotationNode*>& argsType)
+{
+    auto serializedProgram = SerializeExprGraph(program, ESerializedTypes::IfPresent);
+    if (!serializedProgram) {
+        return std::nullopt;
+    }
+    TStringBuilder key;
+    key << environment << '\n';
+    for (const auto* type : argsType) {
+        key << FormatType(type) << ';';
+    }
+    key << '\n' << *serializedProgram;
+    return std::move(key);
+}
+
+// A cached program fits only a stage whose arguments have exactly the types it was built for.
+bool MatchesArguments(const TExprNode& program, const TVector<const TTypeAnnotationNode*>& argsType) {
+    if (!program.IsLambda() || program.Head().ChildrenSize() != argsType.size()) {
+        return false;
+    }
+    for (ui32 i = 0; i < argsType.size(); ++i) {
+        const TTypeAnnotationNode* type = program.Head().Child(i)->GetTypeAnn();
+        if (!type || !IsSameAnnotation(*type, *argsType[i])) {
+            return false;
+        }
+    }
+    return true;
+}
 
 std::string TraceRootId(const std::string& title) {
     std::string id = "physical-ast";
@@ -864,6 +945,9 @@ TVector<TExprNode::TPtr> TPhysicalQueryBuilder::PeepHoleOptimizePhysicalStages(T
     }
     auto& ctx = RBOCtx.ExprCtx;
 
+    auto* stageCache = GetStageCache();
+    const auto cacheEnvironment = stageCache ? BuildStageCacheEnvironment(RBOCtx) : TString();
+
     TNodeOnNodeOwnedMap programsMap;
     for (auto& stage : physicalStages) {
         TNodeOnNodeOwnedMap argReplaces;
@@ -933,7 +1017,7 @@ TVector<TExprNode::TPtr> TPhysicalQueryBuilder::PeepHoleOptimizePhysicalStages(T
             argsType.push_back(argTypeAnn);
         }
 
-        newProgram = PeepHoleOptimize(newProgram, argsType);
+        newProgram = PeepHoleOptimizeWithCache(newProgram, argsType, stageCache, cacheEnvironment, stage->Pos());
         Y_ENSURE(newProgram);
         // Collect program after peephole.
         programsMap[program.Raw()] = newProgram;
@@ -1035,6 +1119,59 @@ TExprNode::TPtr TPhysicalQueryBuilder::PeepHoleOptimize(TExprNode::TPtr input, c
     }
 
     return TKqpProgram(newProgram).Lambda().Ptr();
+}
+
+IKqpStageCache* TPhysicalQueryBuilder::GetStageCache() const {
+    if (!RBOCtx.KqpCtx.StageCache || !RBOCtx.KqpCtx.Config->GetEnableNewRBOStageCache()) {
+        return nullptr;
+    }
+    return RBOCtx.KqpCtx.StageCache.Get();
+}
+
+TExprNode::TPtr TPhysicalQueryBuilder::PeepHoleOptimizeWithCache(TExprNode::TPtr program, const TVector<const TTypeAnnotationNode*>& argsType,
+    IKqpStageCache* cache, const TString& cacheEnvironment, TPositionHandle pos) const
+{
+    const auto cacheKey = cache ? BuildStageCacheKey(cacheEnvironment, *program, argsType) : std::nullopt;
+    if (!cacheKey) {
+        return PeepHoleOptimize(program, argsType);
+    }
+
+    auto& ctx = RBOCtx.ExprCtx;
+    const auto entry = cache->Find(*cacheKey);
+    TExprNode::TPtr cachedProgram;
+    if (entry && entry->FormatVersion == StageCacheFormatVersion) {
+        cachedProgram = DeserializeExprGraph(entry->Program, ctx, pos);
+        if (cachedProgram && !MatchesArguments(*cachedProgram, argsType)) {
+            cachedProgram = nullptr;
+        }
+    }
+
+    const bool verify = RBOCtx.KqpCtx.Config->GetNewRBOStageCacheVerify();
+    if (cachedProgram && !verify) {
+        YQL_CLOG(DEBUG, CoreDq) << "[NEW RBO stage cache] Hit, program size " << entry->Program.size();
+        return cachedProgram;
+    }
+
+    auto optimizedProgram = PeepHoleOptimize(program, argsType);
+    if (!optimizedProgram) {
+        return nullptr;
+    }
+
+    if (cachedProgram) {
+        const auto builtProgram = SerializeExprGraph(*optimizedProgram, ESerializedTypes::Required);
+        Y_ENSURE(builtProgram && *builtProgram == entry->Program,
+            "NEW RBO stage cache: the cached program differs from the program built for the same key: " << EscapeC(*cacheKey)
+            << "\nCached program:\n" << KqpExprToPrettyString(TExprBase(cachedProgram), ctx)
+            << "\nBuilt program:\n" << KqpExprToPrettyString(TExprBase(optimizedProgram), ctx));
+        YQL_CLOG(DEBUG, CoreDq) << "[NEW RBO stage cache] Hit verified, program size " << entry->Program.size();
+        return optimizedProgram;
+    }
+
+    if (auto serializedProgram = SerializeExprGraph(*optimizedProgram, ESerializedTypes::Required)) {
+        YQL_CLOG(DEBUG, CoreDq) << "[NEW RBO stage cache] Store, program size " << serializedProgram->size();
+        cache->Insert(*cacheKey, std::make_shared<TStageCacheEntry>(TStageCacheEntry{StageCacheFormatVersion, std::move(*serializedProgram)}));
+    }
+    return optimizedProgram;
 }
 
 void TPhysicalQueryBuilder::TypeAnnotate(TExprNode::TPtr& input) {

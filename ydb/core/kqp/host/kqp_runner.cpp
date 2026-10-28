@@ -195,6 +195,8 @@ public:
             Config))
         , ActorSystem(actorSystem)
     {
+        // TODO: pass the node-wide stage cache from the compile service instead of the map-based test cache.
+        OptimizeCtx->StageCache = GetTestStageCache();
         CreateGraphTransformer(typesCtx, sessionCtx, funcRegistry);
     }
 

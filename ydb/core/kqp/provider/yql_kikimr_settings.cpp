@@ -111,6 +111,8 @@ TKikimrConfiguration::TKikimrConfiguration() {
     REGISTER_SETTING(*this, UseBlockHashJoin);
     REGISTER_SETTING(*this, UseBlockHashJoinForCross);
     REGISTER_SETTING(*this, EnableNewRBOPhysicalStagePeephole);
+    REGISTER_SETTING(*this, EnableNewRBOStageCache);
+    REGISTER_SETTING(*this, NewRBOStageCacheVerify);
     REGISTER_SETTING(*this, BlockHashJoinSwapLeftJoinSides);
     REGISTER_SETTING(*this, EnableBlockHashJoinEqualNulls);
     REGISTER_SETTING(*this, UseScalarHashJoin);
@@ -434,6 +436,14 @@ bool TKikimrConfiguration::GetUseScalarHashJoinForMap() const {
 bool TKikimrConfiguration::GetEnableNewRBOPhysicalStagePeephole() const {
     return EnableNewRBOPhysicalStagePeephole.Get().GetOrElse(
         TTableServiceConfig::GetEnableNewRBOPhysicalStagePeephole());
+}
+
+bool TKikimrConfiguration::GetEnableNewRBOStageCache() const {
+    return EnableNewRBOStageCache.Get().GetOrElse(true);
+}
+
+bool TKikimrConfiguration::GetNewRBOStageCacheVerify() const {
+    return NewRBOStageCacheVerify.Get().GetOrElse(true);
 }
 
 bool TKikimrConfiguration::GetUseKqpTasksGraphV2() const {

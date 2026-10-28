@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ydb/core/kqp/common/kqp_stage_cache.h>
 #include <ydb/core/kqp/common/kqp_yql.h>
 #include <ydb/core/kqp/opt/rbo/kqp_stage_graph.h>
 
@@ -23,6 +24,11 @@ private:
     TVector<NYql::TExprNode::TPtr> BuildPhysicalStageGraph(int rootIdx);
     TVector<NYql::TExprNode::TPtr> LowerPhysicalStageCompatibility(TVector<NYql::TExprNode::TPtr>&& physicalStages);
     TVector<NYql::TExprNode::TPtr> PeepHoleOptimizePhysicalStages(TVector<NYql::TExprNode::TPtr>&& physicalStages);
+    IKqpStageCache* GetStageCache() const;
+    // Peephole through the stage cache: the key is the settings, the argument types and the program before
+    // peephole, the value is the program after peephole.
+    NYql::TExprNode::TPtr PeepHoleOptimizeWithCache(NYql::TExprNode::TPtr program, const TVector<const NYql::TTypeAnnotationNode*>& argsType,
+        IKqpStageCache* cache, const TString& cacheEnvironment, NYql::TPositionHandle pos) const;
     TVector<NYql::TExprNode::TPtr> PreparePhysicalStages(TVector<NYql::TExprNode::TPtr>&& physicalStages, bool enableWideChannels);
     NYql::TExprNode::TPtr BuildPhysicalQuery(TVector<TVector<NYql::TExprNode::TPtr>>&& physicalStages);
     NYql::TExprNode::TPtr PeepHoleOptimize(NYql::TExprNode::TPtr input, const TVector<const NYql::TTypeAnnotationNode*>& argsType) const;

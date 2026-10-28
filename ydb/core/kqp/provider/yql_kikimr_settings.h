@@ -69,6 +69,10 @@ public:
     NCommon::TConfSetting<bool, Static> UseBlockHashJoin;
     NCommon::TConfSetting<bool, Static> UseBlockHashJoinForCross;
     NCommon::TConfSetting<bool, Static> EnableNewRBOPhysicalStagePeephole;
+    // Reuse physical stages after peephole from the stage cache.
+    NCommon::TConfSetting<bool, Static> EnableNewRBOStageCache;
+    // Also build each cached stage and fail if it differs from the cached one.
+    NCommon::TConfSetting<bool, Static> NewRBOStageCacheVerify;
     NCommon::TConfSetting<bool, Static> BlockHashJoinSwapLeftJoinSides;
     NCommon::TConfSetting<bool, Static> EnableBlockHashJoinEqualNulls;
     NCommon::TConfSetting<bool, Static> UseScalarHashJoin;
@@ -279,6 +283,8 @@ struct TKikimrConfiguration : public NCommon::TDispatcherAndSettings<TKikimrSett
     bool GetUseScalarHashJoinForMap() const;
     bool GetEnableLookupJoinPointPrefixes() const;
     bool GetEnableNewRBOPhysicalStagePeephole() const;
+    bool GetEnableNewRBOStageCache() const;
+    bool GetNewRBOStageCacheVerify() const;
     bool GetUseKqpTasksGraphV2() const;
     bool GetWindowFunctionsV2() const;
     bool IsAutoIndexSelectionDisabled() const;

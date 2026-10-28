@@ -3,6 +3,7 @@ YQL_LIBRARY()
 SRCS(
     kqp_rbo_convert_to_physical.cpp
     kqp_rbo_compatibility.cpp
+    kqp_rbo_expr_serializer.cpp
     kqp_rbo_physical_aggregation_builder.cpp
     kqp_rbo_physical_sort_builder.cpp
     kqp_rbo_physical_window_builder.cpp

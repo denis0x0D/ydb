@@ -18,6 +18,9 @@ SRCS(
     kqp_rbo_olap_ut.cpp
 )
 
+# The full debug info of this binary is at the 4 GiB DWARF32 limit of relwithdebinfo builds.
+SRC(kqp_rbo_stage_cache_ut.cpp -gline-tables-only)
+
 PEERDIR(
     library/cpp/resource
     ydb/core/kqp/ut/common
