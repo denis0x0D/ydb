@@ -4,6 +4,9 @@
 #include <ydb/core/kqp/opt/kqp_opt.h>
 #include <ydb/core/kqp/opt/rbo/kqp_operator.h>
 
+#include <functional>
+#include <optional>
+
 namespace NKikimr {
 namespace NKqp {
 
@@ -130,16 +133,28 @@ public:
     TRuleBasedOptimizer() = default;
     ~TRuleBasedOptimizer() = default;
 
+    // Called when a root reaches the snapshot checkpoint, before the stage there runs.
+    // A non-null result replaces the root for the remaining stages.
+    using TCheckpointHandler = std::function<TIntrusivePtr<TOpRoot>(size_t rootIndex, TOpRoot& root)>;
+
     // This function applies RBO optimizations, translates given `root` to physical yql `callables`, applies lightweight (stage based) physical optimizations
-    // and returns a root of the physical program.
-    TExprNode::TPtr Optimize(const TVector<TIntrusivePtr<TOpRoot>>& roots, TRBOContext& rboCtx);
+    // and returns a root of the physical program. Roots restored from a pre-CBO snapshot start at the checkpoint.
+    TExprNode::TPtr Optimize(TVector<TIntrusivePtr<TOpRoot>>& roots, TRBOContext& rboCtx,
+        const TCheckpointHandler& onCheckpoint = {}, bool restoredFromSnapshot = false);
 
     // Adds a RBO stage to the RBO pipeline.
     void AddStage(std::unique_ptr<IRBOStage>&& stage) {
         Stages.push_back(std::move(stage));
     }
 
+    // The next stage starts the part of the pipeline that runs after a pre-CBO snapshot is restored.
+    void AddSnapshotCheckpoint() {
+        Y_ENSURE(!SnapshotCheckpoint, "RBO pipeline has a single snapshot checkpoint");
+        SnapshotCheckpoint = Stages.size();
+    }
+
     TVector<std::unique_ptr<IRBOStage>> Stages;
+    std::optional<size_t> SnapshotCheckpoint;
 };
 
 /**

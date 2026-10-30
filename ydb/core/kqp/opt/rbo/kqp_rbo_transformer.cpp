@@ -2,6 +2,7 @@
 #include "kqp_operator.h"
 #include "kqp_plan_conversion_utils.h"
 #include "kqp_rbo_rules.h"
+#include "kqp_rbo_snapshot.h"
 #include "traces/kqp_rbo_trace_output.h"
 
 #include <ydb/core/kqp/host/kqp_transform.h>
@@ -147,6 +148,11 @@ void TKqpRewriteSelectTransformer::Rewind() {
 
 IGraphTransformer::TStatus TKqpNewRBOTransformer::DoTransform(TExprNode::TPtr input, TExprNode::TPtr& output, TExprContext& ctx) {
     output = input;
+    // A restored pre-CBO snapshot replaces the import into RBO operators.
+    if (TryRestoreSnapshot(ctx)) {
+        return RequestStatisticsAndContinue(input, output, ctx);
+    }
+
     TOptimizeExprSettings settings(&TypeCtx);
     settings.VisitTuples = true;
 
@@ -204,6 +210,12 @@ IGraphTransformer::TStatus TKqpNewRBOTransformer::DoTransform(TExprNode::TPtr in
         return status;
     }
 
+    return RequestStatisticsAndContinue(input, output, ctx);
+}
+
+IGraphTransformer::TStatus TKqpNewRBOTransformer::RequestStatisticsAndContinue(TExprNode::TPtr input, TExprNode::TPtr& output,
+    TExprContext& ctx)
+{
     if (IsSuitableToRequestStatistics()) {
         // Async request for statistics.
         auto status = RequestColumnStatistics(ctx);
@@ -214,6 +226,117 @@ IGraphTransformer::TStatus TKqpNewRBOTransformer::DoTransform(TExprNode::TPtr in
 
     // Continue optimizations without statistics.
     return ContinueOptimizations(input, output, ctx);
+}
+
+bool TKqpNewRBOTransformer::TryRestoreSnapshot(TExprContext& ctx) {
+    if (SnapshotChecked) {
+        return false;
+    }
+    SnapshotChecked = true;
+    if (!KqpCtx.PreCboSnapshot) {
+        return false;
+    }
+
+    NKikimrKqpRbo::TPreCboSnapshot snapshot;
+    if (!snapshot.ParseFromString(*KqpCtx.PreCboSnapshot)) {
+        YQL_CLOG(NOTICE, CoreDq) << "Ignoring a malformed pre-CBO snapshot";
+        return false;
+    }
+    // The early stages rewrite reads and predicates, so the restored plan cannot list them again.
+    if (IsSuitableToRequestStatistics() && !snapshot.HasColumnStatistics()) {
+        YQL_CLOG(DEBUG, CoreDq) << "Pre-CBO snapshot has no column statistics request";
+        return false;
+    }
+
+    // A failed restore falls back to the import; its issues must not outlive it.
+    const auto issues = ctx.IssueManager.GetIssues();
+    TVector<TIntrusivePtr<TOpRoot>> roots;
+    TVector<NYql::EBlockEngineMode> blockEngineModes;
+    try {
+        TRBOContext rboCtx(KqpCtx, ctx, TypeCtx, *RBOTypeAnnTransformer.Get(), FuncRegistry);
+        for (const auto& root : snapshot.GetRoots()) {
+            roots.push_back(DeserializePlanRoot(root, rboCtx));
+            Y_ENSURE(root.GetBlockEngineMode() <= static_cast<ui32>(NYql::EBlockEngineMode::Force), "Invalid block engine mode");
+            blockEngineModes.push_back(static_cast<NYql::EBlockEngineMode>(root.GetBlockEngineMode()));
+        }
+        Y_ENSURE(!roots.empty(), "Pre-CBO snapshot without plans");
+    } catch (const std::exception& e) {
+        YQL_CLOG(NOTICE, CoreDq) << "Cannot restore a pre-CBO snapshot: " << e.what();
+        ctx.IssueManager.Reset(issues);
+        return false;
+    }
+
+    if (roots.size() > 1) {
+        if (KqpCtx.Config->GetEnableFallbackOnMultipleStatements()) {
+            Y_ENSURE(false, "Fallback due to multiple statements flag");
+        }
+        ResetTypes = true;
+    }
+    Roots = std::move(roots);
+    RestoredBlockEngineModes = std::move(blockEngineModes);
+    ReadColumnStatisticsRequest(snapshot.GetColumnStatistics());
+    RestoredFromSnapshot = true;
+    YQL_CLOG(DEBUG, CoreDq) << "Restored a pre-CBO snapshot of " << Roots.size() << " plans";
+    return true;
+}
+
+void TKqpNewRBOTransformer::WriteColumnStatisticsRequest(NKikimrKqpRbo::TColumnStatisticsRequest& proto) const {
+    // Sorted, so that equal requests serialize equally.
+    auto writeColumns = [](const THashMap<TString, THashSet<TString>>& columnsByTable, auto* out) {
+        TVector<TString> tables;
+        for (const auto& [table, columns] : columnsByTable) {
+            tables.push_back(table);
+        }
+        std::sort(tables.begin(), tables.end());
+        for (const auto& table : tables) {
+            auto& tableProto = *out->Add();
+            tableProto.SetTable(table);
+            TVector<TString> columns(columnsByTable.at(table).begin(), columnsByTable.at(table).end());
+            std::sort(columns.begin(), columns.end());
+            for (const auto& column : columns) {
+                tableProto.AddColumns(column);
+            }
+        }
+    };
+    writeColumns(CMColumnsByTableName, proto.MutableCountMinSketch());
+    writeColumns(HistColumnsByTableName, proto.MutableEqWidthHistogram());
+
+    TVector<TString> tables;
+    for (const auto& [table, tuples] : EqHeightHistTuplesByTableName) {
+        tables.push_back(table);
+    }
+    std::sort(tables.begin(), tables.end());
+    for (const auto& table : tables) {
+        auto& tableProto = *proto.AddEqHeightHistogram();
+        tableProto.SetTable(table);
+        const auto& tuples = EqHeightHistTuplesByTableName.at(table);
+        TVector<TString> keys;
+        for (const auto& [key, tuple] : tuples) {
+            keys.push_back(key);
+        }
+        std::sort(keys.begin(), keys.end());
+        for (const auto& key : keys) {
+            auto& tupleProto = *tableProto.AddTuples();
+            for (const auto& column : tuples.at(key)) {
+                tupleProto.AddValues(column);
+            }
+        }
+    }
+}
+
+void TKqpNewRBOTransformer::ReadColumnStatisticsRequest(const NKikimrKqpRbo::TColumnStatisticsRequest& proto) {
+    for (const auto& table : proto.GetCountMinSketch()) {
+        CMColumnsByTableName[table.GetTable()].insert(table.GetColumns().begin(), table.GetColumns().end());
+    }
+    for (const auto& table : proto.GetEqWidthHistogram()) {
+        HistColumnsByTableName[table.GetTable()].insert(table.GetColumns().begin(), table.GetColumns().end());
+    }
+    for (const auto& table : proto.GetEqHeightHistogram()) {
+        for (const auto& tupleProto : table.GetTuples()) {
+            TVector<TString> tuple(tupleProto.GetValues().begin(), tupleProto.GetValues().end());
+            EqHeightHistTuplesByTableName[table.GetTable()].emplace(NYql::MakeMultiColumnKey(tuple), tuple);
+        }
+    }
 }
 
 NThreading::TFuture<void> TKqpNewRBOTransformer::DoGetAsyncFuture(const TExprNode& input) {
@@ -402,7 +525,10 @@ void TKqpNewRBOTransformer::CollectTablesAndColumnsNames(TExprContext& ctx) {
 }
 
 IGraphTransformer::TStatus TKqpNewRBOTransformer::RequestColumnStatistics(TExprContext& ctx) {
-    CollectTablesAndColumnsNames(ctx);
+    // A restored snapshot carries the lists collected on the imported plan.
+    if (!RestoredFromSnapshot) {
+        CollectTablesAndColumnsNames(ctx);
+    }
 
     TVector<NThreading::TFuture<TColumnStatisticsResponse>> futures;
     AddStatRequest(ActorSystem, futures, Tables, Cluster, Database, TypeCtx, NStat::EStatType::COUNT_MIN_SKETCH, CMColumnsByTableName,
@@ -507,9 +633,52 @@ IGraphTransformer::TStatus TKqpNewRBOTransformer::ContinueOptimizations(TExprNod
     // Optimize all roots once, then replace every result container.
     TRBOContext rboCtx(KqpCtx, ctx, TypeCtx, *RBOTypeAnnTransformer.Get(), FuncRegistry);
     TRBOTraceOutput traceOutput(rboCtx);
-    auto optimizedPlan = RBO.Optimize(Roots, rboCtx);
+
+    // A compiled plan captures a pre-CBO snapshot; a restored plan replays what it captured.
+    std::optional<NKikimrKqpRbo::TPreCboSnapshot> snapshot;
+    if (!RestoredFromSnapshot) {
+        snapshot.emplace();
+        if (IsSuitableToRequestStatistics()) {
+            WriteColumnStatisticsRequest(*snapshot->MutableColumnStatistics());
+        }
+    }
+    // Test mode: continue every plan from its own snapshot.
+    const bool roundTrip = KqpCtx.Config->OptRboSnapshotRoundTrip.Get().GetOrElse(false);
+    auto onCheckpoint = [&](size_t rootIndex, TOpRoot& root) -> TIntrusivePtr<TOpRoot> {
+        if (RestoredFromSnapshot) {
+            TypeCtx.BlockEngineMode = RestoredBlockEngineModes.at(rootIndex);
+            return nullptr;
+        }
+        if (!snapshot) {
+            return nullptr;
+        }
+        try {
+            auto& proto = *snapshot->AddRoots();
+            proto = SerializePlanRoot(root, ctx);
+            proto.SetBlockEngineMode(static_cast<ui32>(TypeCtx.BlockEngineMode));
+            if (roundTrip) {
+                auto restored = DeserializePlanRoot(proto, rboCtx);
+                auto again = SerializePlanRoot(*restored, ctx);
+                again.SetBlockEngineMode(proto.GetBlockEngineMode());
+                Y_ENSURE(again.SerializeAsString() == proto.SerializeAsString(), "Pre-CBO snapshot does not round-trip");
+                return restored;
+            }
+        } catch (const std::exception& e) {
+            if (roundTrip) {
+                throw;
+            }
+            YQL_CLOG(DEBUG, CoreDq) << "No pre-CBO snapshot: " << e.what();
+            snapshot.reset();
+        }
+        return nullptr;
+    };
+
+    auto optimizedPlan = RBO.Optimize(Roots, rboCtx, onCheckpoint, RestoredFromSnapshot);
     traceOutput.Flush();
     AddPlans(rboCtx.ExecutionJson, rboCtx.ExplainJson);
+    if (snapshot) {
+        TransformCtx->PreCboSnapshot = snapshot->SerializeAsString();
+    }
 
     TNodeOnNodeOwnedMap replacements;
     for (const auto& container : containers) {
@@ -717,6 +886,9 @@ void TKqpNewRBOTransformer::InitializeRBOOptimizationStages() {
     TVector<std::unique_ptr<IRule>> indexSelectionRules;
     indexSelectionRules.emplace_back(std::make_unique<TPushRangesRule>(NYql::EStorageType::RowStorage));
     RBO.AddStage(std::make_unique<TRuleBasedStage>("Index selection rules", std::move(indexSelectionRules)));
+
+    // A pre-CBO snapshot holds the plan here: no earlier stage depends on statistics.
+    RBO.AddSnapshotCheckpoint();
 
     // CBO stages.
     TVector<std::unique_ptr<IRule>> initialCBOStageRules;

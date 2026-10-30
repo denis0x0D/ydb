@@ -83,6 +83,8 @@ private:
 using TInfoUnitId = ui32;
 using TUnorderedIUs = NPrivate::TAdaptiveBitSetStorage;
 
+class TPlanSnapshotAccess;
+
 // IDs are array indices in one plan. Add creates a new logical definition even
 // when its name already exists. Names are not binding-lookup keys or final
 // output labels. For Read outputs, ColumnName is the physical source column.
@@ -180,6 +182,9 @@ public:
     }
 
 private:
+    // A pre-CBO snapshot restores entries, annotations and counters exactly.
+    friend class TPlanSnapshotAccess;
+
     struct TEntry {
         TInfoUnit InfoUnit;
         // The generation prefix, engaged only for temporaries.

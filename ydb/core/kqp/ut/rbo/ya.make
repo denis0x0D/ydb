@@ -71,4 +71,5 @@ RECURSE_FOR_TESTS(
     physical
     fallback
     workloads
+    snapshot
 )

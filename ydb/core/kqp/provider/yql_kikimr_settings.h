@@ -114,6 +114,8 @@ public:
     NCommon::TConfSetting<bool, Static> OptValidateStreamingConstraints;
     NCommon::TConfSetting<bool, Static> OptValidateStreamingCheckpoints;
     NCommon::TConfSetting<bool, Static> OptFallbackToLegacyOptimizer;
+    // Testing: the new RBO continues every plan from its own pre-CBO snapshot.
+    NCommon::TConfSetting<bool, Static> OptRboSnapshotRoundTrip;
 
     // Use CostBasedOptimizationLevel for internal usage. This is a dummy flag that is mapped to the optimization level during parsing.
     NCommon::TConfSetting<TString, Static> CostBasedOptimization;

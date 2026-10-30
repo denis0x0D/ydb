@@ -44,6 +44,8 @@ struct TKqlTransformContext : TThrRefBase {
 
     TIntrusivePtr<NYql::TExprNode> ExplainTransformerInput; // Explain transformer must work after other transformers, but use input before peephole
     std::optional<NJson::TJsonValue> PlanJson; // JSON plan for the new optimizer
+    // Serialized NKikimrKqpRbo::TPreCboSnapshot captured by the new RBO, if the plan supports one.
+    std::optional<TString> PreCboSnapshot;
     TMaybe<NYql::NNodes::TKiDataQueryBlocks> DataQueryBlocks;
 
     void Reset();

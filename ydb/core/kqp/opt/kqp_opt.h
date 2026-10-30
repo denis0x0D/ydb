@@ -51,7 +51,10 @@ struct TKqpOptimizeContext : public TSimpleRefCount<TKqpOptimizeContext> {
     NKikimr::NKqp::TCBOOptimizerStats CBOStats;
     NYql::TExprNode::TPtr RboTraceAstBeforeRewriteSelect;
     NYql::TExprNode::TPtr RboTraceAstAfterRewriteSelect;
-    
+    // Serialized NKikimrKqpRbo::TPreCboSnapshot: the new RBO restores it instead of
+    // importing the query and running the stages before CBO.
+    std::optional<TString> PreCboSnapshot;
+
     std::shared_ptr<NJson::TJsonValue> GetOverrideStatistics();
 
     NKikimr::NKqp::TOptimizerHints GetOptimizerHints();

@@ -3,11 +3,13 @@
 #include "kqp_rbo.h"
 
 #include <ydb/core/kqp/opt/cbo/solver/kqp_opt_predicate_selectivity.h>
+#include <ydb/core/kqp/opt/rbo/protos/kqp_rbo_snapshot.pb.h>
 #include <ydb/core/kqp/opt/kqp_column_statistics_utils.h>
 #include <ydb/library/actors/core/actorsystem_fwd.h>
 
 #include <yql/essentials/ast/yql_expr.h>
 #include <yql/essentials/core/yql_graph_transformer.h>
+#include <yql/essentials/core/yql_type_annotation.h>
 
 namespace NYql {
 
@@ -72,8 +74,13 @@ public:
     void Rewind() override;
 
 private:
+    TStatus RequestStatisticsAndContinue(NYql::TExprNode::TPtr input, NYql::TExprNode::TPtr& output, NYql::TExprContext& ctx);
     TStatus RequestColumnStatistics(NYql::TExprContext& ctx);
     TStatus ContinueOptimizations(NYql::TExprNode::TPtr input, NYql::TExprNode::TPtr& output, NYql::TExprContext& ctx);
+    // Restores the plans from KqpCtx.PreCboSnapshot once; false falls back to the import.
+    bool TryRestoreSnapshot(NYql::TExprContext& ctx);
+    void WriteColumnStatisticsRequest(NKikimrKqpRbo::TColumnStatisticsRequest& proto) const;
+    void ReadColumnStatisticsRequest(const NKikimrKqpRbo::TColumnStatisticsRequest& proto);
     bool IsSuitableToRequestStatistics();
     void CollectTablesAndColumnsNames(NYql::TExprContext& ctx);
     void CollectTablesAndColumnsNames(IOperator* op, const TColumnLineage& lineage);
@@ -107,6 +114,11 @@ private:
 
     // Flag to reset the check of original type for multiple statement queries
     bool ResetTypes = false;
+
+    // Restored roots skip the import and the stages before the snapshot checkpoint.
+    bool SnapshotChecked = false;
+    bool RestoredFromSnapshot = false;
+    TVector<NYql::EBlockEngineMode> RestoredBlockEngineModes;
 
     TVector<TIntrusivePtr<TOpRoot>> Roots;
     TRuleBasedOptimizer RBO;

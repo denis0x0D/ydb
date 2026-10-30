@@ -24,6 +24,8 @@ void TKqlTransformContext::Reset() {
     QueryStats = {};
     PhysicalQuery = nullptr;
     ExplainTransformerInput = nullptr;
+    PlanJson.reset();
+    PreCboSnapshot.reset();
     DataQueryBlocks = Nothing();
 }
 

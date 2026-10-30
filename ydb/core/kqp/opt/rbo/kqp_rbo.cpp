@@ -193,21 +193,33 @@ void TRuleBasedStage::RunStage(TOpRoot& root, TRBOContext& ctx) {
     Y_ENSURE(numMatches < maxNumOfMatches);
 }
 
-TExprNode::TPtr TRuleBasedOptimizer::Optimize(const TVector<TIntrusivePtr<TOpRoot>>& roots, TRBOContext& rboCtx) {
+TExprNode::TPtr TRuleBasedOptimizer::Optimize(TVector<TIntrusivePtr<TOpRoot>>& roots, TRBOContext& rboCtx,
+    const TCheckpointHandler& onCheckpoint, bool restoredFromSnapshot)
+{
     bool needToLog = NYql::NLog::YqlLogger().NeedToLog(NYql::NLog::EComponent::CoreDq, NYql::NLog::ELevel::TRACE);
     auto& ctx = rboCtx.ExprCtx;
     int stageCounter = 0;
+    Y_ENSURE(!restoredFromSnapshot || SnapshotCheckpoint, "A restored plan needs the snapshot checkpoint");
+    const size_t firstStage = restoredFromSnapshot ? *SnapshotCheckpoint : 0;
 
-    for (auto & rootPtr : roots) {
-        auto & root = *rootPtr;
-        root.PlanProps.StageGraph.StageCounter = stageCounter;
-        SubmitInitialPlanTrace(root, rboCtx);
+    for (size_t rootIndex = 0; rootIndex < roots.size(); ++rootIndex) {
+        roots[rootIndex]->PlanProps.StageGraph.StageCounter = stageCounter;
+        SubmitInitialPlanTrace(*roots[rootIndex], rboCtx);
 
         if (needToLog) {
-            YQL_CLOG(TRACE, CoreDq) << "Original plan:\n" << root.PlanToString(ctx);
+            YQL_CLOG(TRACE, CoreDq) << "Original plan:\n" << roots[rootIndex]->PlanToString(ctx);
         }
 
-        for (const auto& stage : Stages) {
+        for (size_t stageIndex = firstStage; stageIndex < Stages.size(); ++stageIndex) {
+            if (onCheckpoint && stageIndex == SnapshotCheckpoint) {
+                auto& current = *roots[rootIndex];
+                if (auto replacement = onCheckpoint(rootIndex, current)) {
+                    replacement->PlanProps.StageGraph.StageCounter = current.PlanProps.StageGraph.StageCounter;
+                    roots[rootIndex] = std::move(replacement);
+                }
+            }
+            auto& root = *roots[rootIndex];
+            const auto& stage = Stages[stageIndex];
             if (rboCtx.NeedToLog()) {
                 rboCtx.TraceLog.stage(std::string(stage->StageName.c_str()));
             }
@@ -224,6 +236,7 @@ TExprNode::TPtr TRuleBasedOptimizer::Optimize(const TVector<TIntrusivePtr<TOpRoo
             }
         }
 
+        auto& root = *roots[rootIndex];
         auto convertProps = ERuleProperties::RequireParents | ERuleProperties::RequireStatistics
             | ERuleProperties::RequireLiveness | ERuleProperties::RequireTypes;
         ComputeRequiredProps(root, convertProps, rboCtx, "Physical plan generaion");

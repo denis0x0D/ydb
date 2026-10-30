@@ -20,6 +20,7 @@ SRCS(
     kqp_rbo.cpp
     kqp_rbo_cbo.cpp
     kqp_rbo_lookup_join.cpp
+    kqp_rbo_snapshot.cpp
     kqp_rewrite_select.cpp
     kqp_stage_graph.cpp
     analysis/logical_liveness.cpp
@@ -44,6 +45,7 @@ PEERDIR(
     ydb/core/kqp/opt/rbo/html_log
     ydb/core/kqp/opt/rbo/rules
     ydb/core/kqp/opt/rbo/physical_conversion
+    ydb/core/kqp/opt/rbo/protos
     ydb/library/yql/dq/common
     ydb/library/yql/dq/opt
     ydb/library/yql/dq/type_ann
@@ -52,6 +54,7 @@ PEERDIR(
     ydb/library/yql/utils/plan
     ydb/core/kqp/provider
     ydb/library/formats/arrow/protos
+    yql/essentials/ast/serialize
     yql/essentials/core/extract_predicate
 )
 

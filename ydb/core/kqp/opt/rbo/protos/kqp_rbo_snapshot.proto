@@ -1,0 +1,327 @@
+package NKikimrKqpRbo;
+option java_package = "ru.yandex.kikimr.proto";
+
+// New RBO plan state before the "Prepare for CBO" stage (PreCboSnapshot).
+// The format lives only in the memory of one process: no compatibility between versions.
+
+message TPosition {
+    optional uint32 Row = 1;
+    optional uint32 Column = 2;
+    optional string File = 3;
+}
+
+// Restores the annotation of one root of TPlanRoot.Expressions.
+message TExprEntry {
+    // The node was typed when serialized and is annotated again on restore.
+    optional bool Typed = 1;
+    // Typed lambda: the entries holding type expressions of its arguments.
+    repeated uint32 ArgTypes = 2 [packed = true];
+    // A type expression standing for a type annotation, e.g. of lambda arguments.
+    optional bool IsType = 3;
+}
+
+message TInfoUnit {
+    optional string Alias = 1;
+    optional string Column = 2;
+    // Engaged only for generated temporaries.
+    optional string Annotation = 3;
+}
+
+message TGeneratedCounter {
+    optional string Prefix = 1;
+    optional uint32 Value = 2;
+}
+
+message TNamedIU {
+    optional uint32 Id = 1;
+    optional string Name = 2;
+}
+
+message TSortKey {
+    optional uint32 Id = 1;
+    optional bool Ascending = 2;
+    optional bool NullsFirst = 3;
+}
+
+message TIdPair {
+    optional uint32 Key = 1;
+    optional uint32 Value = 2;
+}
+
+message TJoinKey {
+    optional uint32 Left = 1;
+    optional uint32 Right = 2;
+    optional bool EqualNulls = 3;
+}
+
+message TIdSet {
+    repeated uint32 Ids = 1 [packed = true];
+}
+
+message TStringList {
+    repeated string Values = 1;
+}
+
+message TExprList {
+    repeated uint32 Values = 1 [packed = true];
+}
+
+// Fields named after expressions and types hold indices of TPlanRoot.Expressions roots.
+
+message TEmptySource {
+    optional uint32 Input = 1;
+    repeated uint32 Columns = 2 [packed = true];
+}
+
+message TPointPrefix {
+    optional string Table = 1;
+    optional uint32 Points = 2;
+    optional uint32 PointsItemType = 3;
+    repeated string Columns = 4;
+    optional uint64 ExpectedMaxPoints = 5;
+}
+
+message TRangeInfo {
+    optional uint32 ComputeNode = 1;
+    repeated string KeyColumns = 2;
+    optional uint64 UsedPrefixLen = 3;
+    optional uint64 PointPrefixLen = 4;
+    optional uint64 ExpectedMaxRanges = 5;
+    repeated TPointPrefix PointPrefixes = 6;
+    optional string MainTable = 7;
+    optional uint32 LiteralRange = 8;
+}
+
+message TRead {
+    optional string Alias = 1;
+    optional uint32 StorageType = 2;
+    optional uint32 TableCallable = 3;
+    optional uint32 OlapFilterLambda = 4;
+    optional uint32 Limit = 5;
+    optional uint32 OriginalPredicate = 6;
+    optional uint32 SortDir = 7;
+    optional TRangeInfo RangeInfo = 8;
+    repeated uint32 Columns = 9 [packed = true];
+}
+
+message TMapElement {
+    optional uint32 Output = 1;
+    optional uint32 Expression = 2;
+}
+
+message TMap {
+    repeated TMapElement Elements = 1;
+    optional bool NeedToPush = 2;
+}
+
+message TFilter {
+    optional uint32 Expression = 1;
+    optional bool PartiallyPushedDown = 2;
+}
+
+message TJoin {
+    optional string Kind = 1;
+    repeated TJoinKey Keys = 2;
+    repeated uint32 Filters = 3 [packed = true];
+}
+
+message TAggregation {
+    optional uint32 Output = 1;
+    optional uint32 Input = 2;
+    optional string Function = 3;
+    optional bool Distinct = 4;
+    optional bool Unwrap = 5;
+}
+
+message TAggregate {
+    repeated TAggregation Aggregations = 1;
+    repeated uint32 Keys = 2 [packed = true];
+    optional uint32 Phase = 3;
+    optional bool DistinctAll = 4;
+    optional bool PushedToOlap = 5;
+}
+
+message TGroupingSets {
+    repeated TIdSet Sets = 1;
+    repeated TIdPair Columns = 2;
+    repeated TIdPair Indicators = 3;
+}
+
+message TWindowFunc {
+    optional uint32 Output = 1;
+    optional string Function = 2;
+    optional uint32 Kind = 3;
+    repeated uint32 Arguments = 4 [packed = true];
+}
+
+message TWindowFrame {
+    optional uint32 Type = 1;
+    optional uint32 BeginKind = 2;
+    optional uint64 BeginValue = 3;
+    optional uint32 EndKind = 4;
+    optional uint64 EndValue = 5;
+}
+
+message TWindow {
+    repeated TWindowFunc Functions = 1;
+    repeated uint32 PartitionKeys = 2 [packed = true];
+    repeated TSortKey SortKeys = 3;
+    optional TWindowFrame Frame = 4;
+}
+
+message TLimit {
+    optional uint32 Limit = 1;
+    optional uint32 Offset = 2;
+    optional uint32 Phase = 3;
+}
+
+message TSort {
+    repeated TSortKey Keys = 1;
+    optional uint32 Limit = 2;
+    optional uint32 Phase = 3;
+}
+
+message TUnionColumn {
+    optional uint32 Output = 1;
+    repeated uint32 Inputs = 2 [packed = true];
+}
+
+message TUnionAll {
+    repeated TUnionColumn Columns = 1;
+    optional bool Ordered = 2;
+}
+
+message TLookupKeyPrefix {
+    optional uint32 Points = 1;
+    optional uint32 PointsItemType = 2;
+    repeated string Columns = 3;
+    repeated TNamedIU Equalities = 4;
+}
+
+message TSourceRead {
+    optional uint32 Predicate = 1;
+    repeated TPointPrefix PointPrefixes = 2;
+}
+
+message TTableLookup {
+    optional uint32 Table = 1;
+    repeated uint32 Columns = 2 [packed = true];
+    repeated TNamedIU LookupKeys = 3;
+    optional string JoinKind = 4;
+    optional uint32 FetchedRowFilter = 5;
+    optional TLookupKeyPrefix Prefix = 6;
+    optional uint32 Strategy = 7;
+    repeated TJoinKey ResidualJoinKeys = 8;
+    optional bool AllowNullKeys = 9;
+    optional bool KeysFromInputLookup = 10;
+    optional TSourceRead SourceRead = 11;
+}
+
+message TEffectOptions {
+    optional TStringList Columns = 1;
+    optional TStringList ReturningColumns = 2;
+    optional TStringList DefaultColumns = 3;
+    optional string OnConflict = 4;
+    optional bool IsBatch = 5;
+    optional TExprList Settings = 6;
+}
+
+message TTableEffect {
+    optional uint32 Table = 1;
+    optional uint32 Type = 2;
+    optional TEffectOptions Options = 3;
+    repeated TNamedIU Columns = 4;
+    repeated TNamedIU Returning = 5;
+}
+
+// A shared Replicate binding; its input is an earlier operator.
+message TReplicateHub {
+    optional uint32 Input = 1;
+    optional TPosition Pos = 2;
+    optional uint32 NextOutputIndex = 3;
+}
+
+message TReplicatePort {
+    optional uint32 Hub = 1;
+    optional uint32 Index = 2;
+    repeated TIdPair Rebindings = 3;
+}
+
+message TOperator {
+    optional TPosition Pos = 1;
+    // Indices of earlier operators. Empty for a Replicate port: it reads its hub's input.
+    repeated uint32 Inputs = 2 [packed = true];
+
+    oneof Kind {
+        TEmptySource EmptySource = 10;
+        TRead Read = 11;
+        TMap Map = 12;
+        TFilter Filter = 13;
+        TJoin Join = 14;
+        TAggregate Aggregate = 15;
+        TGroupingSets GroupingSets = 16;
+        TWindow Window = 17;
+        TLimit Limit = 18;
+        TSort Sort = 19;
+        TUnionAll UnionAll = 20;
+        TTableLookup TableLookup = 21;
+        TTableEffect TableEffect = 22;
+        TReplicatePort Replicate = 23;
+    }
+}
+
+message TSubplan {
+    optional uint32 Binding = 1;
+    optional uint32 Plan = 2;
+    optional uint32 Type = 3;
+    repeated uint32 Tuple = 4 [packed = true];
+    optional uint32 ResultIU = 5;
+}
+
+message TPlanRoot {
+    repeated TInfoUnit InfoUnits = 1;
+    repeated TGeneratedCounter GeneratedCounters = 2;
+
+    // NYql::SerializeGraph of a list; each child is one expression or type expression root.
+    optional bytes Expressions = 3;
+    repeated TExprEntry ExpressionEntries = 4;
+
+    repeated TReplicateHub Hubs = 5;
+    // Post-order: inputs precede their consumers.
+    repeated TOperator Operators = 6;
+    repeated TSubplan Subplans = 7;
+
+    optional uint32 Input = 8;
+    optional TPosition Pos = 9;
+    repeated TNamedIU Columns = 10;
+    repeated string QueryColumns = 11;
+    optional bool PgSyntax = 12;
+    optional bool WithEffects = 13;
+    optional bool WithReturning = 14;
+
+    // NYql::EBlockEngineMode when this root reached the checkpoint: an early rule may disable blocks.
+    optional uint32 BlockEngineMode = 15;
+}
+
+// Which column statistics CBO needs. Collected on the imported plan, before the early
+// stages rewrite reads and predicates; the statistics themselves are always fetched fresh.
+message TColumnStatisticsRequest {
+    message TTableColumns {
+        optional string Table = 1;
+        repeated string Columns = 2;
+    }
+
+    message TTableTuples {
+        optional string Table = 1;
+        repeated TStringList Tuples = 2;
+    }
+
+    repeated TTableColumns CountMinSketch = 1;
+    repeated TTableColumns EqWidthHistogram = 2;
+    repeated TTableTuples EqHeightHistogram = 3;
+}
+
+message TPreCboSnapshot {
+    repeated TPlanRoot Roots = 1;
+    optional TColumnStatisticsRequest ColumnStatistics = 2;
+}

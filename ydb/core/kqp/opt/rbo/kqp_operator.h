@@ -495,6 +495,7 @@ private:
     friend class TOpReplicate;
     friend class TOpRoot;
     friend class TLogicalCopyContext;
+    friend class TPlanSnapshotAccess;
 
     TReplicate(TIntrusivePtr<IOperator> input, TPositionHandle pos, TInfoUnitRegistry& registry);
     TIntrusivePtr<IOperator> Input_;
@@ -551,6 +552,7 @@ public:
 private:
     friend class TReplicate;
     friend class TLogicalCopyContext;
+    friend class TPlanSnapshotAccess;
 
     TOpReplicate(TIntrusivePtr<TReplicate> input, ui32 index);
     void RefreshBindings();
