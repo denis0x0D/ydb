@@ -295,12 +295,11 @@ message TPlanRoot {
     optional TPosition Pos = 9;
     repeated TNamedIU Columns = 10;
     repeated string QueryColumns = 11;
-    optional bool PgSyntax = 12;
-    optional bool WithEffects = 13;
-    optional bool WithReturning = 14;
+    optional bool WithEffects = 12;
+    optional bool WithReturning = 13;
 
     // NYql::EBlockEngineMode when this root reached the checkpoint: an early rule may disable blocks.
-    optional uint32 BlockEngineMode = 15;
+    optional uint32 BlockEngineMode = 14;
 }
 
 // Which column statistics CBO needs. Collected on the imported plan, before the early

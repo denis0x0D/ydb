@@ -194,8 +194,7 @@ void TRuleBasedStage::RunStage(TOpRoot& root, TRBOContext& ctx) {
 }
 
 TExprNode::TPtr TRuleBasedOptimizer::Optimize(TVector<TIntrusivePtr<TOpRoot>>& roots, TRBOContext& rboCtx,
-    const TCheckpointHandler& onCheckpoint, bool restoredFromSnapshot)
-{
+                                              const TCheckpointHandler& onCheckpoint, bool restoredFromSnapshot) {
     bool needToLog = NYql::NLog::YqlLogger().NeedToLog(NYql::NLog::EComponent::CoreDq, NYql::NLog::ELevel::TRACE);
     auto& ctx = rboCtx.ExprCtx;
     int stageCounter = 0;

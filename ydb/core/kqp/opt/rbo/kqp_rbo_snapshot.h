@@ -22,4 +22,8 @@ NKikimrKqpRbo::TPlanRoot SerializePlanRoot(TOpRoot& root, TExprContext& ctx);
 // annotated again with ctx.TypeAnnTransformer. Throws if the root is malformed.
 TIntrusivePtr<TOpRoot> DeserializePlanRoot(const NKikimrKqpRbo::TPlanRoot& proto, TRBOContext& ctx);
 
+// Diagnostics: the fields that differ and the first differing expression; empty if equal.
+TString DescribePlanRootDifference(const NKikimrKqpRbo::TPlanRoot& expected, const NKikimrKqpRbo::TPlanRoot& actual,
+                                   TExprContext& ctx);
+
 } // namespace NKikimr::NKqp

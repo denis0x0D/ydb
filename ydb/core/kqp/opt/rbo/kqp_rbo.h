@@ -140,7 +140,7 @@ public:
     // This function applies RBO optimizations, translates given `root` to physical yql `callables`, applies lightweight (stage based) physical optimizations
     // and returns a root of the physical program. Roots restored from a pre-CBO snapshot start at the checkpoint.
     TExprNode::TPtr Optimize(TVector<TIntrusivePtr<TOpRoot>>& roots, TRBOContext& rboCtx,
-        const TCheckpointHandler& onCheckpoint = {}, bool restoredFromSnapshot = false);
+                             const TCheckpointHandler& onCheckpoint = {}, bool restoredFromSnapshot = false);
 
     // Adds a RBO stage to the RBO pipeline.
     void AddStage(std::unique_ptr<IRBOStage>&& stage) {

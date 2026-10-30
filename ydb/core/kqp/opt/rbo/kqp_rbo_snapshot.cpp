@@ -3,7 +3,10 @@
 #include <yql/essentials/ast/serialize/yql_expr_serialize.h>
 #include <yql/essentials/core/yql_expr_type_annotation.h>
 
+#include <google/protobuf/util/message_differencer.h>
+
 #include <algorithm>
+#include <functional>
 
 namespace NKikimr::NKqp {
 
@@ -55,8 +58,7 @@ public:
     }
 
     static TIntrusivePtr<TReplicate> MakeHub(TIntrusivePtr<IOperator> input, TPositionHandle pos,
-        TInfoUnitRegistry& registry, ui32 nextOutputIndex)
-    {
+                                             TInfoUnitRegistry& registry, ui32 nextOutputIndex) {
         auto hub = TReplicate::Create(std::move(input), pos, registry);
         hub->NextOutputIndex_ = nextOutputIndex;
         return hub;
@@ -136,7 +138,6 @@ public:
         for (const auto& column : Root.GetQueryColumns()) {
             Proto.AddQueryColumns(column);
         }
-        Proto.SetPgSyntax(Root.PlanProps.PgSyntax);
         Proto.SetWithEffects(Root.PlanProps.WithEffects);
         Proto.SetWithReturning(Root.PlanProps.WithReturning);
 
@@ -189,10 +190,50 @@ private:
         if (const auto it = TypeIds.find(&type); it != TypeIds.end()) {
             return it->second;
         }
-        const auto index = AddExpr(ExpandType(Root.Pos, type, Ctx));
+        const auto index = AddExpr(CanonicalTypeNode(*ExpandType(Root.Pos, type, Ctx)));
         Proto.MutableExpressionEntries(static_cast<int>(index))->SetIsType(true);
         TypeIds.emplace(&type, index);
         return index;
+    }
+
+    // ExpandType reuses nodes through a context-wide cache, so their sharing and positions
+    // depend on what the context expanded before. Rebuild a type expression with sharing
+    // given by its structure alone, so that equal plans serialize equally.
+    TExprNode::TPtr CanonicalTypeNode(const TExprNode& node) {
+        TExprNode::TListType children;
+        for (const auto& child : node.Children()) {
+            children.push_back(CanonicalTypeNode(*child));
+        }
+
+        TStringBuilder key;
+        key << static_cast<ui32>(node.Type());
+        if (node.IsAtom() || node.IsCallable()) {
+            key << ':' << node.Content().size() << ':' << node.Content();
+        }
+        if (node.IsAtom()) {
+            key << ':' << node.Flags();
+        }
+        for (const auto& child : children) {
+            key << ':' << reinterpret_cast<uintptr_t>(child.Get());
+        }
+
+        auto& canonical = CanonicalTypeNodes[key];
+        if (!canonical) {
+            switch (node.Type()) {
+                case TExprNode::Atom:
+                    canonical = Ctx.NewAtom(Root.Pos, node.Content(), node.Flags());
+                    break;
+                case TExprNode::Callable:
+                    canonical = Ctx.NewCallable(Root.Pos, node.Content(), std::move(children));
+                    break;
+                case TExprNode::List:
+                    canonical = Ctx.NewList(Root.Pos, std::move(children));
+                    break;
+                default:
+                    ythrow yexception() << "Unexpected " << node.Type() << " in a type expression";
+            }
+        }
+        return canonical;
     }
 
     static void WriteNamedIU(TInfoUnitId id, const TString& name, NKikimrKqpRbo::TNamedIU& proto) {
@@ -537,6 +578,7 @@ private:
     TExprNode::TListType Expressions;
     THashMap<const TExprNode*, ui32> ExpressionIds;
     THashMap<const TTypeAnnotationNode*, ui32> TypeIds;
+    THashMap<TString, TExprNode::TPtr> CanonicalTypeNodes;
 };
 
 class TPlanReader {
@@ -578,7 +620,6 @@ public:
         }
 
         root->SetInput(GetOperator(Proto.GetInput()));
-        Props->PgSyntax = Proto.GetPgSyntax();
         Props->WithEffects = Proto.GetWithEffects();
         Props->WithReturning = Proto.GetWithReturning();
         root->ComputeParents();
@@ -680,13 +721,22 @@ private:
                 continue;
             }
             if (!entry.GetArgTypes().empty()) {
-                std::vector<const TTypeAnnotationNode*> argTypes;
-                for (const auto type : entry.GetArgTypes()) {
-                    argTypes.push_back(GetType(type));
-                }
-                Y_ENSURE(Expressions[i]->IsLambda() && Expressions[i]->Head().ChildrenSize() == argTypes.size(),
+                // The restored nodes belong to this snapshot alone, so the arguments are typed in place:
+                // copying the lambda, as UpdateLambdaAllArgumentsTypes does, would split nodes it shares.
+                auto& args = Expressions[i]->Head();
+                Y_ENSURE(Expressions[i]->IsLambda() && args.ChildrenSize() == static_cast<size_t>(entry.ArgTypesSize()),
                     "Snapshot argument types do not match the lambda");
-                Y_ENSURE(UpdateLambdaAllArgumentsTypes(Expressions[i], argTypes, ExprCtx), "Cannot restore lambda argument types");
+                for (ui32 arg = 0; arg < args.ChildrenSize(); ++arg) {
+                    const auto* type = GetType(entry.GetArgTypes(static_cast<int>(arg)));
+                    if (const TTypeAnnotationNode* current = args.Child(arg)->GetTypeAnn()) {
+                        Y_ENSURE(IsSameAnnotation(*current, *type), "A shared lambda argument has conflicting types");
+                    } else {
+                        args.Child(arg)->SetTypeAnn(type);
+                    }
+                }
+                if (!args.GetTypeAnn()) {
+                    args.SetTypeAnn(ExprCtx.MakeType<TUnitExprType>());
+                }
             }
             Annotate(Expressions[i]);
         }
@@ -768,8 +818,7 @@ private:
     }
 
     TIntrusivePtr<IOperator> ReadTableLookup(const NKikimrKqpRbo::TTableLookup& proto, TIntrusivePtr<IOperator> input,
-        TPositionHandle pos) const
-    {
+                                             TPositionHandle pos) const {
         auto lookup = MakeIntrusive<TOpTableLookup>(std::move(input), pos, GetExpr(proto.GetTable()),
             ReadIds(proto.GetColumns()), ReadNamedIds(proto.GetLookupKeys()));
         lookup->JoinKind = proto.GetJoinKind();
@@ -801,8 +850,7 @@ private:
     }
 
     TIntrusivePtr<IOperator> ReadTableEffect(const NKikimrKqpRbo::TTableEffect& proto, TIntrusivePtr<IOperator> input,
-        TPositionHandle pos) const
-    {
+                                             TPositionHandle pos) const {
         const auto& optionsProto = proto.GetOptions();
         auto readStrings = [](bool has, const NKikimrKqpRbo::TStringList& list) -> std::optional<TVector<TString>> {
             if (!has) {
@@ -1005,6 +1053,72 @@ NKikimrKqpRbo::TPlanRoot SerializePlanRoot(TOpRoot& root, TExprContext& ctx) {
 
 TIntrusivePtr<TOpRoot> DeserializePlanRoot(const NKikimrKqpRbo::TPlanRoot& proto, TRBOContext& ctx) {
     return TPlanReader(proto, ctx).Read();
+}
+
+TString DescribePlanRootDifference(const NKikimrKqpRbo::TPlanRoot& expected, const NKikimrKqpRbo::TPlanRoot& actual,
+                                   TExprContext& ctx) {
+    TStringBuilder result;
+    TString fields;
+    google::protobuf::util::MessageDifferencer differencer;
+    differencer.ReportDifferencesToString(&fields);
+    differencer.IgnoreField(NKikimrKqpRbo::TPlanRoot::descriptor()->FindFieldByName("Expressions"));
+    if (!differencer.Compare(expected, actual)) {
+        result << fields;
+    }
+    if (expected.GetExpressions() == actual.GetExpressions()) {
+        return result;
+    }
+
+    const auto pos = ctx.AppendPosition(TPosition());
+    const auto left = DeserializeGraph(pos, expected.GetExpressions(), ctx);
+    const auto right = DeserializeGraph(pos, actual.GetExpressions(), ctx);
+    THashMap<const TExprNode*, std::pair<const TExprNode*, TString>> leftToRight;
+    THashMap<const TExprNode*, std::pair<const TExprNode*, TString>> rightToLeft;
+    auto describe = [&](const TExprNode& node) {
+        const auto& position = ctx.GetPosition(node.Pos());
+        const bool hasContent = node.IsAtom() || node.IsCallable() || node.IsArgument();
+        return TStringBuilder() << node.Type() << " '" << (hasContent ? node.Content() : TStringBuf())
+            << "' flags " << (node.IsAtom() ? node.Flags() : 0) << " at " << position.Row << ":" << position.Column
+            << " " << TStringBuf(position.File.data(), position.File.size()) << ", " << node.ChildrenSize() << " children";
+    };
+    // The first node whose kind, content, flags, position, arity or sharing differs.
+    std::function<bool(const TExprNode&, const TExprNode&, const TString&)> compare =
+        [&](const TExprNode& l, const TExprNode& r, const TString& path) {
+            const auto [leftIt, newLeft] = leftToRight.emplace(&l, std::make_pair(&r, path));
+            const auto [rightIt, newRight] = rightToLeft.emplace(&r, std::make_pair(&l, path));
+            if (!newLeft || !newRight) {
+                if (leftIt->second.first != &r || rightIt->second.first != &l) {
+                    result << path << ": sharing differs\n  " << describe(l) << ", first at "
+                        << (newLeft ? TString("-") : leftIt->second.second) << "\n  " << describe(r) << ", first at "
+                        << (newRight ? TString("-") : rightIt->second.second) << "\n";
+                    return false;
+                }
+                return true;
+            }
+            if (describe(l) != describe(r)) {
+                result << path << ":\n  " << describe(l) << "\n  " << describe(r) << "\n";
+                return false;
+            }
+            for (ui32 i = 0; i < l.ChildrenSize(); ++i) {
+                if (!compare(*l.Child(i), *r.Child(i), TStringBuilder() << path << "/" << i)) {
+                    return false;
+                }
+            }
+            return true;
+        };
+    auto print = [&](const TExprNode& node) {
+        return ConvertToAst(node, ctx, TExprAnnotationFlags::None, true).Root->ToString(
+            TAstPrintFlags::PerLine | TAstPrintFlags::ShortQuote);
+    };
+
+    result << "expressions: " << left->ChildrenSize() << " vs " << right->ChildrenSize() << "\n";
+    for (ui32 i = 0; i < std::min(left->ChildrenSize(), right->ChildrenSize()); ++i) {
+        if (!compare(*left->Child(i), *right->Child(i), TStringBuilder() << "expressions/" << i)) {
+            result << "expected:\n" << print(*left->Child(i)) << "\nactual:\n" << print(*right->Child(i)) << "\n";
+            break;
+        }
+    }
+    return result;
 }
 
 } // namespace NKikimr::NKqp

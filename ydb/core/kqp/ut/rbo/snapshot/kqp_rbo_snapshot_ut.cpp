@@ -2,6 +2,7 @@
 #include <ydb/core/kqp/ut/rbo/kqp_rbo_yql_workload_helpers.h>
 
 #include <array>
+#include <regex>
 
 namespace NKikimr::NKqp {
 
@@ -20,6 +21,16 @@ struct TExplained {
     TString Ast;
 };
 
+// Stage ids that differ between any two compilations of the same query.
+TString NormalizeStageIds(const TString& text) {
+    static const std::regex logicalId(R"('"_logical_id" '[0-9]+)");
+    static const std::regex id(R"('"_id" '"[0-9a-f-]+")");
+    static const std::regex stageGuid(R"("StageGuid":"[0-9a-f-]+")");
+    auto normalized = std::regex_replace(text.c_str(), logicalId, R"('"_logical_id" 'N)");
+    normalized = std::regex_replace(normalized, id, R"('"_id" '"GUID")");
+    return TString(std::regex_replace(normalized, stageGuid, R"("StageGuid":"GUID")"));
+}
+
 std::optional<TExplained> Explain(TKikimrRunner& kikimr, const TString& query, TString& issues) {
     auto session = kikimr.GetQueryClient().GetSession().GetValueSync().GetSession();
     auto result = session.ExecuteQuery(query, NYdb::NQuery::TTxControl::NoTx(),
@@ -29,7 +40,8 @@ std::optional<TExplained> Explain(TKikimrRunner& kikimr, const TString& query, T
         return std::nullopt;
     }
     UNIT_ASSERT_C(result.GetStats() && result.GetStats()->GetPlan() && result.GetStats()->GetAst(), "Explain without a plan");
-    return TExplained{TString(*result.GetStats()->GetPlan()), TString(*result.GetStats()->GetAst())};
+    return TExplained{NormalizeStageIds(TString(*result.GetStats()->GetPlan())),
+                      NormalizeStageIds(TString(*result.GetStats()->GetAst()))};
 }
 
 // A query the new RBO compiles must compile to the same physical query through its snapshot.
@@ -170,20 +182,16 @@ void AssertQueriesRoundTrip(bool spilling) {
 } // anonymous namespace
 
 Y_UNIT_TEST_SUITE(KqpRboSnapshot) {
-    Y_UNIT_TEST(TPCH_ColumnStore) {
-        AssertBenchmarkRoundTrips(EBenchType::TPCH, /*columnStore=*/true);
+    Y_UNIT_TEST_TWIN(TPCH, ColumnStore) {
+        AssertBenchmarkRoundTrips(EBenchType::TPCH, ColumnStore);
     }
 
-    Y_UNIT_TEST(TPCH_RowStore) {
-        AssertBenchmarkRoundTrips(EBenchType::TPCH, /*columnStore=*/false);
+    Y_UNIT_TEST_TWIN(TPCDS, ColumnStore) {
+        AssertBenchmarkRoundTrips(EBenchType::TPCDS, ColumnStore);
     }
 
-    Y_UNIT_TEST(TPCDS_ColumnStore) {
-        AssertBenchmarkRoundTrips(EBenchType::TPCDS, /*columnStore=*/true);
-    }
-
-    Y_UNIT_TEST(ClickBench_ColumnStore) {
-        AssertBenchmarkRoundTrips(EBenchType::CLICKBENCH, /*columnStore=*/true);
+    Y_UNIT_TEST_TWIN(ClickBench, ColumnStore) {
+        AssertBenchmarkRoundTrips(EBenchType::CLICKBENCH, ColumnStore);
     }
 
     Y_UNIT_TEST_TWIN(Queries, Spilling) {

@@ -214,8 +214,7 @@ IGraphTransformer::TStatus TKqpNewRBOTransformer::DoTransform(TExprNode::TPtr in
 }
 
 IGraphTransformer::TStatus TKqpNewRBOTransformer::RequestStatisticsAndContinue(TExprNode::TPtr input, TExprNode::TPtr& output,
-    TExprContext& ctx)
-{
+                                                                               TExprContext& ctx) {
     if (IsSuitableToRequestStatistics()) {
         // Async request for statistics.
         auto status = RequestColumnStatistics(ctx);
@@ -660,7 +659,8 @@ IGraphTransformer::TStatus TKqpNewRBOTransformer::ContinueOptimizations(TExprNod
                 auto restored = DeserializePlanRoot(proto, rboCtx);
                 auto again = SerializePlanRoot(*restored, ctx);
                 again.SetBlockEngineMode(proto.GetBlockEngineMode());
-                Y_ENSURE(again.SerializeAsString() == proto.SerializeAsString(), "Pre-CBO snapshot does not round-trip");
+                Y_ENSURE(again.SerializeAsString() == proto.SerializeAsString(),
+                    "Pre-CBO snapshot does not round-trip:\n" << DescribePlanRootDifference(proto, again, ctx));
                 return restored;
             }
         } catch (const std::exception& e) {
