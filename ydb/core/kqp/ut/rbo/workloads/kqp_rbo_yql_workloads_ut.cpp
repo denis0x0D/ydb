@@ -442,6 +442,10 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
         RunTPCH_YqlSingleQueryTest(9, true);
     }
 
+    Y_UNIT_TEST(TPCH_21) {
+        RunTPCH_YqlSingleQueryTest(21, true);
+    }
+
     Y_UNIT_TEST(TPCDS_14) {
         RunPerf_YqlTest(EBenchType::TPCDS, 14, true, true);
     }

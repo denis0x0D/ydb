@@ -415,6 +415,141 @@ Y_UNIT_TEST_SUITE(KqpRboDecorrelation) {
         UNIT_ASSERT(originalPort.GetInput() == input);
     }
 
+    Y_UNIT_TEST(ExistsPullsFiltersIntoSemiAndAntiJoins) {
+        for (const bool negated : {false, true}) {
+            for (const bool nullable : {false, true}) {
+                NTests::TIdTestContext f;
+                const auto outerKey = f.Id(), outerSupplier = f.Id();
+                const auto innerKey = f.Id(), innerSupplier = f.Id(), payload = f.Id();
+                const auto keyCapture = f.Id(), supplierCapture = f.Id();
+                const auto supplierAlias = f.Id(), projection = f.Id(), call = f.Id();
+                auto left = f.Read({outerKey, outerSupplier});
+                auto source = f.Read({innerKey, innerSupplier, payload});
+                f.SetType(*left, nullable ? TUnorderedIUs{outerKey, outerSupplier} : TUnorderedIUs{});
+                f.SetType(*source, nullable ? TUnorderedIUs{innerKey, innerSupplier} : TUnorderedIUs{});
+
+                TDependencyIUs captures;
+                captures.Add(keyCapture, TCapturedIU{outerKey, left->GetIUType(outerKey, f.ExprCtx)});
+                captures.Add(supplierCapture, TCapturedIU{outerSupplier, left->GetIUType(outerSupplier, f.ExprCtx)});
+                auto captured = MakeIntrusive<TOpAddDependencies>(source, f.Pos, std::move(captures));
+                const auto equality = negated
+                    ? MakeBinaryPredicate("==", f.Column(keyCapture), f.Column(innerKey))
+                    : MakeBinaryPredicate("==", f.Column(innerKey), f.Column(keyCapture));
+                auto local = MakeBinaryPredicate(">", f.Column(payload), f.Constant());
+                auto outerOnly = MakeBinaryPredicate(">", f.Column(supplierCapture), f.Constant());
+                auto lower = MakeIntrusive<TOpFilter>(captured, f.Pos,
+                    MakeConjunction({equality, local, outerOnly}, false));
+                auto aliases = f.Copies(lower, {{supplierAlias, innerSupplier}});
+                auto upper = MakeIntrusive<TOpFilter>(aliases, f.Pos,
+                    MakeBinaryPredicate("!=", f.Column(supplierAlias), f.Column(supplierCapture)));
+                auto body = f.Copies(upper, {{projection, innerKey}});
+                f.SetType(*body, nullable
+                    ? TUnorderedIUs{innerKey, innerSupplier, keyCapture, supplierCapture, supplierAlias, projection}
+                    : TUnorderedIUs{});
+                f.Props.Subplans.Add(call, body, ESubplanType::EXISTS);
+                f.Props.Subplans.RefreshDependencies(call);
+                auto predicate = negated ? MakeNegation(f.Column(call)) : f.Column(call);
+                auto filter = MakeIntrusive<TOpFilter>(left, f.Pos, predicate);
+
+                auto result = TInlineSimpleInExistsSubplanRule().SimpleMatchAndApply(filter, f.RboCtx, f.Props);
+
+                auto& join = CastOperator<TOpJoin>(*result);
+                UNIT_ASSERT_VALUES_EQUAL(join.JoinKind, negated ? "LeftOnly" : "LeftSemi");
+                UNIT_ASSERT(join.GetLeftInput() == left);
+                UNIT_ASSERT_VALUES_EQUAL(join.JoinKeys.Items().size(), 1);
+                UNIT_ASSERT_VALUES_EQUAL(join.JoinKeys.Items()[0].first, outerKey);
+                UNIT_ASSERT_VALUES_EQUAL(join.JoinKeys.Items()[0].second, innerKey);
+                UNIT_ASSERT(!HasEqualNullsKey(join.JoinKeys));
+                UNIT_ASSERT_VALUES_EQUAL(join.JoinFilters.size(), 2);
+                auto renamedOuterOnly = outerOnly.ApplyRenames({{supplierCapture, outerSupplier}});
+                UNIT_ASSERT(join.JoinFilters[0].GetRawInputIUs() == renamedOuterOnly.GetRawInputIUs());
+                UNIT_ASSERT(join.JoinFilters[1].GetRawInputIUs() == (TUnorderedIUs{supplierAlias, outerSupplier}));
+                UNIT_ASSERT(join.GetRightInput()->GetOutputIUs().Contains(projection));
+                UNIT_ASSERT(result->GetOutputIUs() == left->GetOutputIUs());
+                UNIT_ASSERT(!f.Props.Subplans.Contains(call));
+                size_t localFilters = 0;
+                for (const auto& item : IterateSubtree(result.get())) {
+                    const auto& op = *item.Current;
+                    UNIT_ASSERT(op.Kind != EOperator::DependentJoin && op.Kind != EOperator::AddDependencies
+                        && op.Kind != EOperator::Aggregate && op.Kind != EOperator::Replicate);
+                    if (op.Kind == EOperator::Filter) {
+                        ++localFilters;
+                        UNIT_ASSERT(CastOperator<TOpFilter>(op).GetFilterExpression().GetRawInputIUs() == TUnorderedIUs{payload});
+                    }
+                }
+                UNIT_ASSERT_VALUES_EQUAL(localFilters, 1);
+                NTests::AssertIdInvariants(*result, f.Props);
+            }
+        }
+    }
+
+    Y_UNIT_TEST(ExistsFilterPullupKeepsTheDependentJoinFallback) {
+        for (const TString barrier : {"limit", "aggregate", "correlated_map", "non_equi", "volatile",
+                                     "row_join", "inline_filters", "unsupported_key"}) {
+            NTests::TIdTestContext f;
+            if (barrier == "row_join") {
+                f.Config->SetUseBlockHashJoin(false);
+            } else if (barrier == "inline_filters") {
+                f.Config->SetEnableInlineJoinFiltersAfterCBO(true);
+            }
+            const auto outer = f.Id(), inner = f.Id(), local = f.Id(), call = f.Id();
+            auto left = f.Read({outer});
+            auto source = f.Read({inner});
+            const auto setType = [&](IOperator& op) {
+                f.SetType(op);
+                if (barrier == "unsupported_key") {
+                    TVector<const TItemExprType*> fields;
+                    const auto* keyType = f.ExprCtx.MakeType<TListExprType>(f.ExprCtx.MakeType<TDataExprType>(EDataSlot::Int32));
+                    for (const auto id : op.GetOutputIUs()) {
+                        fields.push_back(f.ExprCtx.MakeType<TItemExprType>(f.ExprCtx.GetIndexAsString(id), keyType));
+                    }
+                    op.Type = f.ExprCtx.MakeType<TListExprType>(f.ExprCtx.MakeType<TStructExprType>(fields));
+                }
+            };
+            setType(*left);
+            setType(*source);
+            TDependencyIUs captures;
+            captures.Add(local, TCapturedIU{outer, left->GetIUType(outer, f.ExprCtx)});
+            auto captured = MakeIntrusive<TOpAddDependencies>(source, f.Pos, std::move(captures));
+            auto equality = MakeBinaryPredicate(barrier == "non_equi" ? ">" : "==", f.Column(inner), f.Column(local));
+            if (barrier == "volatile") {
+                equality = MakeBinaryPredicate("And", equality,
+                    MakeBinaryPredicate(">", MakeUnaryCallable("Random", f.Column(inner)), f.Constant()));
+            } else if (barrier == "row_join" || barrier == "inline_filters" || barrier == "unsupported_key") {
+                equality = MakeBinaryPredicate("And", equality,
+                    MakeBinaryPredicate("!=", f.Column(inner), f.Column(local)));
+            }
+            auto correlatedFilter = MakeIntrusive<TOpFilter>(captured, f.Pos, equality);
+            TIntrusivePtr<IOperator> body = correlatedFilter;
+            if (barrier == "limit") {
+                body = MakeIntrusive<TOpLimit>(body, f.Pos, f.Constant(), EOpPhase::Undefined);
+            } else if (barrier == "aggregate") {
+                TAggregationIUs functions;
+                functions.Add(f.Id(), TOpAggregationTraits{inner, "count"});
+                body = MakeIntrusive<TOpAggregate>(body, std::move(functions), TOrderedIUs<>{},
+                    EOpPhase::Undefined, false, f.Pos);
+            } else if (barrier == "correlated_map") {
+                body = f.Copies(body, {{f.Id(), local}});
+            }
+            setType(*body);
+            f.Props.Subplans.Add(call, body, ESubplanType::EXISTS);
+            f.Props.Subplans.RefreshDependencies(call);
+            auto filter = MakeIntrusive<TOpFilter>(left, f.Pos, f.Column(call));
+
+            auto result = TInlineSimpleInExistsSubplanRule().SimpleMatchAndApply(filter, f.RboCtx, f.Props);
+
+            size_t dependentJoins = 0;
+            for (const auto& item : IterateSubtree(result.get())) {
+                dependentJoins += item.Current->Kind == EOperator::DependentJoin;
+            }
+            UNIT_ASSERT_VALUES_EQUAL_C(dependentJoins, 1, barrier);
+            UNIT_ASSERT(correlatedFilter->GetInput() == captured);
+            UNIT_ASSERT(correlatedFilter->GetFilterExpression().GetRawInputIUs() == equality.GetRawInputIUs());
+            UNIT_ASSERT(!f.Props.Subplans.Contains(call));
+            NTests::AssertIdInvariants(*result, f.Props);
+        }
+    }
+
     Y_UNIT_TEST(SimpleInLeavesRepeatedCallsForTheMarkJoinPath) {
         for (const bool repeated : {false, true}) {
             NTests::TIdTestContext f;

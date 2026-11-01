@@ -1,9 +1,140 @@
 #include "kqp_rules_include.h"
 
 #include "decorrelation/dependent_join_pushdown.h"
+#include <ydb/core/kqp/opt/rbo/copy_logical_subtree.h>
 
 namespace NKikimr {
 namespace NKqp {
+
+namespace {
+
+// Rebuild only the unary spine owned by this call. A Replicate or another
+// operator is a boundary: correlation below it needs the general DJ rules.
+TIntrusivePtr<IOperator> PullUpCorrelatedFilters(const TIntrusivePtr<IOperator>& input,
+    const TUnorderedIUs& dependencies, const TUnorderedIUs& outerIUs,
+    TSubstitutions& captures, TVector<TExpression>& lifted, TPlanProps& props)
+{
+    if (input->Kind != EOperator::Filter && input->Kind != EOperator::Map && input->Kind != EOperator::AddDependencies) {
+        return HasFreeCorrelation(input, dependencies) ? nullptr : input;
+    }
+    if (!input->GetSubplanIUs(props.Subplans).Empty()) {
+        return nullptr;
+    }
+
+    auto right = PullUpCorrelatedFilters(input->GetChild(0), dependencies, outerIUs, captures, lifted, props);
+    if (!right) {
+        return nullptr;
+    }
+
+    if (input->Kind == EOperator::AddDependencies) {
+        for (const auto& [local, capture] : CastOperator<TOpAddDependencies>(*input).GetDependencies().Items()) {
+            if (!dependencies.Contains(capture.Outer) || !outerIUs.Contains(capture.Outer)) {
+                return nullptr;
+            }
+            captures.Add(local, capture.Outer);
+        }
+        return right;
+    }
+
+    if (input->Kind == EOperator::Map) {
+        auto& map = CastOperator<TOpMap>(*input);
+        // Maps append columns, so the inner inputs of a lifted predicate stay
+        // available. A map computing an outer-dependent value needs a DJ.
+        if (!map.GetUsedIUs(props).IsSubsetOf(right->GetOutputIUs())) {
+            return nullptr;
+        }
+        return MakeIntrusive<TOpMap>(right, map.Pos, map.GetMapElements(), map.NeedToPush);
+    }
+
+    auto& filter = CastOperator<TOpFilter>(*input);
+    auto available = right->GetOutputIUs();
+    available.UnionWith(outerIUs);
+    TVector<TExpression> local;
+    for (const auto& conjunct : filter.GetFilterExpression().SplitConjunct()) {
+        auto predicate = conjunct.ApplyRenames(captures);
+        const auto& used = predicate.GetRawInputIUs();
+        if (!used.IsSubsetOf(available)) {
+            return nullptr;
+        }
+        if (used.IsSubsetOf(right->GetOutputIUs())) {
+            local.push_back(std::move(predicate));
+        } else {
+            lifted.push_back(std::move(predicate));
+        }
+    }
+    if (!local.empty()) {
+        right = MakeIntrusive<TOpFilter>(right, filter.Pos, MakeConjunction(local, props.PgSyntax));
+    }
+    return right;
+}
+
+TIntrusivePtr<IOperator> TryInlineCorrelatedExists(const TIntrusivePtr<IOperator>& left,
+    const TSubplanEntry& entry, const TString& joinKind, TPositionHandle pos, TRBOContext& ctx, TPlanProps& props)
+{
+    // Pullup changes how often the independent right input and the predicates
+    // are evaluated. Leave volatile expressions to the existing decorrelator.
+    if (!CanDuplicateSubtree(*entry.Plan, props.Subplans)) {
+        return nullptr;
+    }
+
+    const auto& outerIUs = left->GetOutputIUs();
+    TSubstitutions captures;
+    TVector<TExpression> lifted;
+    auto right = PullUpCorrelatedFilters(entry.Plan, entry.DependentIUs, outerIUs, captures, lifted, props);
+    if (!right) {
+        return nullptr;
+    }
+
+    TJoinIUs keys;
+    TVector<TExpression> filters;
+    const auto& innerIUs = right->GetOutputIUs();
+    for (const auto& predicate : lifted) {
+        if (predicate.MaybeEquiJoinCondition()) {
+            TEquiJoinCondition condition(predicate);
+            const auto a = condition.GetLeftIU();
+            const auto b = condition.GetRightIU();
+            if (outerIUs.Contains(a) && innerIUs.Contains(b)) {
+                keys.Add(a, b);
+                continue;
+            }
+            if (outerIUs.Contains(b) && innerIUs.Contains(a)) {
+                keys.Add(b, a);
+                continue;
+            }
+        }
+        // This includes outer-only predicates: especially for NOT EXISTS,
+        // they belong to ON and must not filter the outer input.
+        filters.push_back(predicate);
+    }
+    // Keep non-equi-only joins on the general path until all physical join
+    // implementations support filtered semi/anti joins without hash keys.
+    if (keys.Items().empty()) {
+        return nullptr;
+    }
+    if (!filters.empty()) {
+        // Expanding a filtered semi/anti join requires a non-null unique key
+        // on the outer input. EXISTS callers need not have one, so use this
+        // shortcut only when the filters can execute in the block join.
+        if (!ctx.KqpCtx.Config->GetUseBlockHashJoin() || ctx.KqpCtx.Config->GetEnableInlineJoinFiltersAfterCBO()) {
+            return nullptr;
+        }
+        const auto isScalarKey = [&](const IOperator& op, TInfoUnitId id) {
+            const auto* type = op.Type ? op.GetIUType(id, ctx.ExprCtx) : nullptr;
+            while (type && type->GetKind() == ETypeAnnotationKind::Optional) {
+                type = type->Cast<TOptionalExprType>()->GetItemType();
+            }
+            return type && type->GetKind() == ETypeAnnotationKind::Data;
+        };
+        for (const auto& key : keys.Items()) {
+            if (!isScalarKey(*left, key.first) || !isScalarKey(*entry.Plan, key.second)) {
+                return nullptr;
+            }
+        }
+    }
+    return MakeIntrusive<TOpJoin>(left, right, pos, joinKind, keys, filters);
+}
+
+} // anonymous namespace
 
 bool TInlineSimpleInExistsSubplanRule::QuickMatch(const TIntrusivePtr<IOperator>& input, const TPlanProps& props) const {
     if (input->Kind != EOperator::Filter || props.Subplans.Empty()) {
@@ -110,19 +241,24 @@ TIntrusivePtr<IOperator> TInlineSimpleInExistsSubplanRule::SimpleMatchAndApply(c
                          TStringBuilder() << "Correlation column " << props.InfoUnitRegistry.GetDebugName(dependency) << " is not produced by the outer plan");
             }
 
-            // (Domain dependent join leftInput)
-            // The outer plan and the domain read leftInput through a Replicate, the domain under fresh IDs.
-            auto domain = MakeSubplanDomain(leftJoinInput, subplanEntry->DependentIUs, filter->Pos, props);
-            TJoinIUs joinKeys = domain.Keys;
-            TIntrusivePtr<IOperator> rightInput = std::move(domain).Bind(subplan, filter->Pos);
-
-            // Add domain keys for join keys.
-            joinKeys = MakeNullSafeJoinKeys(leftJoinInput, rightInput, joinKeys, filter->Pos, ctx, props);
-            for (const auto& key : tupleJoinKeys.Items()) {
-                joinKeys.Add(key);
+            if (subplanEntry->Type == ESubplanType::EXISTS) {
+                join = TryInlineCorrelatedExists(leftJoinInput, *subplanEntry, joinKind, input->Pos, ctx, props);
             }
+            if (!join) {
+                // (Domain dependent join leftInput)
+                // The outer plan and the domain read leftInput through a Replicate, the domain under fresh IDs.
+                auto domain = MakeSubplanDomain(leftJoinInput, subplanEntry->DependentIUs, filter->Pos, props);
+                TJoinIUs joinKeys = domain.Keys;
+                TIntrusivePtr<IOperator> rightInput = std::move(domain).Bind(subplan, filter->Pos);
 
-            join = MakeIntrusive<TOpJoin>(leftJoinInput, rightInput, input->Pos, joinKind, joinKeys);
+                // Add domain keys for join keys.
+                joinKeys = MakeNullSafeJoinKeys(leftJoinInput, rightInput, joinKeys, filter->Pos, ctx, props);
+                for (const auto& key : tupleJoinKeys.Items()) {
+                    joinKeys.Add(key);
+                }
+
+                join = MakeIntrusive<TOpJoin>(leftJoinInput, rightInput, input->Pos, joinKind, joinKeys);
+            }
         } else {
             join = MakeIntrusive<TOpJoin>(leftJoinInput, subplan, input->Pos, joinKind, tupleJoinKeys);
         }

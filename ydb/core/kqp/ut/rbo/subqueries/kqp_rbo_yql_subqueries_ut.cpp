@@ -351,6 +351,65 @@ void TestDecorrelation(bool columnTables, bool equalNullsJoinKeys = false) {
          )",
          R"([[2];[3];[4];[5];[6];[7];[8];[9];[10];[11];[12]])"},
 
+        // Q21's equality and inequality become a semi/anti join key and filter.
+        {R"(
+            SELECT t1.a FROM `/Root/t1` AS t1
+            WHERE EXISTS (SELECT * FROM `/Root/t2` AS t2
+                          WHERE t2.b == t1.b AND t2.a != t1.a)
+              AND NOT EXISTS (SELECT * FROM `/Root/t3` AS t3
+                              WHERE t3.b == t1.b AND t3.a != t1.a AND t3.c > 4)
+            ORDER BY t1.a;
+         )",
+         R"([[2];[5];[6];[10]])"},
+
+        // Nullable correlation keys use SQL equality, including for anti joins.
+        {R"(
+            SELECT t1.a FROM `/Root/t1` AS t1
+            WHERE EXISTS (SELECT 1 FROM `/Root/t2` AS t2
+                          WHERE t2.e == t1.e AND t2.a != t1.a AND t2.a <= 5)
+            ORDER BY t1.a;
+         )",
+         R"([[6];[7];[8];[9];[10];[11];[12]])"},
+
+        {R"(
+            SELECT t1.a FROM `/Root/t1` AS t1
+            WHERE NOT EXISTS (SELECT 1 FROM `/Root/t2` AS t2
+                              WHERE t2.e == t1.e AND t2.a != t1.a AND t2.a <= 5)
+            ORDER BY t1.a;
+         )",
+         R"([[1];[2];[3];[4];[5]])"},
+
+        // False/unknown outer-only predicates prevent matches; they must not
+        // remove the preserved outer row of an anti join.
+        {R"(
+            SELECT t1.a FROM `/Root/t1` AS t1
+            WHERE NOT EXISTS (SELECT 1 FROM `/Root/t2` AS t2
+                              WHERE t2.b == t1.b AND t1.e > 1)
+            ORDER BY t1.a;
+         )",
+         R"([[1];[3];[4];[5];[7];[8];[9];[11];[12]])"},
+
+        // Pullup preserves duplicate outer rows even with multiple RHS matches.
+        {R"(
+            $outer = SELECT a, b FROM `/Root/t1` UNION ALL SELECT a, b FROM `/Root/t1`;
+            SELECT t1.a FROM $outer AS t1
+            WHERE EXISTS (SELECT 1 FROM `/Root/t2` AS t2
+                          WHERE t2.b == t1.b AND t2.a != t1.a)
+            ORDER BY t1.a;
+         )",
+         R"([[1];[1];[2];[2];[4];[4];[5];[5];[6];[6];[8];[8];[9];[9];[10];[10];[12];[12]])"},
+
+        // The DJ fallback preserves duplicates when native join filters are off.
+        {R"(
+            PRAGMA ydb.UseBlockHashJoin = 'false';
+            $outer = SELECT a, b FROM `/Root/t1` UNION ALL SELECT a, b FROM `/Root/t1`;
+            SELECT t1.a FROM $outer AS t1
+            WHERE EXISTS (SELECT 1 FROM `/Root/t2` AS t2
+                          WHERE t2.b == t1.b AND t2.a != t1.a)
+            ORDER BY t1.a;
+         )",
+         R"([[1];[1];[2];[2];[4];[4];[5];[5];[6];[6];[8];[8];[9];[9];[10];[10];[12];[12]])"},
+
         {R"(
             SELECT t1.a FROM `/Root/t1` as t1
             WHERE EXISTS (SELECT 1 FROM `/Root/t2` as t2 WHERE t2.b == COALESCE(t1.e, 0) AND t2.a <= 3)
