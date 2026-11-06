@@ -92,6 +92,9 @@ class TExpression {
     // Simultaneous ID substitution, not a change to registry display labels.
     TExpression ApplyRenames(const TSubstitutions& substitutions) const;
 
+    // Replace each reference to an ID with its definition, a single-row lambda evaluated over this row.
+    TExpression ApplyDefinitions(const THashMap<TInfoUnitId, TExpression>& definitions) const;
+
     // Apply a generic replace map to the lambda of the expression
     TExpression ApplyReplaceMap(const TNodeOnNodeOwnedMap& map, TRBOContext& ctx) const;
 

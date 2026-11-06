@@ -410,6 +410,27 @@ TExpression TExpression::ApplyRenames(const TSubstitutions& substitutions) const
     return TExpression(RewriteRow(Node, replacements, *Ctx), Ctx, PlanProps);
 }
 
+TExpression TExpression::ApplyDefinitions(const THashMap<TInfoUnitId, TExpression>& definitions) const {
+    Y_ENSURE(Node && Node->IsLambda() && Node->Head().ChildrenSize() == 1, "Expected a single-row lambda");
+    const auto& row = Node->Head().Head();
+    TNodeOnNodeOwnedMap replacements;
+    VisitExpr(GetExpressionBody(), [&](const TExprNode::TPtr& node) {
+        if (!IsRowMember(*node, row)) {
+            return true;
+        }
+        if (const auto* definition = definitions.FindPtr(GetMemberId(*node))) {
+            const auto& lambda = definition->Node;
+            Y_ENSURE(lambda && lambda->IsLambda() && lambda->Head().ChildrenSize() == 1, "Expected a single-row definition");
+            replacements.emplace(node.Get(), Ctx->ReplaceNode(lambda->TailPtr(), lambda->Head().Head(), Node->Head().HeadPtr()));
+        }
+        return false;
+    });
+    if (replacements.empty()) {
+        return *this;
+    }
+    return TExpression(RewriteRow(Node, replacements, *Ctx), Ctx, PlanProps);
+}
+
 TExpression TExpression::ApplyReplaceMap(const TNodeOnNodeOwnedMap& map, TRBOContext& ctx) const {
     Y_ENSURE(Node->IsLambda(), "Expression node is not lambda");
     TOptimizeExprSettings settings(&ctx.TypeCtx);
