@@ -31,6 +31,43 @@ using namespace NKikimr::NKqp;
 
 namespace NKikimr::NKqp {
 
+namespace {
+
+// The column table read right under an aggregate with keys, in the stage of the aggregate, and the storage columns of
+// those keys. As in the old optimizer, PRAGMA OptEnableOlapProvideComputeSharding passes them to the read, so column
+// shards send all rows of a key to one compute task.
+std::optional<std::pair<const IOperator*, TVector<TString>>> MatchComputeShardingKeys(const TOpAggregate& aggregate,
+                                                                                    const TInfoUnitRegistry& registry) {
+    const auto& keys = aggregate.GetKeyColumns().Items();
+    if (aggregate.GetAggregationPhase() != EOpPhase::Intermediate || keys.empty()) {
+        return std::nullopt;
+    }
+    auto* input = aggregate.GetInput().Get();
+    if (input->Kind == EOperator::Map) {
+        input = CastOperator<TOpMap>(input)->GetInput().Get();
+    }
+    if (input->Kind != EOperator::Source || input->Props.StageId != aggregate.Props.StageId) {
+        return std::nullopt;
+    }
+    const auto& read = CastOperator<TOpRead>(*input);
+    if (read.GetTableStorageType() != NYql::EStorageType::ColumnStorage) {
+        return std::nullopt;
+    }
+    TVector<TString> columns;
+    for (const auto key : keys) {
+        if (!read.GetColumns().Contains(key)) {
+            return std::nullopt;
+        }
+        const auto& column = registry.Get(key).GetColumnName();
+        if (std::find(columns.begin(), columns.end(), column) == columns.end()) {
+            columns.push_back(column);
+        }
+    }
+    return std::make_pair(input, std::move(columns));
+}
+
+} // namespace
+
 TExprNode::TPtr ConvertToPhysical(const TVector<TIntrusivePtr<TOpRoot>>& roots, TRBOContext& rboCtx) {
     TExprContext& ctx = rboCtx.ExprCtx;
     ui32 stageInputCounter = 0;
@@ -58,6 +95,8 @@ TExprNode::TPtr ConvertToPhysical(const TVector<TIntrusivePtr<TOpRoot>>& roots, 
         forcedDistinctKey = *key;
     }
     const ui64 forcedDistinctLimit = config.OptForceOlapPushdownDistinctLimit.Get().GetOrElse(0);
+    const bool provideComputeSharding = config.HasOptEnableOlapPushdown() && config.HasOptEnableOlapProvideComputeSharding()
+        && config.GetEnableOlapPushdownAggregate();
 
     TVector<TPhysicalNames> allNames;
     allNames.reserve(roots.size());
@@ -94,12 +133,19 @@ TExprNode::TPtr ConvertToPhysical(const TVector<TIntrusivePtr<TOpRoot>>& roots, 
         THashSet<const IOperator*> olapAggregateInputs;
         // By read, the trivial DISTINCT whose key the read program marks.
         THashMap<const IOperator*, TOlapDistinct> olapDistincts;
+        // By read, the storage columns column shards shard the rows by, see MatchComputeShardingKeys.
+        THashMap<const IOperator*, TVector<TString>> computeShardingKeys;
         for (const auto& iter : *root) {
             const auto* op = iter.Current;
             if (op->Kind != EOperator::Aggregate) {
                 continue;
             }
             const auto& aggregate = CastOperator<TOpAggregate>(*op);
+            if (provideComputeSharding) {
+                if (auto sharding = MatchComputeShardingKeys(aggregate, root->PlanProps.InfoUnitRegistry)) {
+                    computeShardingKeys.emplace(sharding->first, std::move(sharding->second));
+                }
+            }
             if (!aggregate.IsPushedToOlap()) {
                 if (forcedDistinctKey) {
                     if (auto olapDistinct = MatchOlapDistinct(aggregate, *forcedDistinctKey, root->PlanProps.InfoUnitRegistry)) {
@@ -133,6 +179,9 @@ TExprNode::TPtr ConvertToPhysical(const TVector<TIntrusivePtr<TOpRoot>>& roots, 
                 builder.WithOlapAggregate(*olapAggregate);
             } else if (const auto* olapDistinct = olapDistincts.FindPtr(&opRead)) {
                 builder.WithOlapDistinct(*olapDistinct, forcedDistinctLimit);
+            }
+            if (const auto* keys = computeShardingKeys.FindPtr(&opRead)) {
+                builder.WithComputeShardingKeys(*keys);
             }
             auto body = builder.BuildPhysicalOp();
             if (const auto& stageSource = builder.GetStageSource()) {

@@ -43,6 +43,13 @@ public:
         return *this;
     }
 
+    // Tell column shards to send all rows with the same values of the storage columns `keys`
+    // to one compute task, as PRAGMA OptEnableOlapProvideComputeSharding asks.
+    TPhysicalSourceBuilder& WithComputeShardingKeys(TVector<TString> keys) {
+        ComputeShardingKeys = std::move(keys);
+        return *this;
+    }
+
     NPhysicalConvertionUtils::TStageBody BuildPhysicalOp() override;
 
     // The source input of a row read stage, set by BuildPhysicalOp. The body it returns reads the argument,
@@ -73,5 +80,6 @@ private:
     const TOlapAggregate* OlapAggregate = nullptr;
     const TOlapDistinct* OlapDistinct = nullptr;
     ui64 OlapDistinctLimit = 0;
+    TVector<TString> ComputeShardingKeys;
     std::optional<TStageSource> StageSource;
 };

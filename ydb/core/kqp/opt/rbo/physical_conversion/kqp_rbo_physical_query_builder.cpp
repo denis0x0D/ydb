@@ -283,12 +283,18 @@ TVector<TExprNode::TPtr> TPhysicalQueryBuilder::BuildPhysicalStageGraph(int root
                         TypeAnnotate(settings.ItemsLimit);
                         settings.SetItemsLimit(BuildMaterialize(rootIdx, settings.ItemsLimit, /*asTuple=*/false));
                     }
+                    auto newSettings = settings.BuildNode(ctx, readPtr->Pos()).Ptr();
+                    // TKqpReadTableSettings does not keep the compute sharding keys, so carry them over.
+                    if (const auto groupBy = NYql::GetSetting(read.Settings().Ref(), TKqpReadTableSettings::GroupByFieldNames)) {
+                        newSettings = NYql::AddSetting(*newSettings, readPtr->Pos(), TString(TKqpReadTableSettings::GroupByFieldNames),
+                                                       groupBy->ChildPtr(1), ctx);
+                    }
                     // clang-fomrat off
                     const auto newRead = Build<TKqpBlockReadOlapTableRanges>(ctx, readPtr->Pos())
                         .Table(read.Table())
                         .Ranges(ranges)
                         .Columns(read.Columns())
-                        .Settings(settings.BuildNode(ctx, readPtr->Pos()))
+                        .Settings(newSettings)
                         .ExplainPrompt(read.ExplainPrompt())
                         .Process(read.Process())
                     .Done().Ptr();

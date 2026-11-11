@@ -6,6 +6,7 @@
 
 #include <yql/essentials/core/yql_expr_optimize.h>
 #include <yql/essentials/core/yql_expr_type_annotation.h>
+#include <yql/essentials/core/yql_opt_utils.h>
 
 using namespace NYql::NNodes;
 using namespace NKikimr;
@@ -310,12 +311,22 @@ NPhysicalConvertionUtils::TStageBody TPhysicalSourceBuilder::BuildPhysicalOp() {
                 settings.SequentialInFlight = 1;
             }
 
+            TExprNode::TPtr settingsNode = settings.BuildNode(Ctx, Pos).Ptr();
+            if (!ComputeShardingKeys.empty()) {
+                TExprNode::TListType keys;
+                for (const auto& key : ComputeShardingKeys) {
+                    keys.push_back(Ctx.NewAtom(Pos, key));
+                }
+                settingsNode = NYql::AddSetting(*settingsNode, Pos, TString(TKqpReadTableSettings::GroupByFieldNames),
+                                                Ctx.NewList(Pos, std::move(keys)), Ctx);
+            }
+
             // clang-format off
             auto olapRead = Build<TKqpBlockReadOlapTableRanges>(Ctx, Pos)
                 .Table(Read.TableCallable)
                 .Ranges(ranges)
                 .Columns().Add(columns).Build()
-                .Settings(settings.BuildNode(Ctx, Pos))
+                .Settings(settingsNode)
                 .ExplainPrompt<TCoNameValueTupleList>().Build()
                 .Process(processLambda)
             .Done().Ptr();
