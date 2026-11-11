@@ -41,9 +41,10 @@ TExprNode::TPtr TPhysicalSourceBuilder::AddOlapAggregate(TExprNode::TPtr process
 
         // Column shards return AVG as its sum and count. Cast the input to Double
         // before SUM, so integer sums cannot overflow and Float sums are Double.
+        // Without scalar apply the sum keeps the stored type, see BuildOlapAverageState.
         TString sumColumn = column;
         const auto& columnType = *Read.GetIUType(*aggregation.Column, Ctx);
-        if (IsOlapAverageCast(columnType)) {
+        if (OlapAggregate->CastAverageInput && IsOlapAverageCast(columnType)) {
             const auto [it, inserted] = averageInputs.emplace(column, GetOlapAggregateField(aggregation.Output, "avg_input"));
             if (inserted) {
                 projections.push_back(BuildOlapDoubleCast(column, columnType, it->second));
@@ -153,35 +154,29 @@ TExprNode::TPtr TPhysicalSourceBuilder::BuildOlapAggregateRow(const TProgramFiel
 
 TExprNode::TPtr TPhysicalSourceBuilder::BuildOlapAverageState(const TOlapAggregation& aggregation, const TProgramFields& fields) const {
     // The AVG state of TPhysicalAggregationBuilder is (sum as Double, count).
-    // AddOlapAggregate already sums Double values.
+    // AddOlapAggregate sums Double values, unless the read program cannot cast the input:
+    // then, as in the old optimizer, the sum of the stored type is converted here.
+    const auto& columnType = *Read.GetIUType(*aggregation.Column, Ctx);
+    const bool convertSum = !OlapAggregate->CastAverageInput && IsOlapAverageCast(columnType);
+    const auto toDouble = [&](TExprNode::TPtr value) {
+        return convertSum ? Ctx.NewCallable(Pos, "Convert", {std::move(value), Ctx.NewAtom(Pos, "Double")}) : value;
+    };
     auto sum = fields.at(GetOlapAggregateField(aggregation.Output, "sum"));
     auto count = fields.at(GetOlapAggregateField(aggregation.Output, "count"));
-    if (!Read.GetIUType(*aggregation.Column, Ctx)->IsOptionalOrNull()) {
-        return Ctx.NewList(Pos, {std::move(sum), std::move(count)});
+    if (!columnType.IsOptionalOrNull()) {
+        return Ctx.NewList(Pos, {toDouble(std::move(sum)), std::move(count)});
     }
 
     // An optional column with no values in the group has no sum, and no state.
     const TTypeAnnotationNode::TListType stateItems{
         Ctx.MakeType<TDataExprType>(EDataSlot::Double), Ctx.MakeType<TDataExprType>(EDataSlot::Uint64)};
     const auto* stateType = Ctx.MakeType<TOptionalExprType>(Ctx.MakeType<TTupleExprType>(stateItems));
-    // clang-format off
-    return Ctx.Builder(Pos)
-        .Callable("IfPresent")
-            .Add(0, std::move(sum))
-            .Lambda(1)
-                .Param("sum")
-                .Callable(0, "Just")
-                    .List(0)
-                        .Arg(0, "sum")
-                        .Add(1, std::move(count))
-                    .Seal()
-                .Seal()
-            .Seal()
-            .Callable(2, "Nothing")
-                .Add(0, ExpandType(Pos, *stateType, Ctx))
-            .Seal()
-        .Seal().Build();
-    // clang-format on
+    auto sumArg = Ctx.NewArgument(Pos, "sum");
+    auto state = Ctx.NewCallable(Pos, "Just", {Ctx.NewList(Pos, {toDouble(sumArg), std::move(count)})});
+    return Ctx.NewCallable(Pos, "IfPresent", {
+        std::move(sum),
+        Ctx.NewLambda(Pos, Ctx.NewArguments(Pos, {std::move(sumArg)}), std::move(state)),
+        Ctx.NewCallable(Pos, "Nothing", {ExpandType(Pos, *stateType, Ctx)})});
 }
 
 NPhysicalConvertionUtils::TStageBody TPhysicalSourceBuilder::BuildPhysicalOp() {
