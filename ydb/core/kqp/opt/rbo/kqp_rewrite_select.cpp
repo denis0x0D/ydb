@@ -1887,6 +1887,45 @@ TExprNode::TPtr RewriteSelect(const TExprNode::TPtr& input, TExprContext& ctx, c
     }
 
     auto setItems = GetSetting(node->Head(), "set_items")->TailPtr();
+    // YQL types each column of a set operation by the common type of its set items, by column name. As the old optimizer
+    // does when it expands UnionAll, a column of a set item with another type, such as String in a union with Utf8, is
+    // converted to it. The types come from the input: rewriting the sublinks rebuilds the set items without them.
+    const auto typedSetItems = GetSetting(input->Head(), "set_items")->TailPtr();
+    const TStructExprType* setOpType = nullptr;
+    if (setItems->ChildrenSize() > 1 && typedSetItems->ChildrenSize() == setItems->ChildrenSize() && !typeCtx.PositionalUnionAll &&
+        input->GetTypeAnn() && input->GetTypeAnn()->GetKind() == ETypeAnnotationKind::List) {
+        const auto* rowType = input->GetTypeAnn()->Cast<TListExprType>()->GetItemType();
+        setOpType = rowType->GetKind() == ETypeAnnotationKind::Struct ? rowType->Cast<TStructExprType>() : nullptr;
+    }
+    // `expr`, the value of `column` in set item `index`, converted to the type of the column in the set operation.
+    const auto convertToSetOpType = [&](ui32 index, TStringBuf column, TExprNode::TPtr expr) {
+        const auto* setItemType = setOpType ? typedSetItems->Child(index)->GetTypeAnn() : nullptr;
+        if (!setItemType || setItemType->GetKind() != ETypeAnnotationKind::List) {
+            return expr;
+        }
+        const auto* setItemRowType = setItemType->Cast<TListExprType>()->GetItemType();
+        if (setItemRowType->GetKind() != ETypeAnnotationKind::Struct) {
+            return expr;
+        }
+        const auto* sourceType = setItemRowType->Cast<TStructExprType>()->FindItemType(column);
+        const auto* targetType = setOpType->FindItemType(column);
+        if (!sourceType || !targetType) {
+            return expr;
+        }
+        // The import of the set operation makes a column optional on its own edge, so that a filter pushed through the set
+        // operation still compares the column itself. Here only the type inside the optional is converted.
+        if (targetType->GetKind() == ETypeAnnotationKind::Optional && !sourceType->IsOptionalOrNull()) {
+            targetType = targetType->Cast<TOptionalExprType>()->GetItemType();
+        }
+        if (IsSameAnnotation(*sourceType, *targetType)) {
+            return expr;
+        }
+        auto converted = expr;
+        if (TrySilentConvertTo(converted, *sourceType, *targetType, ctx, typeCtx) == IGraphTransformer::TStatus::Error) {
+            return expr;
+        }
+        return converted;
+    };
     TVector<TExprNode::TPtr> setItemsResults;
     for (ui32 i = 0; i < setItems->ChildrenSize(); ++i) {
         auto setItem = setItems->ChildPtr(i);
@@ -2411,6 +2450,10 @@ TExprNode::TPtr RewriteSelect(const TExprNode::TPtr& input, TExprContext& ctx, c
                 // clang-format on
             } else if (groupRef) {
                 lambda = ReplaceGroupRefs(lambda, groupByKeysExpressionsMap, ctx);
+            }
+
+            if (auto body = convertToSetOpType(i, columnName, lambda.Body().Ptr()); body != lambda.Body().Ptr()) {
+                lambda = TCoLambda(ctx.ChangeChild(lambda.Ref(), TCoLambda::idx_Body, std::move(body)));
             }
 
             if (resultElementCounters.contains(columnName)) {

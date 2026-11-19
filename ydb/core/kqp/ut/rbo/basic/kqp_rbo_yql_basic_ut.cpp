@@ -1213,6 +1213,92 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
         }
     }
 
+    // The branches of a UNION ALL give a column different types with a common type, such as String and Utf8. YQL types the
+    // column by the common type, and the new optimizer converts each branch to it, as the old optimizer does: before, the
+    // query failed with "Mismatch type of sequences being extended". Both branch orders, a chain of three branches and a
+    // read the branches share are compared with the old optimizer, by the rows and by the column types.
+    Y_UNIT_TEST(UnionAllCommonColumnTypeAsOldOptimizer) {
+        const std::vector<std::string> queries = {
+            R"(
+                SELECT t1.a AS a, t1.b AS v FROM `/Root/t1` AS t1
+                UNION ALL
+                SELECT t2.a AS a, CAST("x" AS Utf8) AS v FROM `/Root/t2` AS t2
+                ORDER BY a, v;
+            )",
+            R"(
+                SELECT t2.a AS a, CAST("x" AS Utf8) AS v FROM `/Root/t2` AS t2
+                UNION ALL
+                SELECT t1.a AS a, t1.b AS v FROM `/Root/t1` AS t1
+                ORDER BY a, v;
+            )",
+            R"(
+                SELECT t1.a AS a, 1 AS v FROM `/Root/t1` AS t1
+                UNION ALL
+                SELECT t2.a AS a, t2.c AS v FROM `/Root/t2` AS t2
+                ORDER BY a, v;
+            )",
+            R"(
+                SELECT t1.a AS a, CAST(t1.b AS Utf8) AS v FROM `/Root/t1` AS t1
+                UNION ALL
+                SELECT t2.a AS a, CAST(t2.b AS Utf8) AS v FROM `/Root/t2` AS t2
+                UNION ALL
+                SELECT t3.a AS a, t3.b AS v FROM `/Root/t3` AS t3
+                ORDER BY a, v;
+            )",
+            R"(
+                $rows = SELECT a, b FROM `/Root/t1`;
+                SELECT a, CAST(b AS Utf8) AS v FROM $rows
+                UNION ALL
+                SELECT a, "constant" AS v FROM $rows
+                ORDER BY a, v;
+            )",
+        };
+
+        // The rows of each query and the types of its columns.
+        const auto run = [&](bool newRbo) {
+            NKikimrConfig::TAppConfig appConfig;
+            appConfig.MutableTableServiceConfig()->SetEnableNewRBO(newRbo);
+            // A query the new optimizer cannot compile must fail, not run with the old one.
+            appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
+            TKikimrRunner kikimr(NKqp::TKikimrSettings(appConfig).SetWithSampleTables(false));
+            auto db = kikimr.GetTableClient();
+            auto schemeSession = db.CreateSession().GetValueSync().GetSession();
+            for (const auto* table : {"t1", "t2", "t3"}) {
+                const auto schemeResult = schemeSession.ExecuteSchemeQuery(TStringBuilder() << R"(
+                    CREATE TABLE `/Root/)" << table << R"(` (
+                        a Int64 NOT NULL,
+                        b String,
+                        c Int64,
+                        primary key(a)
+                    ) with (Store = Column);
+                )").GetValueSync();
+                UNIT_ASSERT_C(schemeResult.IsSuccess(), schemeResult.GetIssues().ToString());
+            }
+            InsertIntoSchema0(db, "/Root/t1", 4);
+            InsertIntoSchema0(db, "/Root/t2", 3);
+            InsertIntoSchema0(db, "/Root/t3", 2);
+
+            std::vector<TString> outcomes;
+            auto session = kikimr.GetQueryClient().GetSession().GetValueSync().GetSession();
+            for (const auto& query : queries) {
+                const auto result = session.ExecuteQuery(query, NYdb::NQuery::TTxControl::NoTx()).ExtractValueSync();
+                UNIT_ASSERT_C(result.IsSuccess(), (newRbo ? "new" : "old") << " optimizer, " << query << ": " << result.GetIssues().ToString());
+                TStringBuilder outcome;
+                for (const auto& column : result.GetResultSet(0).GetColumnsMeta()) {
+                    outcome << column.Name << ": " << column.Type.ToString() << "; ";
+                }
+                outcomes.push_back(outcome << FormatResultSetYson(result.GetResultSet(0)));
+            }
+            return outcomes;
+        };
+
+        const auto oldOutcomes = run(false);
+        const auto newOutcomes = run(true);
+        for (size_t i = 0; i < queries.size(); ++i) {
+            UNIT_ASSERT_VALUES_EQUAL_C(newOutcomes[i], oldOutcomes[i], queries[i]);
+        }
+    }
+
     Y_UNIT_TEST(SetOps) {
         NKikimrConfig::TAppConfig appConfig;
         appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
