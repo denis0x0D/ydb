@@ -612,12 +612,12 @@ TIntrusivePtr<IOperator> TPushDependentJoinThroughJoinRule::SimpleMatchAndApply(
 
     const auto joinKind = GetValidJoinKind(join->JoinKind);
     const bool innerLike = joinKind == "Inner" || joinKind == "Cross";
-    const bool leftPreserving = innerLike || joinKind == "Left" || joinKind == "LeftSemi" || joinKind == "LeftOnly";
+    const bool leftPreserving = innerLike || joinKind == "Left" || joinKind == "LeftSemi" || joinKind == "LeftOnly" || joinKind == "LeftMark";
 
     // Here we want to push the dependent join on the side where we have a free variables.
     if (leftCorrelated && !rightCorrelated && leftPreserving) {
         auto newLeft = PushInto(dependentJoin, join->GetLeftInput());
-        return MakeIntrusive<TOpJoin>(newLeft, join->GetRightInput(), join->Pos, join->JoinKind, join->JoinKeys, join->JoinFilters);
+        return join->WithInputs(newLeft, join->GetRightInput(), join->JoinKeys);
     }
 
     // Inner or cross.
@@ -647,10 +647,11 @@ TIntrusivePtr<IOperator> TPushDependentJoinThroughJoinRule::SimpleMatchAndApply(
         joinKeys.Add(key);
     }
 
+    // A mark join groups by the domain keys too: a left row reads the right rows of its domain value.
+    auto newJoin = join->WithInputs(newLeft, newRight, joinKeys);
     // rewrite cross to inner because it has a join keys based on domain.
-    const TString newJoinKind = joinKind == "Cross" ? "Inner" : joinKind;
-
-    return MakeIntrusive<TOpJoin>(newLeft, newRight, join->Pos, newJoinKind, joinKeys, join->JoinFilters);
+    newJoin->JoinKind = joinKind == "Cross" ? "Inner" : joinKind;
+    return newJoin;
 }
 
 bool TPushDependentJoinThroughReplicateRule::QuickMatch(const TIntrusivePtr<IOperator>& input) const {

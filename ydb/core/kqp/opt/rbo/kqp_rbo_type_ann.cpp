@@ -527,6 +527,10 @@ TStatus ComputeTypes(TIntrusivePtr<TOpJoin> join, TRBOContext& ctx) {
 
     structItemTypes.insert(structItemTypes.end(), leftItemTypes.begin(), leftItemTypes.end());
     structItemTypes.insert(structItemTypes.end(), rightItemTypes.begin(), rightItemTypes.end());
+    if (join->MarkOutput) {
+        const auto* markType = ctx.ExprCtx.MakeType<TOptionalExprType>(ctx.ExprCtx.MakeType<TDataExprType>(EDataSlot::Bool));
+        structItemTypes.push_back(ctx.ExprCtx.MakeType<TItemExprType>(ctx.ExprCtx.GetIndexAsString(*join->MarkOutput), markType));
+    }
 
     auto resultStructType = ctx.ExprCtx.MakeType<TStructExprType>(structItemTypes);
     const TTypeAnnotationNode* resultAnn = ctx.ExprCtx.MakeType<TListExprType>(resultStructType);

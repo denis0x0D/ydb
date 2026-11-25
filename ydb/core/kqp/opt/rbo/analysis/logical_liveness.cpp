@@ -235,6 +235,8 @@ void TOpJoin::PropagateLiveness(ILivenessContext& ctx) {
     auto required = ctx.GetLiveOut(this);
     required.UnionWith(JoinKeys.Left());
     required.UnionWith(JoinKeys.Right());
+    required.UnionWith(MarkKeys.Left());
+    required.UnionWith(MarkKeys.Right());
     for (const auto& filter : JoinFilters) {
         ctx.AddExpressionDeps(filter, required);
     }

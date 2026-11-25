@@ -463,7 +463,35 @@ TOpJoin::TOpJoin(TIntrusivePtr<IOperator> left, TIntrusivePtr<IOperator> right, 
     , JoinKind(std::move(kind))
     , JoinKeys(std::move(keys))
     , JoinFilters(filters)
-{}
+{
+    Y_ENSURE(JoinKind != "LeftMark", "A mark join needs its mark");
+}
+
+TOpJoin::TOpJoin(TIntrusivePtr<IOperator> left, TIntrusivePtr<IOperator> right, TPositionHandle pos,
+    TJoinIUs keys, TJoinIUs markKeys, TInfoUnitId markOutput)
+    : IBinaryOperator(EOperator::Join, pos, std::move(left), std::move(right))
+    , JoinKind("LeftMark")
+    , JoinKeys(std::move(keys))
+    , MarkKeys(std::move(markKeys))
+    , MarkOutput(markOutput)
+{
+    // A null in a mark key is unknown, never equal.
+    Y_ENSURE(!HasEqualNullsKey(MarkKeys), "Mark keys cannot use IS NOT DISTINCT FROM");
+    Y_ENSURE(!JoinKeys.Items().empty() || !MarkKeys.Items().empty(), "A mark join needs keys");
+}
+
+TIntrusivePtr<TOpJoin> TOpJoin::WithInputs(TIntrusivePtr<IOperator> left, TIntrusivePtr<IOperator> right, TJoinIUs keys) const {
+    if (IsMarkJoin()) {
+        return MakeIntrusive<TOpJoin>(std::move(left), std::move(right), Pos, std::move(keys), MarkKeys, *MarkOutput);
+    }
+    return MakeIntrusive<TOpJoin>(std::move(left), std::move(right), Pos, JoinKind, std::move(keys), JoinFilters);
+}
+
+TJoinIUs::TPairs TOpJoin::GetAllKeys() const {
+    auto keys = JoinKeys.Items();
+    keys.insert(keys.end(), MarkKeys.Items().begin(), MarkKeys.Items().end());
+    return keys;
+}
 
 void TOpJoin::ComputeOutputIUs() {
     Y_ENSURE(!GetLeftInput()->GetOutputIUs().HasAny(GetRightInput()->GetOutputIUs()),
@@ -474,6 +502,9 @@ void TOpJoin::ComputeOutputIUs() {
     }
     if (JoinOutputsRight(JoinKind)) {
         result.UnionWith(GetRightInput()->GetOutputIUs());
+    }
+    if (MarkOutput) {
+        result.Add(*MarkOutput);
     }
     Props.OutputIUs = std::move(result);
 }
@@ -489,6 +520,8 @@ const TUnorderedIUs& TOpJoin::GetUniqueRawInputIUs() const {
 TUnorderedIUs TOpJoin::GetUsedIUs(TPlanProps& props) {
     auto result = JoinKeys.Left();
     result.UnionWith(JoinKeys.Right());
+    result.UnionWith(MarkKeys.Left());
+    result.UnionWith(MarkKeys.Right());
     for (const auto& filter : JoinFilters) {
         filter.BindPlanProps(&props);
         result.UnionWith(filter.GetInputIUs(false, true));

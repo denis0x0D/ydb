@@ -19,6 +19,82 @@ void AddDomainColumn(TUnorderedIUs& domain, TInfoUnitId iu) {
     }
 }
 
+// The block hash join, the only one with a mark, packs each key into one column: a data value, but not a date
+// with a time zone, which takes two.
+std::optional<NYql::EDataSlot> GetMarkJoinKeySlot(const TTypeAnnotationNode* type) {
+    bool isOptional = false;
+    const TDataExprType* dataType = nullptr;
+    if (!type || !IsDataOrOptionalOfData(type, isOptional, dataType)
+        || (NYql::NUdf::GetDataTypeInfo(dataType->GetSlot()).Features & NYql::NUdf::TzDateType)) {
+        return std::nullopt;
+    }
+    return dataType->GetSlot();
+}
+
+bool CanUseMarkJoin(const IOperator& outer, const IOperator& subplan, const TSubplanEntry& entry,
+                    const TUnorderedIUs& correlation, TRBOContext& ctx) {
+    const auto& config = *ctx.KqpCtx.Config;
+    if (!config.GetUseBlockHashJoin() || !config.GetEnableBlockHashJoinMark() || !outer.Type || !subplan.Type) {
+        return false;
+    }
+    auto keySlot = [&](const IOperator& input, TInfoUnitId iu) {
+        return GetMarkJoinKeySlot(input.GetIUType(iu, ctx.ExprCtx));
+    };
+    // A correlation column is joined with its copy in the domain, of the same type.
+    if (!AllOf(correlation, [&](TInfoUnitId iu) { return keySlot(outer, iu).has_value(); })) {
+        return false;
+    }
+    if (entry.Type != ESubplanType::IN_SUBPLAN) {
+        return true;
+    }
+    // The join casts the result to the type of the lookup. A cast that may fail turns a value into a null,
+    // which makes the mark null where it is false.
+    const auto lookup = keySlot(outer, entry.Tuple.Items()[0]);
+    const auto result = keySlot(subplan, *entry.ResultIU);
+    if (!lookup || !result) {
+        return false;
+    }
+    const auto cast = NYql::NUdf::GetCastResult(*result, *lookup);
+    return *result == *lookup || (cast && *cast == NYql::NUdf::ECastOptions::Complete);
+}
+
+// The correlation columns group the rows of the mark join, and the lookup and the result of an IN are its mark key.
+TIntrusivePtr<TOpJoin> BuildMarkJoin(TIntrusivePtr<IOperator> outer, TIntrusivePtr<IOperator> subplan, const TSubplanEntry& entry,
+                                     const TUnorderedIUs& correlation, TPositionHandle pos, TRBOContext& ctx, TPlanProps& props) {
+    TJoinIUs groupKeys;
+    if (!correlation.Empty()) {
+        // The subplan runs for each correlation value of the domain and tags its rows with that value.
+        // The domain and the mark join read the outer rows through a Replicate, the domain under fresh IDs.
+        auto domain = MakeSubplanDomain(outer, correlation, pos, props);
+        groupKeys = domain.Keys;
+        subplan = std::move(domain).Bind(std::move(subplan), pos);
+        // A row with a null correlation value reads the rows the subplan gave for that null.
+        groupKeys = MakeNullSafeJoinKeys(outer, subplan, groupKeys, pos, ctx, props);
+    }
+
+    TJoinIUs markKeys;
+    if (entry.Type == ESubplanType::IN_SUBPLAN) {
+        markKeys.Add(entry.Tuple.Items()[0], *entry.ResultIU);
+    }
+    return MakeIntrusive<TOpJoin>(std::move(outer), std::move(subplan), pos, std::move(groupKeys), std::move(markKeys),
+                                  props.InfoUnitRegistry.AddGenerated("in_mark"));
+}
+
+// Rebuild the consumer over the new input that defines the call. The rule framework treats returning the same
+// operator as "not applied", so even the map is a new operator.
+TIntrusivePtr<IOperator> RebuildConsumer(const TIntrusivePtr<IOperator>& consumer, TIntrusivePtr<IOperator> newInput,
+                                         TInfoUnitId call, TRBOContext& ctx, TPlanProps& props) {
+    props.Subplans.Remove(call);
+
+    if (consumer->Kind == EOperator::Map) {
+        auto map = CastOperator<TOpMap>(consumer);
+        return MakeIntrusive<TOpMap>(newInput, map->Pos, map->GetMapElements(), map->NeedToPush);
+    }
+
+    auto filter = CastOperator<TOpFilter>(consumer);
+    return MakeIntrusive<TOpFilter>(newInput, filter->Pos, TExpression(filter->GetFilterExpression().GetLambda(), &ctx.ExprCtx, &props));
+}
+
 }
 
 namespace NKikimr {
@@ -122,6 +198,18 @@ TIntrusivePtr<IOperator> TInlineGenericInExistsSubplanRule::SimpleMatchAndApply(
         Y_ENSURE(subplanEntry.Type == ESubplanType::EXISTS || (subplanEntry.Type == ESubplanType::IN_SUBPLAN && subplanEntry.Tuple.Items().size() == 1 && subplanEntry.ResultIU));
         // For in we have to emulate three value result (true, false, null).
         const bool threeValued = !markMissingAsFalse && subplanEntry.Type == ESubplanType::IN_SUBPLAN && subplanEntry.Tuple.Items().size() == 1;
+
+        // The runtime mark join computes the call, without the emulation below.
+        const auto correlation = useDependentJoin ? domain : TUnorderedIUs{};
+        if (CanUseMarkJoin(*leftInput, *rightInput, subplanEntry, correlation, ctx)) {
+            auto join = BuildMarkJoin(leftInput, rightInput, subplanEntry, correlation, consumer->Pos, ctx, props);
+            auto mark = MakeColumnAccess(*join->MarkOutput, consumer->Pos, &ctx.ExprCtx, &props);
+            auto falseConst = MakeConstant("Bool", "false", consumer->Pos, &ctx.ExprCtx);
+            // The mark is null when a null leaves a match unknown, which a two-valued call reads as false.
+            TMapIUs resultElements;
+            resultElements.Add(subplanIU, threeValued ? mark : MakeBinaryPredicate("Coalesce", mark, falseConst));
+            return RebuildConsumer(input, MakeIntrusive<TOpMap>(join, consumer->Pos, resultElements), subplanIU, ctx, props);
+        }
 
         // The mark join and the domain read leftInput through a Replicate, the domain under fresh IDs.
         auto subplanDomain = MakeSubplanDomain(leftInput, domain, consumer->Pos, props);
@@ -297,17 +385,7 @@ TIntrusivePtr<IOperator> TInlineGenericInExistsSubplanRule::SimpleMatchAndApply(
         newInput = MakeIntrusive<TOpJoin>(consumer->GetInput(), map, consumer->Pos, "Cross", joinKeys);
     }
 
-    props.Subplans.Remove(subplanIU);
-
-    // Rebuild the consumer over the new input. The rule framework treats returning the same operator
-    // as "not applied", so even the map is a new operator.
-    if (input->Kind == EOperator::Map) {
-        auto map = CastOperator<TOpMap>(input);
-        return MakeIntrusive<TOpMap>(newInput, map->Pos, map->GetMapElements(), map->NeedToPush);
-    }
-
-    auto filter = CastOperator<TOpFilter>(input);
-    return MakeIntrusive<TOpFilter>(newInput, filter->Pos, TExpression(filter->GetFilterExpression().GetLambda(), &ctx.ExprCtx, &props));
+    return RebuildConsumer(input, newInput, subplanIU, ctx, props);
 }
 }
 }

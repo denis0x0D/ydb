@@ -285,7 +285,12 @@ TIntrusivePtr<IOperator> TOpFilter::CopyImpl(TInfoUnitRegistry&, TSubstitutions&
     return MakeIntrusive<TOpFilter>(GetInput(), Pos, TPhysicalOpProps{}, FilterExpr, PartiallyPushedDown);
 }
 
-TIntrusivePtr<IOperator> TOpJoin::CopyImpl(TInfoUnitRegistry&, TSubstitutions&) const {
+TIntrusivePtr<IOperator> TOpJoin::CopyImpl(TInfoUnitRegistry& registry, TSubstitutions& renames) const {
+    if (IsMarkJoin()) {
+        // The mark is the one column a join defines.
+        return MakeIntrusive<TOpJoin>(GetLeftInput(), GetRightInput(), Pos, JoinKeys, MarkKeys,
+            CopyDefinition(*MarkOutput, registry, renames));
+    }
     return MakeIntrusive<TOpJoin>(GetLeftInput(), GetRightInput(), Pos, JoinKind, JoinKeys, JoinFilters);
 }
 

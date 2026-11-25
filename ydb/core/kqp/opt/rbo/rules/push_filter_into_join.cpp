@@ -77,7 +77,8 @@ TIntrusivePtr<IOperator> TPushFilterIntoJoinRule::SimpleMatchAndApply(const TInt
 
     auto join = CastOperator<TOpJoin>(filter->GetInput());
 
-    if (join->JoinKind != "Inner" && join->JoinKind != "Cross" && join->JoinKind != "Left" && join->JoinKind != "LeftSemi" && join->JoinKind != "LeftOnly") {
+    if (join->JoinKind != "Inner" && join->JoinKind != "Cross" && join->JoinKind != "Left" && join->JoinKind != "LeftSemi" &&
+        join->JoinKind != "LeftOnly" && join->JoinKind != "LeftMark") {
         YQL_CLOG(TRACE, CoreDq) << "Wrong join type " << join->JoinKind << Endl;
         return input;
     }
@@ -111,14 +112,15 @@ TIntrusivePtr<IOperator> TPushFilterIntoJoinRule::SimpleMatchAndApply(const TInt
     TVector<TExpression> pushRight;
     TJoinIUs joinConditions;
 
-    bool canPushRight = join->JoinKind != "LeftSemi" && join->JoinKind != "LeftOnly";
+    // A mark join reads every right row of a group, and the filter cannot read them.
+    bool canPushRight = join->JoinKind != "LeftSemi" && join->JoinKind != "LeftOnly" && join->JoinKind != "LeftMark";
 
     for (const auto& conj : conjuncts) {
         if (conj.MaybeEquiJoinCondition() && !ReferencesUnresolvedSubplan(conj, props)) {
             TEquiJoinCondition cond(conj);
 
             // We cannot push filter into join conditions of a LeftOnly join - will break semantics
-            if(join->JoinKind != "LeftOnly") {
+            if(join->JoinKind != "LeftOnly" && join->JoinKind != "LeftMark") {
                 if (leftIUs.Contains(cond.GetLeftIU()) && rightIUs.Contains(cond.GetRightIU())) {
                     joinConditions.Add(cond.GetLeftIU(), cond.GetRightIU());
                     continue;

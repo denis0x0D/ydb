@@ -54,6 +54,7 @@ void TOpFilter::RenameUsedIUs(const TSubstitutions& substitutions) {
 
 void TOpJoin::RenameUsedIUs(const TSubstitutions& substitutions) {
     Substitute(JoinKeys, substitutions);
+    Substitute(MarkKeys, substitutions);
     for (auto& filter : JoinFilters) {
         filter = filter.ApplyRenames(substitutions);
     }

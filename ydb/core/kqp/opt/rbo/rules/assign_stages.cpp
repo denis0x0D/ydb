@@ -29,6 +29,17 @@ void FinalizeJoinPhysicalProps(TOpJoin& join, const TRBOContext& rboCtx) {
         }
     }
 
+    if (join.IsMarkJoin()) {
+        // Only the block hash join has a mark, and the decorrelation builds a mark join only when it is enabled.
+        Y_ENSURE(config.GetUseBlockHashJoin() && config.GetEnableBlockHashJoinMark(), "Mark joins are disabled");
+        props.UseBlockHashJoin = true;
+        // The mark of a row depends on every right row with its join keys, so a shuffle uses the join keys and
+        // never the mark keys. Without join keys the right side is broadcast.
+        const bool broadcast = join.JoinKeys.Items().empty() || props.JoinAlgo == EJoinAlgoType::MapJoin;
+        props.JoinAlgo = broadcast ? EJoinAlgoType::MapJoin : EJoinAlgoType::GraceJoin;
+        return;
+    }
+
     const auto joinKind = GetValidJoinKind(join.JoinKind);
     if (joinKind == "Cross") {
         props.UseBlockHashJoin = config.GetUseBlockHashJoin() && config.GetUseBlockHashJoinForCross();

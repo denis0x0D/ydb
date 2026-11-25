@@ -650,4 +650,9 @@ message TTableServiceConfig {
 
     // Fallback flag for row tables
     optional bool EnableFallbackOnRowTables = 157 [default = false, (InvalidateCompileCache) = true];
+
+    // When true, the new RBO decorrelates IN and correlated EXISTS subqueries with the mark mode of the block
+    // hash join, which returns the three-valued result directly. It needs UseBlockHashJoin. When false, the
+    // result is assembled from left joins and an aggregate, which nodes without the mark join can run.
+    optional bool EnableBlockHashJoinMark = 158 [default = true, (InvalidateCompileCache) = true];
 };

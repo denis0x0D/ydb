@@ -66,7 +66,8 @@ TIntrusivePtr<IOperator> TExpandCBOTreeRule::SimpleMatchAndApply(const TIntrusiv
 
     if (input->Kind == EOperator::Join) {
         auto join = CastOperator<TOpJoin>(input);
-        if (!join->JoinFilters.empty()) {
+        // The CBO cannot reorder a mark join.
+        if (!join->JoinFilters.empty() || join->IsMarkJoin()) {
             return input;
         }
 

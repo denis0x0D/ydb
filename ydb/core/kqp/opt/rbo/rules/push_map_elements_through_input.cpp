@@ -39,7 +39,7 @@ bool IsJoinChildPreserved(const TOpJoin& join, ui32 childIdx) {
     if (kind == "Inner" || kind == "Cross") {
         return true;
     }
-    return childIdx == 0 && (kind == "Left" || kind == "LeftOnly" || kind == "LeftSemi");
+    return childIdx == 0 && (kind == "Left" || kind == "LeftOnly" || kind == "LeftSemi" || kind == "LeftMark");
 }
 
 bool CanPushMapElementToChild(IOperator& op, ui32 childIdx, const TMapElement& element) {

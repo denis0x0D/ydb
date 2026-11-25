@@ -15,7 +15,7 @@ bool JoinOutputsLeft(const TString& joinKind) {
 }
 
 bool JoinOutputsRight(const TString& joinKind) {
-    return joinKind != "LeftOnly" && joinKind != "LeftSemi";
+    return joinKind != "LeftOnly" && joinKind != "LeftSemi" && joinKind != "LeftMark";
 }
 
 TString GetValidJoinKind(const TString& joinKind) {

@@ -64,8 +64,10 @@ using namespace NYdb::NTable;
 using namespace NYql::NNodes;
 using namespace NStat;
 
-NKikimrConfig::TAppConfig MakeSubqueryAppConfig(bool equalNullsJoinKeys = false) {
+NKikimrConfig::TAppConfig MakeSubqueryAppConfig(bool equalNullsJoinKeys = false, bool markJoin = true) {
     NKikimrConfig::TAppConfig appConfig;
+    // Without the mark join the decorrelation emulates it.
+    appConfig.MutableTableServiceConfig()->SetEnableBlockHashJoinMark(markJoin);
     appConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
     appConfig.MutableTableServiceConfig()->SetAllowOlapDataQuery(true);
     appConfig.MutableTableServiceConfig()->SetEnableFallbackToYqlOptimizer(false);
@@ -136,8 +138,8 @@ void CreateSubqueryTables(TKikimrRunner& kikimr, bool columnTables) {
     fill("/Root/t3", 6, [](i64 a) { return a % 2; }, [](i64 a) { return a; }, [&](i64 a) { return group(a % 2); });
 }
 
-void TestDecorrelation(bool columnTables, bool equalNullsJoinKeys = false) {
-    TKikimrRunner kikimr(NKqp::TKikimrSettings(MakeSubqueryAppConfig(equalNullsJoinKeys)).SetWithSampleTables(false));
+void TestDecorrelation(bool columnTables, bool equalNullsJoinKeys = false, bool markJoin = true) {
+    TKikimrRunner kikimr(NKqp::TKikimrSettings(MakeSubqueryAppConfig(equalNullsJoinKeys, markJoin)).SetWithSampleTables(false));
     CreateSubqueryTables(kikimr, columnTables);
 
     auto queryClient = kikimr.GetQueryClient();
@@ -733,12 +735,17 @@ void TestDecorrelation(bool columnTables, bool equalNullsJoinKeys = false) {
 }
 
 // IN and EXISTS subqueries in the projection: the result is a column, so NULL must stay NULL.
-void TestSubqueryInProjection(bool columnTables) {
-    TKikimrRunner kikimr(NKqp::TKikimrSettings(MakeSubqueryAppConfig()).SetWithSampleTables(false));
+void TestSubqueryInProjection(bool columnTables, bool markJoin) {
+    TKikimrRunner kikimr(NKqp::TKikimrSettings(MakeSubqueryAppConfig(false, markJoin)).SetWithSampleTables(false));
     CreateSubqueryTables(kikimr, columnTables);
 
     const std::string NonNullLookupInNullableSet = R"(
         SELECT t1.a, t1.b IN (SELECT t3.e FROM `/Root/t3` as t3 WHERE t3.a < 3) AS result
+        FROM `/Root/t1` as t1
+        ORDER BY t1.a;
+    )";
+    const std::string CorrelatedNullableIn = R"(
+        SELECT t1.a, t1.e IN (SELECT t2.e FROM `/Root/t2` as t2 WHERE t1.b = t2.b) AS result
         FROM `/Root/t1` as t1
         ORDER BY t1.a;
     )";
@@ -756,11 +763,7 @@ void TestSubqueryInProjection(bool columnTables) {
          R"([[10;%true];[20;%true];[30;%false];[40;%false];[50;%false];[60;%false];[70;%false];[80;%false];[90;%false];[100;%false];[110;%false];[120;%true]])"},
 
         // Correlated nullable IN: NULL in the set (t1.b == 1), an empty set (t1.b == 3), a NULL lookup (t1.a == 1).
-        {R"(
-            SELECT t1.a, t1.e IN (SELECT t2.e FROM `/Root/t2` as t2 WHERE t1.b = t2.b) AS result
-            FROM `/Root/t1` as t1
-            ORDER BY t1.a;
-         )",
+        {CorrelatedNullableIn,
          R"([[1;#];[2;[%true]];[3;[%false]];[4;[%true]];[5;#];[6;[%true]];[7;[%false]];[8;[%true]];[9;#];[10;[%true]];[11;[%false]];[12;[%true]]])"},
 
         {R"(
@@ -769,6 +772,25 @@ void TestSubqueryInProjection(bool columnTables) {
             ORDER BY t1.a;
          )",
          R"([[1;#];[2;[%false]];[3;[%true]];[4;[%false]];[5;#];[6;[%false]];[7;[%true]];[8;[%false]];[9;#];[10;[%false]];[11;[%true]];[12;[%false]]])"},
+
+        // A correlation on a nullable column: the row with t1.e NULL reads an empty set, so its IN is false.
+        {R"(
+            SELECT t1.a, t1.b IN (SELECT t2.e FROM `/Root/t2` as t2 WHERE t2.b == t1.e) AS result
+            FROM `/Root/t1` as t1
+            ORDER BY t1.a;
+         )",
+         R"([[1;[%false]];[2;[%true]];[3;[%false]];[4;[%true]];[5;#];[6;[%true]];[7;[%false]];[8;[%true]];[9;#];[10;[%true]];[11;[%false]];[12;[%true]]])"},
+
+        // An empty set makes IN false and NOT IN true, also for a NULL lookup.
+        {R"(
+            SELECT t1.a,
+                t1.e IN (SELECT t3.e FROM `/Root/t3` as t3 WHERE t3.a > 100) AS x,
+                t1.e NOT IN (SELECT t3.e FROM `/Root/t3` as t3 WHERE t3.a > 100) AS y
+            FROM `/Root/t1` as t1
+            WHERE t1.a <= 3
+            ORDER BY t1.a;
+         )",
+         R"([[1;[%false];[%true]];[2;[%false];[%true]];[3;[%false];[%true]]])"},
 
         // The NULL results reach a filter above the projection.
         {R"(
@@ -845,6 +867,20 @@ void TestSubqueryInProjection(bool columnTables) {
         const auto actual = FormatResultSetYson(result.GetResultSet(0));
         if (actual != expected) {
             failures << "query " << i << ": expected " << expected << ", got " << actual << "\n";
+        }
+    }
+
+    // The three-valued IN runs as a mark join, correlated or not, when the mark join is enabled.
+    for (const auto& query : {CorrelatedNullableIn, NonNullLookupInNullableSet}) {
+        auto explain = queryClient.ExecuteQuery(query, NYdb::NQuery::TTxControl::NoTx(),
+            NYdb::NQuery::TExecuteQuerySettings().ExecMode(NQuery::EExecMode::Explain)).ExtractValueSync();
+        if (!explain.IsSuccess()) {
+            failures << "explain: " << explain.GetIssues().ToString() << "\n";
+            continue;
+        }
+        const auto ast = TString{*explain.GetStats()->GetAst()};
+        if (ast.Contains("MarkKeys") != markJoin) {
+            failures << "expected " << (markJoin ? "a" : "no") << " mark join, ast:\n" << ast << "\n";
         }
     }
 
@@ -1471,12 +1507,16 @@ Y_UNIT_TEST_SUITE(KqpRboYql) {
         }
     }
 
-    Y_UNIT_TEST_TWIN(SubqueryInProjection, ColumnStore) {
-        TestSubqueryInProjection(ColumnStore);
+    Y_UNIT_TEST_QUAD(SubqueryInProjection, ColumnStore, MarkJoin) {
+        TestSubqueryInProjection(ColumnStore, MarkJoin);
     }
 
     Y_UNIT_TEST_QUAD(Decorrelation, ColumnStore, EqualNullsJoinKeys) {
         TestDecorrelation(ColumnStore, EqualNullsJoinKeys);
+    }
+
+    Y_UNIT_TEST_TWIN(DecorrelationWithoutMarkJoin, ColumnStore) {
+        TestDecorrelation(ColumnStore, /*equalNullsJoinKeys=*/false, /*markJoin=*/false);
     }
 
 }

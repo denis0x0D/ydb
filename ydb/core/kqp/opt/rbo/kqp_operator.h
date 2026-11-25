@@ -1082,6 +1082,21 @@ public:
     TOpJoin(TIntrusivePtr<IOperator> leftArg, TIntrusivePtr<IOperator> rightArg, TPositionHandle pos, TString joinKind,
             TJoinIUs joinKeys, const TVector<TExpression>& joinFilters);
 
+    // A LeftMark join keeps every left row and adds markOutput, the three-valued result of IN as an Optional<Bool>:
+    // true when a right row of the group matches on the mark keys, null when none matches but a null in a mark
+    // key leaves a match unknown, false otherwise. The join keys only group the rows. They alone shuffle the
+    // inputs, since the mark of a row depends on every right row of its group.
+    TOpJoin(TIntrusivePtr<IOperator> leftArg, TIntrusivePtr<IOperator> rightArg, TPositionHandle pos, TJoinIUs joinKeys,
+            TJoinIUs markKeys, TInfoUnitId markOutput);
+
+    // This join over other inputs and keys, with the same kind, filters and mark, to replace it in the plan.
+    TIntrusivePtr<TOpJoin> WithInputs(TIntrusivePtr<IOperator> leftArg, TIntrusivePtr<IOperator> rightArg, TJoinIUs joinKeys) const;
+
+    bool IsMarkJoin() const { return MarkOutput.has_value(); }
+
+    // The join keys, then the mark keys: the key order of the physical join.
+    TJoinIUs::TPairs GetAllKeys() const;
+
     const TUnorderedIUs& GetUniqueRawInputIUs() const override;
     virtual TUnorderedIUs GetUsedIUs(TPlanProps& props) override;
     virtual TVector<std::reference_wrapper<const TExpression>> GetExpressions() const override;
@@ -1101,6 +1116,9 @@ public:
     TString JoinKind;
     TJoinIUs JoinKeys;
     TVector<TExpression> JoinFilters;
+    // Set only for a LeftMark join.
+    TJoinIUs MarkKeys;
+    std::optional<TInfoUnitId> MarkOutput;
 
 protected:
     TIntrusivePtr<IOperator> CopyImpl(TInfoUnitRegistry& registry, TSubstitutions& renames) const override;

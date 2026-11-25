@@ -47,7 +47,7 @@ bool BadKeyTypeForHashJoin(const TTypeAnnotationNode* type) {
 }
 
 bool BadTypesForBlockJoin(TOpJoin& join, TExprContext& ctx) {
-    for (const auto & joinIU : join.JoinKeys.Items()) {
+    for (const auto & joinIU : join.GetAllKeys()) {
         if (BadKeyTypeForHashJoin(join.GetLeftInput()->GetIUType(joinIU.first, ctx))) {
             return true;
         }
@@ -251,8 +251,9 @@ void TPhysicalJoinBuilder::PrepareJoinKeys(TVector<TString>& leftJoinKeys, TVect
     THashSet<TString> seenLeftKeys;
     THashSet<TString> seenRightKeys;
 
-    for (ui32 i = 0; i < Join.JoinKeys.Items().size(); ++i) {
-        const auto joinKeyPair = Join.JoinKeys.Items()[i];
+    const auto joinKeys = Join.GetAllKeys();
+    for (ui32 i = 0; i < joinKeys.size(); ++i) {
+        const auto joinKeyPair = joinKeys[i];
         const auto leftKey = Names.Get(joinKeyPair.first);
         leftJoinKeys.emplace_back(leftKey);
         const auto rightKey = Names.Get(joinKeyPair.second);
@@ -451,17 +452,26 @@ TExprNode::TPtr TPhysicalJoinBuilder::BuildBlockHashJoin(const TString& joinType
         // clang-format on
     }
 
-    for (size_t keyIndex = 0; keyIndex < Join.JoinKeys.Items().size(); ++keyIndex) {
-        if (Join.JoinKeys.Items()[keyIndex].EqualNulls) {
-            // clang-format off
-            joinSettings.push_back(
-                Build<TCoNameValueTuple>(Ctx, Pos)
-                    .Name().Build("EqualNulls")
-                    .Value<TCoUint32>()
-                        .Literal().Build(ToString(keyIndex))
-                        .Build()
-                .Done());
-            // clang-format on
+    auto addKeySetting = [&](TStringBuf name, size_t keyIndex) {
+        // clang-format off
+        joinSettings.push_back(
+            Build<TCoNameValueTuple>(Ctx, Pos)
+                .Name().Build(name)
+                .Value<TCoUint32>()
+                    .Literal().Build(ToString(keyIndex))
+                    .Build()
+            .Done());
+        // clang-format on
+    };
+
+    // The mark keys of a mark join follow its join keys.
+    const auto joinKeys = Join.GetAllKeys();
+    for (size_t keyIndex = 0; keyIndex < joinKeys.size(); ++keyIndex) {
+        if (joinKeys[keyIndex].EqualNulls) {
+            addKeySetting("EqualNulls", keyIndex);
+        }
+        if (keyIndex >= Join.JoinKeys.Items().size()) {
+            addKeySetting("MarkKeys", keyIndex);
         }
     }
 
@@ -475,7 +485,7 @@ TExprNode::TPtr TPhysicalJoinBuilder::BuildBlockHashJoin(const TString& joinType
         .LeftInput(leftInput)
         .RightInput(rightInput)
         .JoinKind<TCoAtom>()
-            .Value(joinType)
+            .Value(Join.IsMarkJoin() ? TString("Mark") : joinType)
         .Build()
         .LeftKeyColumns<TCoAtomList>()
             .Add(leftKeyColumnIdxs)
@@ -538,7 +548,8 @@ NPhysicalConvertionUtils::TStageBody TPhysicalJoinBuilder::BuildPhysicalJoin(TEx
     const auto leftIUs = NPhysicalConvertionUtils::GetLiveInputIUs(Join, 0);
     const auto rightIUs = NPhysicalConvertionUtils::GetLiveInputIUs(Join, 1);
     const auto joinType = GetValidJoinKind(Join.JoinKind);
-    const bool rightSideEmpty = (joinType == "LeftSemi"sv || joinType == "LeftOnly"sv);
+    // A mark join outputs the mark instead of right columns.
+    const bool rightSideEmpty = (joinType == "LeftSemi"sv || joinType == "LeftOnly"sv || Join.IsMarkJoin());
 
     const bool outer = !(joinType == "Inner"sv || joinType.EndsWith("Semi"));
     EJoinSide joinSide = EJoinSide::Both;
@@ -555,6 +566,10 @@ NPhysicalConvertionUtils::TStageBody TPhysicalJoinBuilder::BuildPhysicalJoin(TEx
              "Join keys with IS NOT DISTINCT FROM semantics require the block hash join");
 
     Y_ENSURE(Join.JoinFilters.empty() || useBlockHashJoin, "Join filters are supported only with BlockHashJoin.");
+
+    // The mark join runs only in the block hash join, with the right side as the build side.
+    Y_ENSURE(!Join.IsMarkJoin() || (useBlockHashJoin && joinAlgo != NKikimr::NKqp::EJoinAlgoType::ReverseBlockJoin),
+             "A mark join requires the block hash join with the right build side");
 
     if (joinAlgo == NKikimr::NKqp::EJoinAlgoType::MapJoin && useBlockHashJoin) {
         joinAlgo = NKikimr::NKqp::EJoinAlgoType::GraceJoin;
@@ -704,7 +719,9 @@ NPhysicalConvertionUtils::TStageBody TPhysicalJoinBuilder::BuildPhysicalJoin(TEx
 
     if (useBlockHashJoin) {
         auto inputs = leftInputColumns;
-        if (!rightSideEmpty) {
+        if (Join.MarkOutput) {
+            inputs.push_back(Names.Get(*Join.MarkOutput));
+        } else if (!rightSideEmpty) {
             inputs.insert(inputs.end(), rightInputColumns.begin(), rightInputColumns.end());
         }
 
@@ -730,9 +747,11 @@ NPhysicalConvertionUtils::TStageBody TPhysicalJoinBuilder::BuildPhysicalOp(TExpr
     }
 
     Y_ENSURE(joinKind == "inner" || joinKind == "left" || joinKind == "leftonly" || joinKind == "leftsemi" ||
-             joinKind == "full" || joinKind == "cross");
+             joinKind == "full" || joinKind == "cross" || joinKind == "leftmark");
 
     if(BadTypesForBlockJoin(Join, Ctx)) {
+        // The decorrelation builds a mark join only for keys the block hash join takes.
+        Y_ENSURE(!Join.IsMarkJoin(), "Unsupported key types for a mark join");
         useBlockHashJoin = false;
     }
 

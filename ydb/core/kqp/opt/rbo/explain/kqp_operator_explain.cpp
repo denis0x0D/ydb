@@ -306,6 +306,14 @@ TString TOpJoin::ToString(TExprContext& ctx, const TInfoUnitRegistry& registry, 
         res << separator << registry.GetDebugName(left) << (equalNulls ? " IS NOT DISTINCT FROM " : "=") << registry.GetDebugName(right);
         separator = ", ";
     }
+    if (MarkOutput) {
+        res << "], Mark " << registry.GetDebugName(*MarkOutput) << ": [";
+        separator = "";
+        for (const auto& [left, right, equalNulls] : MarkKeys.Items()) {
+            res << separator << registry.GetDebugName(left) << "=" << registry.GetDebugName(right);
+            separator = ", ";
+        }
+    }
     res << "], Filters: [";
     for (size_t i = 0; i < JoinFilters.size(); i++) {
         res << JoinFilters[i].ToString();
@@ -340,6 +348,9 @@ NJson::TJsonValue TOpJoin::ToJson(ui32 explainFlags, const TInfoUnitRegistry& re
     res["JoinAlgo"] = joinAlgoName;
     if (!JoinKeys.Items().empty()) {
         res["Condition"] = FormatJoinKeys(JoinKeys, registry);
+    }
+    if (IsMarkJoin()) {
+        res["MarkCondition"] = FormatJoinKeys(MarkKeys, registry);
     }
     if (!JoinFilters.empty()) {
         NJson::TJsonValue filters(NJson::EJsonValueType::JSON_ARRAY);

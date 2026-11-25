@@ -595,6 +595,14 @@ const TStructExprType* GetDqJoinResultType(const TExprNode::TPtr& input, bool st
         rightTableLabels, join.JoinType(), join.JoinKeys(), ctx, isMultiget);
 }
 
+// A mark join keeps every left row and adds a three-valued Optional<Bool>: true for a match, null when only
+// nulls in the mark keys stop one, false otherwise.
+constexpr TStringBuf MarkJoinKind = "Mark";
+
+const TTypeAnnotationNode* MakeMarkType(TExprContext& ctx) {
+    return ctx.MakeType<TOptionalExprType>(ctx.MakeType<TDataExprType>(EDataSlot::Bool));
+}
+
 bool EnsureHashJoinCoreKindAndKeys(const TExprNode& joinTypeNode, TExprNode& leftKeysNode,
     TExprNode& rightKeysNode, TExprContext& ctx)
 {
@@ -603,9 +611,9 @@ bool EnsureHashJoinCoreKindAndKeys(const TExprNode& joinTypeNode, TExprNode& lef
     }
     const auto joinType = joinTypeNode.Content();
     if (joinType != "Inner" && joinType != "Left" && joinType != "LeftSemi" && joinType != "LeftOnly" &&
-        joinType != "Cross") {
+        joinType != "Cross" && joinType != MarkJoinKind) {
         ctx.AddError(TIssue(ctx.GetPosition(joinTypeNode.Pos()), TStringBuilder() << "Unknown join kind: " << joinType
-                    << ", supported: Inner, Left, LeftSemi, LeftOnly, Cross"));
+                    << ", supported: Inner, Left, LeftSemi, LeftOnly, Cross, Mark"));
         return false;
     }
 
@@ -655,7 +663,9 @@ TStatus AnnotateDqScalarHashJoinCore(const TExprNode::TPtr& node, TExprContext& 
     const auto& rightItemTypes = GetWideFlowOrStreamComponents(*rightInputNode.GetTypeAnn())->GetItems();
 
     TTypeAnnotationNode::TListType resultItems(leftItemTypes.begin(), leftItemTypes.end());
-    if (joinType != "LeftSemi" && joinType != "LeftOnly") {
+    if (joinType == MarkJoinKind) {
+        resultItems.push_back(MakeMarkType(ctx));
+    } else if (joinType != "LeftSemi" && joinType != "LeftOnly") {
         for (auto itemType : rightItemTypes) {
             if (joinType == "Left" && !itemType->IsOptionalOrNull()) {
                 itemType = ctx.MakeType<TOptionalExprType>(itemType);
@@ -709,7 +719,9 @@ TStatus AnnotateDqBlockHashJoinCore(const TExprNode::TPtr& node, TExprContext& c
     }
 
     // Add right side columns
-    if (joinType != "LeftSemi" && joinType != "LeftOnly") {
+    if (joinType == MarkJoinKind) {
+        resultItems.push_back(ctx.MakeType<TBlockExprType>(MakeMarkType(ctx)));
+    } else if (joinType != "LeftSemi" && joinType != "LeftOnly") {
         for (auto itemType : rightItemTypes) {
             if (joinType == "Left" && !itemType->IsOptionalOrNull()) {
                 itemType = ctx.MakeType<TOptionalExprType>(itemType);

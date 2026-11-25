@@ -207,19 +207,27 @@ TKqpKeyRanges MakeComputedKeyRanges(const TKqlReadTableRangesBase& readTable, co
     return ranges;
 }
 
-NMiniKQL::EJoinKind ParseHashJoinKind(const TExprNode& joinKindNode) {
+// The runtime takes a mark join as a LeftSemi join with the Mark setting.
+struct THashJoinKind {
+    NMiniKQL::EJoinKind Kind;
+    bool Mark = false;
+};
+
+THashJoinKind ParseHashJoinKind(const TExprNode& joinKindNode) {
     YQL_ENSURE(joinKindNode.IsAtom(), "Join kind should be atom");
     const auto joinKindStr = joinKindNode.Content();
     if (joinKindStr == "Inner") {
-        return NMiniKQL::EJoinKind::Inner;
+        return {NMiniKQL::EJoinKind::Inner};
     } else if (joinKindStr == "Left") {
-        return NMiniKQL::EJoinKind::Left;
+        return {NMiniKQL::EJoinKind::Left};
     } else if (joinKindStr == "LeftSemi") {
-        return NMiniKQL::EJoinKind::LeftSemi;
+        return {NMiniKQL::EJoinKind::LeftSemi};
     } else if (joinKindStr == "LeftOnly") {
-        return NMiniKQL::EJoinKind::LeftOnly;
+        return {NMiniKQL::EJoinKind::LeftOnly};
     } else if (joinKindStr == "Cross") {
-        return NMiniKQL::EJoinKind::Cross;
+        return {NMiniKQL::EJoinKind::Cross};
+    } else if (joinKindStr == NMiniKQL::MarkJoinKindName) {
+        return {NMiniKQL::EJoinKind::LeftSemi, /*mark=*/true};
     }
     YQL_ENSURE(false, "Unsupported join kind: " << joinKindStr);
 }
@@ -234,6 +242,13 @@ TVector<ui32> ExtractJoinColumnIndices(const TExprNode& tupleNode) {
     return indices;
 }
 
+ui32 ParseHashJoinKeyIndex(const TExprNode& value, TStringBuf name, size_t keyCount) {
+    YQL_ENSURE(value.IsCallable("Uint32"), "Setting " << name << " value must be Uint32");
+    const ui32 keyIndex = FromString<ui32>(value.Head().Content());
+    YQL_ENSURE(keyIndex < keyCount, "Setting " << name << " key index is out of range");
+    return keyIndex;
+}
+
 NMiniKQL::TBlockHashJoinSettings ParseHashJoinSettings(const TExprNode& settingsNode, size_t keyCount) {
     NMiniKQL::TBlockHashJoinSettings settings;
     for (const auto& setting : settingsNode.Children()) {
@@ -243,22 +258,23 @@ NMiniKQL::TBlockHashJoinSettings ParseHashJoinSettings(const TExprNode& settings
                 settings.BuildSide = NMiniKQL::EBuildSide::Left;
             }
         } else if (name == NMiniKQL::EqualNullsSettingName) {
-            const auto& value = *setting->Child(1);
-            YQL_ENSURE(value.IsCallable("Uint32"), "EqualNulls setting value must be Uint32");
-            const ui32 keyIndex = FromString<ui32>(value.Head().Content());
-            YQL_ENSURE(keyIndex < keyCount, "EqualNulls key index is out of range");
-            settings.EqualNullsKeys.push_back(keyIndex);
+            settings.EqualNullsKeys.push_back(ParseHashJoinKeyIndex(*setting->Child(1), name, keyCount));
+        } else if (name == NMiniKQL::MarkKeysSettingName) {
+            settings.MarkKeys.push_back(ParseHashJoinKeyIndex(*setting->Child(1), name, keyCount));
         }
     }
     return settings;
 }
 
-TGraceJoinRenames MakeHashJoinRenames(int leftWidth, int rightWidth, NMiniKQL::EJoinKind joinKind) {
+TGraceJoinRenames MakeHashJoinRenames(int leftWidth, int rightWidth, const THashJoinKind& joinKind) {
     TDqUserRenames renames{};
     for (int index = 0; index < leftWidth; ++index) {
         renames.emplace_back(index, EJoinSide::kLeft);
     }
-    if (joinKind != NMiniKQL::EJoinKind::LeftSemi && joinKind != NMiniKQL::EJoinKind::LeftOnly) {
+    if (joinKind.Mark) {
+        // The only right column of a mark join is the mark.
+        renames.emplace_back(0, EJoinSide::kRight);
+    } else if (joinKind.Kind != NMiniKQL::EJoinKind::LeftSemi && joinKind.Kind != NMiniKQL::EJoinKind::LeftOnly) {
         for (int index = 0; index < rightWidth; ++index) {
             renames.emplace_back(index, EJoinSide::kRight);
         }
@@ -434,7 +450,8 @@ TIntrusivePtr<IMkqlCallableCompiler> CreateKqlCompiler(const TKqlCompileContext&
                 wideStreamComponentsSize(leftInput) - 1, wideStreamComponentsSize(rightInput) - 1, joinKind);
 
 
-            const auto settings = ParseHashJoinSettings(*node.Child(7), leftKeyColumns.size());
+            auto settings = ParseHashJoinSettings(*node.Child(7), leftKeyColumns.size());
+            settings.Mark = joinKind.Mark;
 
             auto IsEmptyLambda = [](const TExprNode::TPtr input) -> bool {
                 auto lambda = TCoLambda(input);
@@ -463,7 +480,7 @@ TIntrusivePtr<IMkqlCallableCompiler> CreateKqlCompiler(const TKqlCompileContext&
                 };
             }
 
-            return ctx.PgmBuilder().DqBlockHashJoin(leftInput, rightInput, joinKind, leftKeyColumns, rightKeyColumns, graceJoinRenames.Left,
+            return ctx.PgmBuilder().DqBlockHashJoin(leftInput, rightInput, joinKind.Kind, leftKeyColumns, rightKeyColumns, graceJoinRenames.Left,
                                                     graceJoinRenames.Right, returnType, settings, leftFilter, rightFilter, commonFilter);
         });
 
@@ -490,8 +507,9 @@ TIntrusivePtr<IMkqlCallableCompiler> CreateKqlCompiler(const TKqlCompileContext&
             if (const auto maybeSettings = join.Settings()) {
                 settings = ParseHashJoinSettings(maybeSettings.Cast().Ref(), leftKeyColumns.size());
             }
+            settings.Mark = joinKind.Mark;
 
-            return ctx.PgmBuilder().DqScalarHashJoin(leftInput, rightInput, joinKind, leftKeyColumns, rightKeyColumns,
+            return ctx.PgmBuilder().DqScalarHashJoin(leftInput, rightInput, joinKind.Kind, leftKeyColumns, rightKeyColumns,
                                                      renames.Left, renames.Right, returnType, settings);
         });
 

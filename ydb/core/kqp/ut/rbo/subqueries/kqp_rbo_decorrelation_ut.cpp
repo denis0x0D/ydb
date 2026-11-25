@@ -834,6 +834,8 @@ Y_UNIT_TEST_SUITE(KqpRboDecorrelation) {
     Y_UNIT_TEST(NullableNotInUsesDisjointMatchAndNullSummaryBranches) {
         for (const bool correlated : {false, true}) {
             NTests::TIdTestContext f;
+            // Without the mark join a separate branch computes the null summary.
+            f.Config->SetEnableBlockHashJoinMark(false);
             const auto lookup = f.Id(), value = f.Id(), call = f.Id();
             auto left = f.Read({lookup});
             f.SetType(*left, {lookup});
@@ -870,11 +872,64 @@ Y_UNIT_TEST_SUITE(KqpRboDecorrelation) {
         }
     }
 
-    Y_UNIT_TEST(GenericInExistsInlinesIntoMap) {
+    Y_UNIT_TEST(NullableNotInUsesMarkJoin) {
+        for (const bool correlated : {false, true}) {
+            NTests::TIdTestContext f;
+            f.Config->SetEnableBlockHashJoinMark(true);
+            const auto lookup = f.Id(), value = f.Id(), call = f.Id();
+            auto left = f.Read({lookup});
+            f.SetType(*left, {lookup});
+            TIntrusivePtr<IOperator> right = f.Read({value});
+            if (correlated) {
+                TDependencyIUs captures;
+                captures.Add(f.Id(), TCapturedIU{lookup, left->GetIUType(lookup, f.ExprCtx)});
+                right = MakeIntrusive<TOpAddDependencies>(std::move(right), f.Pos, std::move(captures));
+            }
+            f.SetType(*right, {value});
+            f.Props.Subplans.Add(call, std::move(right), ESubplanType::IN_SUBPLAN, {lookup}, value);
+            f.Props.Subplans.RefreshDependencies(call);
+            auto filter = MakeIntrusive<TOpFilter>(std::move(left), f.Pos, MakeNegation(f.Column(call)));
+
+            TInlineGenericInExistsSubplanRule generic;
+            auto result = generic.SimpleMatchAndApply(std::move(filter), f.RboCtx, f.Props);
+            UNIT_ASSERT(!f.Props.Subplans.Contains(call));
+
+            // The call reads the mark as it is: NULL stays NULL under NOT.
+            auto& output = CastOperator<TOpMap>(*CastOperator<TOpFilter>(*result).GetInput());
+            UNIT_ASSERT(output.GetMapElements().Keys() == TUnorderedIUs{call});
+            auto& join = CastOperator<TOpJoin>(*output.GetInput());
+            UNIT_ASSERT_VALUES_EQUAL(join.JoinKind, "LeftMark");
+            UNIT_ASSERT(join.IsMarkJoin());
+            const auto mark = *join.MarkOutput;
+            UNIT_ASSERT(output.FindOutputElement(call)->GetExpression().GetInputIUs() == TUnorderedIUs{mark});
+            UNIT_ASSERT(join.GetOutputIUs().Contains(mark));
+            UNIT_ASSERT(join.GetOutputIUs().Contains(lookup));
+
+            // The lookup and the result are the mark key. Only the correlation groups the rows, as a null-safe
+            // key on the domain of the dependent join.
+            UNIT_ASSERT_VALUES_EQUAL(join.MarkKeys.Items().size(), 1);
+            UNIT_ASSERT(join.MarkKeys.Contains(lookup, value));
+            UNIT_ASSERT_VALUES_EQUAL(join.JoinKeys.Items().size(), correlated ? 1 : 0);
+            UNIT_ASSERT_VALUES_EQUAL(join.GetRightInput()->Kind == EOperator::DependentJoin, correlated);
+
+            // Only the domain reads the caller a second time: no summary branch reads the subplan again.
+            THashSet<const TReplicate*> hubs;
+            for (const auto& item : IterateSubtree(result.get())) {
+                if (item.Current->Kind == EOperator::Replicate) {
+                    hubs.insert(&CastOperator<TOpReplicate>(*item.Current).GetReplicate());
+                }
+            }
+            UNIT_ASSERT_VALUES_EQUAL(hubs.size(), correlated ? 1 : 0);
+            NTests::AssertIdInvariants(*result, f.Props);
+        }
+    }
+
+    Y_UNIT_TEST_TWIN(GenericInExistsInlinesIntoMap, MarkJoin) {
         for (const bool exists : {false, true}) {
             for (const bool correlated : {false, true}) {
                 for (const bool nullable : {false, true}) {
                     NTests::TIdTestContext f;
+                    f.Config->SetEnableBlockHashJoinMark(MarkJoin);
                     const auto lookup = f.Id(), value = f.Id(), call = f.Id(), output = f.Id();
                     auto left = f.Read({lookup});
                     f.SetType(*left, nullable ? TUnorderedIUs{lookup} : TUnorderedIUs{});
@@ -926,9 +981,19 @@ Y_UNIT_TEST_SUITE(KqpRboDecorrelation) {
                         }
                     }
                     UNIT_ASSERT(definition);
-                    const bool canBeNull = FindNode(definition->GetExpression().GetExpressionBody(),
-                        [](const TExprNode::TPtr& node) { return node->IsCallable("Nothing"); }) != nullptr;
+                    // The emulation spells the NULL out. With the mark join the call reads the mark as it is.
+                    const bool canBeNull = MarkJoin
+                        ? definition->IsColumnAccess()
+                        : !!FindNode(definition->GetExpression().GetExpressionBody(),
+                            [](const TExprNode::TPtr& node) { return node->IsCallable("Nothing"); });
                     UNIT_ASSERT_VALUES_EQUAL(canBeNull, !exists && nullable);
+
+                    size_t markJoins = 0;
+                    for (const auto& item : IterateSubtree(result.get())) {
+                        markJoins += item.Current->Kind == EOperator::Join && CastOperator<TOpJoin>(*item.Current).IsMarkJoin();
+                    }
+                    // An uncorrelated EXISTS only counts the rows of its subplan.
+                    UNIT_ASSERT_VALUES_EQUAL(markJoins, MarkJoin && (correlated || !exists) ? 1 : 0);
                     NTests::AssertIdInvariants(*result, f.Props);
                 }
             }

@@ -31,6 +31,11 @@ void ComputeAlisesForJoin(IOperator* left, const TColumnLineage& lineage, TVecto
     unionOfAliases = leftAliases;
 }
 
+// The CBO has no mark join. A left join matches its output rows and its keys.
+TString GetStatisticsJoinKind(const TString& joinKind) {
+    return joinKind == "LeftMark" ? "Left" : joinKind;
+}
+
 TOrderedIUs<> ComputeKeysAfterJoin(TOpJoin* join) {
     auto leftKeys = join->GetLeftInput()->Props.Metadata->KeyColumns;
     if (!JoinOutputsRight(join->JoinKind)) {
@@ -737,7 +742,7 @@ void TOpJoin::ComputeMetadata(TRBOContext& ctx, TPlanProps& planProps) {
     TVector<TJoinColumn> leftJoinKeys;
     TVector<TJoinColumn> rightJoinKeys;
 
-    for (const auto& [leftKey, rightKey, equalNulls] : JoinKeys.Items()) {
+    for (const auto& [leftKey, rightKey, equalNulls] : GetAllKeys()) {
         leftJoinKeys.push_back(StatisticsColumn(planProps.ColumnLineage, leftKey));
         rightJoinKeys.push_back(StatisticsColumn(planProps.ColumnLineage, rightKey));
         leftJoinKeys.back().EqualNulls = rightJoinKeys.back().EqualNulls = equalNulls;
@@ -756,13 +761,15 @@ void TOpJoin::ComputeMetadata(TRBOContext& ctx, TPlanProps& planProps) {
         leftJoinKeys, 
         rightJoinKeys,
         joinAlgo,
-        ConvertToJoinKind(JoinKind),
+        ConvertToJoinKind(GetStatisticsJoinKind(JoinKind)),
         FindCardHint(unionOfAliases, *hints.CardinalityHints),
         false,
         false,
         FindCardHint(unionOfAliases, *hints.BytesHints));
 
-    Props.Metadata->ColumnsCount = GetLeftInput()->Props.Metadata->ColumnsCount + GetRightInput()->Props.Metadata->ColumnsCount;
+    // A mark join adds only the mark to the left columns.
+    Props.Metadata->ColumnsCount = GetLeftInput()->Props.Metadata->ColumnsCount
+        + (IsMarkJoin() ? 1 : GetRightInput()->Props.Metadata->ColumnsCount);
     Props.Metadata->StorageType = CBOStats.StorageType;
     Props.Metadata->Type = CBOStats.Type;
 
@@ -835,7 +842,7 @@ void TOpJoin::ComputeStatistics(TRBOContext& ctx, TPlanProps& planProps) {
     TVector<TJoinColumn> leftJoinKeys;
     TVector<TJoinColumn> rightJoinKeys;
 
-    for (const auto& [leftKey, rightKey, equalNulls] : JoinKeys.Items()) {
+    for (const auto& [leftKey, rightKey, equalNulls] : GetAllKeys()) {
         leftJoinKeys.push_back(StatisticsColumn(planProps.ColumnLineage, leftKey));
         rightJoinKeys.push_back(StatisticsColumn(planProps.ColumnLineage, rightKey));
         leftJoinKeys.back().EqualNulls = rightJoinKeys.back().EqualNulls = equalNulls;
@@ -859,7 +866,7 @@ void TOpJoin::ComputeStatistics(TRBOContext& ctx, TPlanProps& planProps) {
         leftJoinKeys, 
         rightJoinKeys,
         Props.JoinAlgo.has_value() ? *Props.JoinAlgo : NKqp::EJoinAlgoType::Undefined,
-        ConvertToJoinKind(JoinKind),
+        ConvertToJoinKind(GetStatisticsJoinKind(JoinKind)),
         FindCardHint(unionOfAliases, *hints.CardinalityHints),
         false,
         false,
@@ -868,6 +875,12 @@ void TOpJoin::ComputeStatistics(TRBOContext& ctx, TPlanProps& planProps) {
     Props.Statistics->EBytes = CBOStats.ByteSize;
     Props.Statistics->ERows = CBOStats.Nrows;
     Props.Statistics->Selectivity = CBOStats.Selectivity;
+    if (IsMarkJoin()) {
+        // Every left row comes out once, with one more byte for the mark.
+        const auto& leftStatistics = *GetLeftInput()->Props.Statistics;
+        Props.Statistics->ERows = leftStatistics.ERows;
+        Props.Statistics->EBytes = leftStatistics.EBytes + leftStatistics.ERows;
+    }
 
     if (Props.JoinAlgo.has_value()) {
         Props.Cost = CBOStats.Cost;

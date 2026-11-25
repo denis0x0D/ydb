@@ -21,7 +21,7 @@ TIntrusivePtr<IOperator> TPullUpMapOverCBORule::SimpleMatchAndApply(const TIntru
             if (input->Kind == EOperator::Join) {
                 auto join = CastOperator<TOpJoin>(input);
                 const bool leftPreserved = join->JoinKind == "Cross" || join->JoinKind == "Left"
-                    || join->JoinKind == "LeftSemi" || join->JoinKind == "LeftOnly";
+                    || join->JoinKind == "LeftSemi" || join->JoinKind == "LeftOnly" || join->JoinKind == "LeftMark";
                 if (join->JoinKind != "Inner" && (join->GetLeftInput() != map || !leftPreserved)) {
                     continue;
                 }

@@ -15,15 +15,20 @@ TIntrusivePtr<IOperator> TBuildInitialCBOTreeRule::SimpleMatchAndApply(const TIn
     Y_UNUSED(ctx);
     Y_UNUSED(props);
 
-    auto containsJoins = [](const TIntrusivePtr<IOperator>& op) {
+    // The CBO has no mark join: it stays out of the trees, as a leaf of those above it.
+    auto isMarkJoin = [](const TIntrusivePtr<IOperator>& op) {
+        return op->Kind == EOperator::Join && CastOperator<TOpJoin>(op)->IsMarkJoin();
+    };
+
+    auto containsJoins = [&](const TIntrusivePtr<IOperator>& op) {
         TIntrusivePtr<IOperator> maybeJoin = op;
         if (op->Kind == EOperator::Filter) {
             maybeJoin = CastOperator<TOpFilter>(op)->GetInput();
         }
-        return (maybeJoin->Kind == EOperator::Join || maybeJoin->Kind == EOperator::CBOTree);
+        return (maybeJoin->Kind == EOperator::Join && !isMarkJoin(maybeJoin)) || maybeJoin->Kind == EOperator::CBOTree;
     };
 
-    if (input->Kind == EOperator::Join) {
+    if (input->Kind == EOperator::Join && !isMarkJoin(input)) {
         auto join = CastOperator<TOpJoin>(input);
         if (join->JoinFilters.empty() && !containsJoins(join->GetLeftInput()) && !containsJoins(join->GetRightInput())) {
             return MakeIntrusive<TOpCBOTree>(input, input->Pos);
